@@ -393,3 +393,104 @@ func TestExactlyOneWorkerEachFits(t *testing.T) {
 		t.Error("a host reduced to one worker per pool was not reported as exhausted")
 	}
 }
+
+// TestRoutineBacklogDoesNotCompoundIntoARunaway is the worst failure this
+// package has had, and it was an outage the tool caused rather than prevented.
+//
+// PHP-FPM's listen queue is the instantaneous socket accept backlog; it reads
+// 1-3 on any busy pool that is nowhere near its ceiling. Reading that as "out of
+// workers" made every scrape look saturated, and because the growth base is the
+// pool's own current size, each round multiplied the last: a pool whose real
+// demand never exceeded 10 concurrent workers grew to 614 over nine rounds and
+// took 24GiB of a 32GiB host. On a shared host it starved three pools that
+// genuinely needed 25 workers down to 10 to pay for it.
+func TestRoutineBacklogDoesNotCompoundIntoARunaway(t *testing.T) {
+	current := 20
+	for round := 0; round < 12; round++ {
+		plan := mustComputeWith(t,
+			Budget{TotalBytes: 32 << 30, ReserveBytes: 8 << 30, CPUs: 8},
+			[]Pool{{
+				Name: "noisy", ProcessManager: "dynamic", WorkerBytes: 40 * mb,
+				CurrentMaxChildren: current,
+				ObservedPeak:       10, // real demand, and it never moves
+				QueueDepth:         1,  // a routine accept backlog
+			}})
+		current = plan.Pools[0].MaxChildren
+	}
+
+	if current > 20 {
+		t.Errorf("twelve rounds of a 1-deep backlog grew the pool from 20 to %d "+
+			"while demand stayed at 10", current)
+	}
+}
+
+// TestGenuineSaturationStillGrows: the fix above must not disable growth. A pool
+// whose concurrency is clamped AT its ceiling with requests queueing is really
+// out of workers, and that is the case the growth branch exists for.
+func TestGenuineSaturationStillGrows(t *testing.T) {
+	current := 4
+	for round := 0; round < 10; round++ {
+		plan := mustComputeWith(t,
+			Budget{TotalBytes: 32 << 30, ReserveBytes: 8 << 30, CPUs: 8},
+			[]Pool{{
+				Name: "busy", ProcessManager: "dynamic", WorkerBytes: 40 * mb,
+				CurrentMaxChildren: current,
+				ObservedPeak:       current, // clamped by the ceiling
+				QueueDepth:         12,
+				HitMaxChildren:     true,
+			}})
+		current = plan.Pools[0].MaxChildren
+	}
+
+	if current <= 4 {
+		t.Errorf("a genuinely saturated pool stayed at %d over ten rounds", current)
+	}
+}
+
+// TestCPUsBoundWhatMemoryWouldAllow: memory alone is not sufficient authority.
+// A large host with a cheaply-measured worker authorised a max_children in the
+// hundreds of thousands — and a pm.start_servers to match, which PHP-FPM accepts
+// and then dies trying to honour.
+func TestCPUsBoundWhatMemoryWouldAllow(t *testing.T) {
+	plan := mustComputeWith(t,
+		Budget{TotalBytes: 256 << 30, ReserveBytes: 64 << 30, CPUs: 2},
+		[]Pool{{
+			Name: "cheap", ProcessManager: "dynamic", WorkerBytes: 64 << 10,
+			CurrentMaxChildren: 10, ObservedPeak: 500000,
+			QueueDepth: 5, HitMaxChildren: true,
+		}})
+
+	p := plan.Pools[0]
+	if p.MaxChildren > 2*50 {
+		t.Errorf("max_children = %d on a 2-core host; memory was the only bound", p.MaxChildren)
+	}
+	if p.StartServers > p.MaxChildren {
+		t.Errorf("start_servers %d exceeds max_children %d", p.StartServers, p.MaxChildren)
+	}
+}
+
+// TestUnknownCPUCountKeepsTheOldBehaviour: a host whose core count could not be
+// detected must still get a plan, bounded by memory alone.
+func TestUnknownCPUCountKeepsTheOldBehaviour(t *testing.T) {
+	plan := mustComputeWith(t,
+		Budget{TotalBytes: 8 << 30, ReserveBytes: 2 << 30, CPUs: 0},
+		[]Pool{{
+			Name: "w", ProcessManager: "dynamic", WorkerBytes: 50 * mb, ObservedPeak: 20,
+		}})
+
+	if plan.Pools[0].MaxChildren < 20 {
+		t.Errorf("max_children = %d with an unknown core count; memory allowed far more",
+			plan.Pools[0].MaxChildren)
+	}
+}
+
+func mustComputeWith(t *testing.T, b Budget, pools []Pool) Plan {
+	t.Helper()
+
+	plan, err := Compute(b, pools, Options{})
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+
+	return plan
+}

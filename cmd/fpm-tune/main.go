@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -63,7 +65,8 @@ func run(args []string) error {
 func usage() {
 	fmt.Fprintf(os.Stderr, `fpm-tune %s — size PHP-FPM pools against available memory
 
-  fpm-tune plan     show what would change, and why. Writes nothing.
+  fpm-tune plan     show what would change, and why. Changes no PHP-FPM
+                    configuration; records the observation (see -no-learn).
   fpm-tune apply    write the pool settings and reload PHP-FPM.
   fpm-tune serve    keep watching and adjusting, with metrics on /metrics.
   fpm-tune version
@@ -175,7 +178,10 @@ func runPlan(args []string) error {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	c := registerCommon(fs)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "fpm-tune plan — propose pool sizes without changing anything\n\n")
+		fmt.Fprintf(os.Stderr, "fpm-tune plan — propose pool sizes without changing "+
+			"any PHP-FPM configuration.\n\nIt does record what it observed, to the state file, so that "+
+			"running it\non a schedule builds a real baseline before apply is ever used. -no-learn\n"+
+			"turns that off.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -243,7 +249,7 @@ func runApply(args []string) error {
 
 	// Report what happened before returning any error: an operator whose reload
 	// failed needs to know which pools were involved.
-	renderApplied(applied, *dryRun)
+	renderApplied(applied, *dryRun, applyErr)
 
 	if applyErr != nil {
 		return applyErr
@@ -260,7 +266,7 @@ func runApply(args []string) error {
 	return nil
 }
 
-func renderApplied(res apply.Result, dryRun bool) {
+func renderApplied(res apply.Result, dryRun bool, err error) {
 	if len(res.Outcomes) == 0 {
 		fmt.Println("No pools to consider.")
 
@@ -275,6 +281,17 @@ func renderApplied(res apply.Result, dryRun bool) {
 	_ = tw.Flush()
 
 	switch {
+	case len(res.RollbackFailed) > 0:
+		// The most important line this command can print. Nothing is broken yet
+		// — the master was never signalled — but the rejected configuration is
+		// on disk, and the next reload from any source will adopt it.
+		fmt.Printf("\nROLLBACK FAILED. The rejected configuration is still in place:\n  %s\n"+
+			"PHP-FPM has not been reloaded, so nothing is broken yet — but the next reload\n"+
+			"from any source will adopt it and the master will not come back. Remove these\n"+
+			"files before anything reloads php-fpm.\n",
+			strings.Join(res.RollbackFailed, "\n  "))
+	case err != nil:
+		fmt.Printf("\nNothing was applied: %v\n", err)
 	case dryRun:
 		fmt.Println("\nDry run: the configuration was rendered and validated, then discarded.")
 	case res.RolledBack:
@@ -297,33 +314,53 @@ func newLogger(verbose bool) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// parseBytes accepts plain bytes or a K/M/G/T suffix, so an operator can write
-// --memory 8G rather than counting zeroes.
+// parseBytes reads a memory size.
+//
+// Accepts a plain byte count or a K/M/G/T suffix, with an optional "i" and an
+// optional trailing "B" — so 8G, 8GB, 8Gi and 8GiB all mean the same thing.
+// Every unit is binary; the "i" is accepted because that is how this tool PRINTS
+// sizes, and a program that will not read its own output is a trap.
+//
+// Anything left over after the number and the suffix is an error rather than
+// something to ignore. Sscanf stopped at the first non-digit and reported
+// success, so --reserve 512MB parsed as 512 BYTES and silently handed the whole
+// host to workers — the one outcome this tool exists to prevent, produced by a
+// spelling of the unit that looks entirely reasonable.
 func parseBytes(raw string) (int64, error) {
-	if raw == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return 0, fmt.Errorf("empty size")
 	}
 
-	mult := int64(1)
-	digits := raw
+	// Peel the optional trailing B, then the optional i, then the unit.
+	digits := strings.TrimSuffix(strings.TrimSuffix(trimmed, "B"), "b")
+	digits = strings.TrimSuffix(strings.TrimSuffix(digits, "i"), "I")
 
-	switch raw[len(raw)-1] {
-	case 'K', 'k':
-		mult, digits = 1<<10, raw[:len(raw)-1]
-	case 'M', 'm':
-		mult, digits = 1<<20, raw[:len(raw)-1]
-	case 'G', 'g':
-		mult, digits = 1<<30, raw[:len(raw)-1]
-	case 'T', 't':
-		mult, digits = 1<<40, raw[:len(raw)-1]
+	mult := int64(1)
+	if digits != "" {
+		switch digits[len(digits)-1] {
+		case 'K', 'k':
+			mult, digits = 1<<10, digits[:len(digits)-1]
+		case 'M', 'm':
+			mult, digits = 1<<20, digits[:len(digits)-1]
+		case 'G', 'g':
+			mult, digits = 1<<30, digits[:len(digits)-1]
+		case 'T', 't':
+			mult, digits = 1<<40, digits[:len(digits)-1]
+		}
 	}
 
-	var n int64
-	if _, err := fmt.Sscanf(digits, "%d", &n); err != nil {
-		return 0, fmt.Errorf("%q is not a size (try 512M or 8G)", raw)
+	// ParseInt rather than Sscanf: it rejects what it cannot consume instead of
+	// stopping at it and reporting success.
+	n, err := strconv.ParseInt(strings.TrimSpace(digits), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a size (try 512M, 8G or 8GiB)", raw)
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("%q is not a positive size", raw)
+	}
+	if n > (1<<63-1)/mult {
+		return 0, fmt.Errorf("%q is too large", raw)
 	}
 
 	return n * mult, nil

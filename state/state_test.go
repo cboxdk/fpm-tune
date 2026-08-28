@@ -170,18 +170,82 @@ func TestEstimateRisesFastAndFallsSlow(t *testing.T) {
 			"minute would find the pool over-provisioned with workers", afterFirstQuiet/mb)
 	}
 
-	for i := 0; i < 120; i++ {
+	// Over a full day of 50MB workers it comes all the way back down, so the
+	// pool is not pinned to its worst hour and the quiet part of the day is
+	// usable.
+	for i := 0; i < 24*60; i++ {
 		s.Learn(steady(50*mb, now.Add(time.Duration(60+i)*time.Minute)), opts)
 	}
 	if released := s.Pools["app"].TypicalPeakBytes; released > 60*mb {
-		t.Errorf("the estimate stayed at %dMB after two hours of 50MB workers; "+
-			"the pool is pinned to its worst hour and the quiet day is wasted", released/mb)
+		t.Errorf("the estimate stayed at %dMB after a day of 50MB workers; "+
+			"the pool is pinned to its worst hour", released/mb)
 	}
 
 	// The spike is remembered, it is just not what the pool is sized on.
 	if s.Pools["app"].HighWaterBytes != 150*mb {
 		t.Errorf("high water = %dMB, want 150MB", s.Pools["app"].HighWaterBytes/mb)
 	}
+}
+
+// TestDecayRateIsIndependentOfTheScrapeInterval is the property that makes the
+// asymmetry mean anything.
+//
+// The downward weight used to be per SAMPLE, which the scrape rate then silently
+// multiplied: 0.05 per sample at a thirty-second interval is a twelve-minute
+// half-life. A quiet night collapsed the cost estimate in twenty minutes while
+// the concurrency peak was deliberately held for a day, so the pool was sized
+// for many cheap workers and the morning made them expensive again — measured at
+// 147 workers of 100MiB configured on an 8GiB host, which is the OOM this whole
+// tool exists to prevent, manufactured by its own learner.
+//
+// Expressed as a half-life in time, the sampling rate cannot change it.
+func TestDecayRateIsIndependentOfTheScrapeInterval(t *testing.T) {
+	opts := Options{}.Defaults()
+
+	fellBelow := func(interval time.Duration) time.Duration {
+		s := New()
+		base := time.Now()
+		s.Learn(steadyAt("p", 100*mb, base), opts)
+
+		for i := 1; i <= 100000; i++ {
+			at := base.Add(time.Duration(i) * interval)
+			s.Learn(steadyAt("p", 30*mb, at), opts)
+			if s.Pools["p"].TypicalPeakBytes <= 65*mb {
+				return time.Duration(i) * interval
+			}
+		}
+
+		return 0
+	}
+
+	fast := fellBelow(5 * time.Second)
+	slow := fellBelow(5 * time.Minute)
+
+	t.Logf("halfway after %s when sampled every 5s, %s when sampled every 5m", fast, slow)
+
+	if fast == 0 || slow == 0 {
+		t.Fatal("the estimate never fell halfway")
+	}
+
+	// Within one coarse sample of each other.
+	diff := fast - slow
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 10*time.Minute {
+		t.Errorf("sampling every 5s took %s but every 5m took %s; the scrape rate "+
+			"is changing how fast the estimate falls", fast, slow)
+	}
+	if fast < time.Hour {
+		t.Errorf("halfway in %s is not a half-life that outlasts a quiet night", fast)
+	}
+}
+
+func steadyAt(pool string, rss int64, at time.Time) Observation {
+	return Observation{Pool: pool, At: at, Workers: []WorkerSample{
+		{RSSBytes: rss, Requests: 300},
+		{RSSBytes: rss, Requests: 300},
+	}}
 }
 
 // TestConfidenceNeedsBothSamplesAndTime: samples alone would let a tight polling

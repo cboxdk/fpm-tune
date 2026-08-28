@@ -27,8 +27,23 @@ type PoolView struct {
 	// CurrentMaxChildren is the configured pm.max_children, read from the
 	// effective configuration rather than inferred from the process count — a
 	// pool that has never been busy runs fewer workers than it is allowed.
+	//
+	// Zero means UNKNOWN, not zero: it is also what a failed `php-fpm -tt`
+	// produces. See MaxChildrenKnown.
 	CurrentMaxChildren int
-	ProcessManager     string
+
+	// MaxChildrenKnown distinguishes "the pool allows no workers" from "we could
+	// not read the configuration".
+	//
+	// They are the same value and opposite situations. Parsing the effective
+	// config shells out to php-fpm, which fails for reasons that have nothing to
+	// do with this pool — an unrelated include with a syntax error, the binary
+	// mid-upgrade, a permissions problem — and the unknown was then treated as a
+	// pool with no configured ceiling. That deleted the bootstrap floor and, for
+	// an idle pool, made it look brand new and eligible for the entire budget.
+	MaxChildrenKnown bool
+
+	ProcessManager string
 
 	// ObservedPeak is pm.max_active_processes: the most workers this pool has
 	// had busy at once since it started.
@@ -121,7 +136,7 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 		view.ObservedPeak = int(pool.MaxActiveProcesses)
 		view.QueueDepth = pool.ListenQueue
 		view.MaxChildrenReached = pool.MaxChildrenReached
-		view.CurrentMaxChildren = configuredMaxChildren(pool)
+		view.CurrentMaxChildren, view.MaxChildrenKnown = configuredMaxChildren(pool)
 
 		view.Workers = make([]state.WorkerSample, 0, len(pool.Processes))
 		for _, proc := range pool.Processes {
@@ -143,16 +158,27 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 // The live process count is not a substitute: a pool that has never been busy
 // runs far fewer workers than it is allowed, and sizing against that would
 // ratchet every quiet pool down to nothing.
-func configuredMaxChildren(pool phpfpm.Pool) int {
+func configuredMaxChildren(pool phpfpm.Pool) (int, bool) {
 	raw, ok := pool.Config["pm.max_children"]
 	if !ok {
-		return 0
+		return 0, false
 	}
 
 	n, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || n < 0 {
-		return 0
+	if err != nil || n <= 0 {
+		return 0, false
 	}
 
-	return n
+	// A configured ceiling in the millions is a typo or a parse gone wrong, not
+	// an instruction. Believing it overflows the byte arithmetic downstream.
+	if n > maxPlausibleChildren {
+		return 0, false
+	}
+
+	return n, true
 }
+
+// maxPlausibleChildren bounds what is accepted as a configured ceiling. Beyond
+// this the number is not a configuration, and multiplying it by a per-worker
+// cost wraps int64.
+const maxPlausibleChildren = 100_000

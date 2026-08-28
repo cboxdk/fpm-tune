@@ -24,12 +24,14 @@ func IncludeDirOf(configPath string) string {
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !strings.HasPrefix(line, "include") {
+		key, value, found := strings.Cut(line, "=")
+		if !found {
 			continue
 		}
-
-		_, value, found := strings.Cut(line, "=")
-		if !found {
+		// Exactly "include", not any directive starting with it: an
+		// include_path line above the real include returned that instead, and
+		// pool fragments written into /usr/share/php are read by nobody.
+		if strings.TrimSpace(key) != "include" {
 			continue
 		}
 

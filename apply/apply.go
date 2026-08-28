@@ -44,9 +44,18 @@ type Master struct {
 	Binary     string
 	ConfigPath string
 
-	// PID is the running master to signal. Zero means write the files but do not
-	// reload, which is what a provisioning run wants before PHP-FPM has started.
+	// PID is the running master to signal.
+	//
+	// Zero means "no master is running": write the files and do not reload,
+	// which is what provisioning wants before PHP-FPM starts. It must NOT be
+	// used for "a master is running but I could not find it" — that combination
+	// writes configuration, skips the reload, records the pools as applied and
+	// never retries. Set NoMasterExpected to say the zero is deliberate.
 	PID int
+
+	// NoMasterExpected confirms that PID == 0 means there is nothing to reload,
+	// rather than a master this caller failed to identify.
+	NoMasterExpected bool
 
 	// DropInDir is where per-pool fragments are written.
 	DropInDir string
@@ -103,6 +112,7 @@ const (
 	ActionUnchanged Action = "unchanged"
 	ActionTooSoon   Action = "too soon"
 	ActionTooSmall  Action = "too small"
+	ActionUnknown   Action = "not written"
 )
 
 // Outcome is what happened to one pool.
@@ -123,8 +133,19 @@ type Result struct {
 	Reloaded bool
 
 	// RolledBack reports that something went wrong and the previous
-	// configuration was restored.
+	// configuration WAS restored. Only true when every file went back.
 	RolledBack bool
+
+	// RollbackFailed reports the case that must never be confused with the one
+	// above: something went wrong, and putting it back did not work either.
+	//
+	// The files php-fpm just rejected are still in the pool directory. The
+	// master has not been reloaded, so nothing is broken yet — but the next
+	// reload from any source, a logrotate or an unrelated deploy, adopts them,
+	// and a master that fails to initialise does not come back. Verified against
+	// a real master: a drop-in naming a pool that no longer exists exits `-t`
+	// with 78 and kills the master permanently on the next SIGUSR2.
+	RollbackFailed []string
 }
 
 // Changed returns the pools that were actually written.
@@ -142,6 +163,10 @@ func (r Result) Changed() []Outcome {
 // ErrValidationFailed reports that PHP-FPM rejected the rendered configuration.
 // Nothing was reloaded, and the previous drop-ins have been restored.
 var ErrValidationFailed = errors.New("php-fpm rejected the rendered configuration")
+
+// ErrMasterUnknown reports that no master PID was given and the caller did not
+// confirm that none is expected. See Master.NoMasterExpected.
+var ErrMasterUnknown = errors.New("no php-fpm master to reload, and none was expected to be absent")
 
 // ErrMasterDidNotSurvive reports that the master did not come back from the
 // reload. The previous configuration has been restored and reloaded again.
@@ -190,7 +215,7 @@ func Apply(
 		return result, validateRendered(ctx, master, changes, opts, log)
 	}
 
-	backups, err := writeDropIns(master, changes, opts)
+	backups, err := writeDropIns(master, changes, opts, log)
 	if err != nil {
 		return result, err
 	}
@@ -198,10 +223,26 @@ func Apply(
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
 		// Nothing has been signalled yet, so restoring here means the running
 		// master never saw any of this.
-		restore(backups, log)
-		result.RolledBack = true
+		result.RollbackFailed = restore(backups, log)
+		result.RolledBack = len(result.RollbackFailed) == 0
+
+		if !result.RolledBack {
+			return result, fmt.Errorf("%w: %w; AND the rejected configuration could not be "+
+				"removed from %s — the next reload from any source will adopt it",
+				ErrValidationFailed, err, strings.Join(result.RollbackFailed, ", "))
+		}
 
 		return result, fmt.Errorf("%w: %w", ErrValidationFailed, err)
+	}
+
+	if master.PID <= 0 && !master.NoMasterExpected {
+		// Refusing here rather than writing is the whole point: a caller that
+		// cannot identify the master would otherwise leave new configuration on
+		// disk, never reload it, and record it as done.
+		result.RollbackFailed = restore(backups, log)
+		result.RolledBack = len(result.RollbackFailed) == 0
+
+		return result, ErrMasterUnknown
 	}
 
 	if master.PID <= 0 {
@@ -217,8 +258,8 @@ func Apply(
 	if err := phpfpm.ReloadAndWait(ctx, master.PID, opts.SettleTime, log); err != nil {
 		log.Error("Master did not survive the reload; restoring the previous configuration",
 			"pid", master.PID, "error", err)
-		restore(backups, log)
-		result.RolledBack = true
+		result.RollbackFailed = restore(backups, log)
+		result.RolledBack = len(result.RollbackFailed) == 0
 
 		// Best effort: the master is already gone, so this may do nothing. It
 		// costs one signal and is the difference between a host that recovers
@@ -248,6 +289,16 @@ func Apply(
 // decide reports whether a pool's plan is worth a reload.
 func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) (Outcome, bool) {
 	out := Outcome{Pool: pp.Name, To: pp.MaxChildren, Action: ActionUnchanged}
+
+	// A pool whose current configuration could not be read is never written.
+	// The plan reserved memory for it so a neighbour could not take it, but
+	// setting a ceiling requires knowing the one being replaced.
+	if pp.Unknown {
+		out.Action = ActionUnknown
+		out.Reason = "current configuration could not be read"
+
+		return out, false
+	}
 
 	var ps *state.PoolState
 	if st != nil {
@@ -313,13 +364,19 @@ type backup struct {
 }
 
 // writeDropIns saves the current fragments and writes the new ones.
-func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options) ([]backup, error) {
+func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options, log *slog.Logger) ([]backup, error) {
 	if err := os.MkdirAll(opts.BackupDir, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create backup directory: %w", err)
 	}
 
 	backups := make([]backup, 0, len(changes))
 	for _, pp := range changes {
+		if err := safePoolName(pp.Name); err != nil {
+			restore(backups, log)
+
+			return nil, err
+		}
+
 		path := DropInPath(master.DropInDir, pp.Name)
 
 		b := backup{path: path}
@@ -327,15 +384,15 @@ func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options) ([]b
 			b.content, b.existed = content, true
 			b.saved = filepath.Join(opts.BackupDir, filepath.Base(path)+".bak")
 			if err := os.WriteFile(b.saved, content, 0o644); err != nil {
-				restore(backups, nil)
+				restore(backups, log)
 
 				return nil, fmt.Errorf("cannot back up %s: %w", path, err)
 			}
 		}
 		backups = append(backups, b)
 
-		if err := os.WriteFile(path, Render(pp), 0o644); err != nil {
-			restore(backups, nil)
+		if err := writeAtomic(path, Render(pp)); err != nil {
+			restore(backups, log)
 
 			return nil, fmt.Errorf("cannot write %s: %w", path, err)
 		}
@@ -345,11 +402,22 @@ func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options) ([]b
 }
 
 // restore puts the previous fragments back.
-func restore(backups []backup, log *slog.Logger) {
+// restore puts the previous fragments back, and reports the ones it could not.
+//
+// The return value is the point. This used to log and move on while the caller
+// set RolledBack unconditionally, so `fpm-tune apply` printed "the previous
+// configuration has been restored" with the configuration php-fpm had just
+// rejected still sitting in the pool directory, armed for whatever reloads next.
+func restore(backups []backup, log *slog.Logger) []string {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+
+	var failed []string
 	for _, b := range backups {
 		var err error
 		if b.existed {
-			err = os.WriteFile(b.path, b.content, 0o644)
+			err = writeAtomic(b.path, b.content)
 		} else {
 			// There was no fragment before, so undoing means removing ours
 			// rather than leaving an empty one behind.
@@ -358,13 +426,52 @@ func restore(backups []backup, log *slog.Logger) {
 				err = nil
 			}
 		}
-		if err != nil && log != nil {
+		if err != nil {
 			log.Error("Could not restore previous configuration", "path", b.path, "error", err)
+			failed = append(failed, b.path)
+
+			// The saved copy is the only remaining route back, so it stays.
+			continue
 		}
 		if b.saved != "" {
 			_ = os.Remove(b.saved)
 		}
 	}
+
+	return failed
+}
+
+// writeAtomic writes a file via a temporary name and a rename, so a reader never
+// sees a half-written fragment and a crash never leaves one.
+func writeAtomic(path string, content []byte) error {
+	dir := filepath.Dir(path)
+
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpName, path)
 }
 
 // cleanup removes the saved copies once a change has stuck.
@@ -381,7 +488,7 @@ func cleanup(backups []backup, log *slog.Logger) {
 
 // validateRendered checks a change set without keeping it.
 func validateRendered(ctx context.Context, master Master, changes []allocate.PoolPlan, opts Options, log *slog.Logger) error {
-	backups, err := writeDropIns(master, changes, opts)
+	backups, err := writeDropIns(master, changes, opts, log)
 	if err != nil {
 		return err
 	}
@@ -409,6 +516,31 @@ func record(st *state.State, changes []allocate.PoolPlan, at time.Time) {
 // anything the distribution or the operator has already placed there.
 func DropInPath(dir, pool string) string {
 	return filepath.Join(dir, "zz-fpm-tune-"+pool+".conf")
+}
+
+// ErrUnsafePoolName reports a pool name that cannot be used as a filename.
+var ErrUnsafePoolName = errors.New("pool name is not usable as a filename")
+
+// safePoolName rejects a name that would escape the drop-in directory.
+//
+// Pool names come from section headers in root-owned configuration, so this is
+// hardening rather than a live hole — but php-fpm genuinely accepts a section
+// called [a/../../tmp/pwn] and reports it verbatim from `-tt`, so the name that
+// reaches this package is not guaranteed to be a bare word. Joining it into a
+// path put files outside the pool directory entirely.
+func safePoolName(pool string) error {
+	switch {
+	case pool == "":
+		return fmt.Errorf("%w: empty", ErrUnsafePoolName)
+	case strings.ContainsAny(pool, `/\`):
+		return fmt.Errorf("%w: %q contains a path separator", ErrUnsafePoolName, pool)
+	case strings.ContainsAny(pool, "\n\r\x00"):
+		return fmt.Errorf("%w: %q contains a control character", ErrUnsafePoolName, pool)
+	case pool == "." || pool == "..":
+		return fmt.Errorf("%w: %q", ErrUnsafePoolName, pool)
+	}
+
+	return nil
 }
 
 // Render produces one pool's fragment.

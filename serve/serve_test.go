@@ -309,3 +309,19 @@ func modTime(t *testing.T, path string) time.Time {
 
 	return info.ModTime()
 }
+
+// TestIncludePathIsNotAnInclude: the match was a prefix, so an include_path
+// directive above the real include won. Pool fragments then went to
+// /usr/share/php, which php-fpm never reads — a silent no-op, the worst failure
+// shape for a tool that reports success.
+func TestIncludePathIsNotAnInclude(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "php-fpm.conf")
+	body := "[global]\ninclude_path = /usr/share/php/lib\ninclude = /etc/php-fpm.d/*.conf\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := IncludeDirOf(path); got != "/etc/php-fpm.d" {
+		t.Errorf("IncludeDirOf = %q, want /etc/php-fpm.d", got)
+	}
+}

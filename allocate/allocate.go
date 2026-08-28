@@ -24,6 +24,12 @@ type Budget struct {
 	// TotalBytes is the machine's or container's memory ceiling.
 	TotalBytes int64
 
+	// CPUs is the host's effective core count. It bounds how many workers are
+	// worth running regardless of how much memory is free — 192GiB of budget
+	// against a cheap worker authorised 1.3 million children, which PHP-FPM
+	// will accept and then die trying to honour.
+	CPUs int
+
 	// ReserveBytes is held back for everything that is not a PHP-FPM worker:
 	// the operating system, the web server, opcache's shared segment, and the
 	// database if it shares the box. Workers are allocated from what is left.
@@ -86,6 +92,14 @@ type Pool struct {
 
 	// Ceiling caps this pool regardless of available budget. Zero means no cap.
 	Ceiling int
+
+	// Unknown marks a pool whose current configuration could not be read, or
+	// which could not be scraped at all.
+	//
+	// Such a pool still occupies memory and must be allocated for, but nothing
+	// may be WRITTEN for it: proposing a new ceiling requires knowing the old
+	// one, and a failed `php-fpm -tt` is not evidence about a pool's needs.
+	Unknown bool
 }
 
 // Options tunes the allocation. The zero value is usable; Defaults documents
@@ -104,6 +118,14 @@ type Options struct {
 	// DefaultFloor is the floor for pools that do not set one.
 	DefaultFloor int
 
+	// MaxWorkersPerCPU caps a pool regardless of available memory.
+	//
+	// PHP work is largely I/O-bound, so a generous multiple of the core count is
+	// reasonable — but memory alone is not a sufficient authority. Without this,
+	// a large host with a cheaply-measured worker produces a max_children in the
+	// hundreds of thousands, and a pm.start_servers to match.
+	MaxWorkersPerCPU int
+
 	// Spare ratios derive dynamic pm's start/min/max spare servers from
 	// max_children.
 	StartServersRatio float64
@@ -121,6 +143,9 @@ func (o Options) Defaults() Options {
 	}
 	if o.DefaultFloor <= 0 {
 		o.DefaultFloor = 2
+	}
+	if o.MaxWorkersPerCPU <= 0 {
+		o.MaxWorkersPerCPU = 50
 	}
 	if o.StartServersRatio <= 0 {
 		o.StartServersRatio = 0.25
@@ -161,6 +186,9 @@ type PoolPlan struct {
 	// Measured records whether the sizing used observed worker memory or a
 	// bootstrap estimate, so a reader knows how much to trust the number.
 	Measured bool
+
+	// Unknown marks a pool that must not be written. See Pool.Unknown.
+	Unknown bool
 
 	// Reason explains the number in one line, for `fpm-tune plan` output.
 	Reason string
@@ -238,9 +266,16 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	// What each pool would take if the budget were unlimited.
 	wants := make([]int, len(pools))
 	floors := make([]int, len(pools))
+	cpuCap := cpuCeiling(budget, opts)
 	for i, p := range pools {
 		floors[i] = poolFloor(p, opts)
 		wants[i] = poolWant(p, floors[i], opts)
+		if cpuCap > 0 && wants[i] > cpuCap {
+			wants[i] = cpuCap
+		}
+		if cpuCap > 0 && floors[i] > cpuCap {
+			floors[i] = cpuCap
+		}
 	}
 
 	granted, remaining, reduced, err := allocateFloors(pools, floors, allocatable, &plan)
@@ -264,6 +299,7 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			Want:        wants[i],
 			DemandUnmet: granted[i] < wants[i],
 			Measured:    p.Measured,
+			Unknown:     p.Unknown,
 			Reason:      reason(p, granted[i], wants[i], floors[i], reduced),
 		}
 		if pp.DemandUnmet {
@@ -435,6 +471,18 @@ func canStillGive(pools []Pool, granted, wants []int, remaining int64) bool {
 	return false
 }
 
+// cpuCeiling is the most workers one pool may be given regardless of memory.
+//
+// Zero when the core count is unknown, in which case memory is the only bound
+// available and the caller gets the old behaviour.
+func cpuCeiling(budget Budget, opts Options) int {
+	if budget.CPUs <= 0 {
+		return 0
+	}
+
+	return budget.CPUs * opts.MaxWorkersPerCPU
+}
+
 // poolFloor is the fewest workers a pool may be reduced to.
 func poolFloor(p Pool, opts Options) int {
 	floor := p.Floor
@@ -461,12 +509,23 @@ func poolFloor(p Pool, opts Options) int {
 func poolWant(p Pool, floor int, opts Options) int {
 	want := int(float64(p.ObservedPeak) * opts.HeadroomFactor)
 
-	if p.HitMaxChildren || p.QueueDepth > 0 {
+	if p.HitMaxChildren {
 		base := p.CurrentMaxChildren
 		if p.ObservedPeak > base {
 			base = p.ObservedPeak
 		}
 		grown := int(float64(base) * opts.GrowthFactor)
+
+		// Bounded by evidence. The growth branch exists because a saturated
+		// pool's demand is clamped and we cannot see how far past the ceiling it
+		// goes — but the base is the pool's own previous size, so without a
+		// bound this is positive feedback with no reference to demand at all.
+		// A pool may grow past what it has been seen to need, but not without
+		// limit: one growth step beyond the headroom it already has.
+		if evidence := int(float64(p.ObservedPeak) * opts.HeadroomFactor * opts.GrowthFactor); grown > evidence {
+			grown = evidence
+		}
+
 		if grown > want {
 			want = grown
 		}
@@ -542,6 +601,8 @@ func reason(p Pool, granted, want, floor int, exhausted bool) string {
 	}
 
 	switch {
+	case p.Unknown:
+		return "current configuration could not be read; left alone"
 	case exhausted:
 		return fmt.Sprintf("host oversubscribed; held at %d (floor %d), %s %s/worker",
 			granted, floor, source, humanBytes(p.WorkerBytes))

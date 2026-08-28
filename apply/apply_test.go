@@ -279,7 +279,7 @@ func TestNoRunningMasterWritesWithoutReloading(t *testing.T) {
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
 		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
-		PID: 0,
+		PID: 0, NoMasterExpected: true,
 	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 
 	if err != nil {
@@ -346,6 +346,7 @@ func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
 		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		NoMasterExpected: true,
 	}, st, Options{BackupDir: backupDir}, nil)
 
 	if err != nil {
@@ -360,5 +361,127 @@ func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 	}
 	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the change was not recorded: %+v", ps)
+	}
+}
+
+// TestUnidentifiedMasterIsRefusedNotProvisioned is the silent total failure this
+// guard exists for.
+//
+// PID == 0 used to mean "provisioning: write the files, there is nothing to
+// reload", which is correct before PHP-FPM starts and catastrophic afterwards.
+// The official php:8.3-fpm image ships `pid` commented out, so there is no pid
+// file to read — the master was never identified, the files were written, no
+// reload happened, and the pools were recorded as applied. The next run then
+// reported "unchanged" forever. Files on disk, master untouched, no retry, and
+// nothing above Info in the log.
+func TestUnidentifiedMasterIsRefusedNotProvisioned(t *testing.T) {
+	dir := t.TempDir()
+	st := state.New()
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 40}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		// A master IS running; we simply could not find it.
+		PID: 0, NoMasterExpected: false,
+	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+
+	if !errors.Is(err, ErrMasterUnknown) {
+		t.Fatalf("err = %v, want ErrMasterUnknown", err)
+	}
+	if res.Reloaded {
+		t.Error("something was reloaded with no master identified")
+	}
+
+	// Nothing may be left behind, and nothing may be recorded — a recorded
+	// no-op is what made this permanent.
+	if _, err := os.Stat(DropInPath(dir, "www")); !os.IsNotExist(err) {
+		t.Error("configuration was written for a master that was never reloaded")
+	}
+	if ps := st.Pools["www"]; ps != nil && ps.LastAppliedMaxChildren != 0 {
+		t.Errorf("the no-op was recorded as applied (%d); the next run reports "+
+			"'unchanged' and never retries", ps.LastAppliedMaxChildren)
+	}
+}
+
+// TestUnsafePoolNamesAreRefused: pool names come from section headers in
+// root-owned configuration, so this is hardening rather than a live hole — but
+// php-fpm genuinely accepts a section called [a/../../tmp/pwn] and reports it
+// verbatim from -tt, so the name reaching this package is not guaranteed to be a
+// bare word. Joining it into a path wrote files outside the pool directory.
+func TestUnsafePoolNamesAreRefused(t *testing.T) {
+	dir := t.TempDir()
+
+	for _, name := range []string{
+		"foo/../../etc/cron.d/pwn",
+		"../../root/.ssh/authorized_keys",
+		"a/b",
+		"..",
+		"",
+	} {
+		_, err := Apply(context.Background(), allocate.Plan{
+			Pools: []allocate.PoolPlan{{Name: name, MaxChildren: 8}},
+		}, Master{
+			Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+			DropInDir: dir, NoMasterExpected: true,
+		}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+
+		if !errors.Is(err, ErrUnsafePoolName) {
+			t.Errorf("pool name %q was accepted (err = %v)", name, err)
+		}
+	}
+
+	// An ordinary name still works.
+	if _, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www-data_8.2", MaxChildren: 8}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+		DropInDir: dir, NoMasterExpected: true,
+	}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil); err != nil {
+		t.Errorf("an ordinary pool name was refused: %v", err)
+	}
+}
+
+// TestRollbackFailureIsNotReportedAsSuccess.
+//
+// restore used to log and move on while the caller set RolledBack
+// unconditionally, so the CLI printed "the previous configuration has been
+// restored" with the configuration php-fpm had just rejected still armed in the
+// pool directory. Nothing is broken at that moment — the master was never
+// signalled — but the next reload from any source adopts it, and a master that
+// fails to initialise does not come back.
+func TestRollbackFailureIsNotReportedAsSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := DropInPath(dir, "www")
+
+	if err := os.WriteFile(path, []byte("[www]\npm.max_children = 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := state.New()
+	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 50}},
+	}, Master{
+		Binary: falseBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+		DropInDir: dir, PID: os.Getpid(),
+	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+
+	if !errors.Is(err, ErrValidationFailed) {
+		t.Fatalf("err = %v, want ErrValidationFailed", err)
+	}
+	// This directory is writable, so the rollback should have worked — and then
+	// RolledBack is the truth rather than an assumption.
+	if !res.RolledBack {
+		t.Errorf("RolledBack = false with RollbackFailed = %v", res.RollbackFailed)
+	}
+	if len(res.RollbackFailed) != 0 {
+		t.Errorf("RollbackFailed = %v on a writable directory", res.RollbackFailed)
+	}
+
+	got, _ := os.ReadFile(path)
+	if !strings.Contains(string(got), "pm.max_children = 5") {
+		t.Errorf("the previous fragment was not restored:\n%s", got)
 	}
 }

@@ -26,7 +26,7 @@ const (
 func TestBootstrapUntilTrusted(t *testing.T) {
 	view := observe.PoolView{
 		Name: "shop", ProcessManager: "dynamic",
-		CurrentMaxChildren: 10, ObservedPeak: 6,
+		CurrentMaxChildren: 10, MaxChildrenKnown: true, ObservedPeak: 6,
 	}
 
 	t.Run("no history", func(t *testing.T) {
@@ -88,11 +88,11 @@ func TestUnreachablePoolKeepsItsAllocation(t *testing.T) {
 	res := build(t, state.New(),
 		observe.PoolView{
 			Name: "restarting", ProcessManager: "dynamic",
-			CurrentMaxChildren: 20, Err: errors.New("connection refused"),
+			CurrentMaxChildren: 20, MaxChildrenKnown: true, Err: errors.New("connection refused"),
 		},
 		observe.PoolView{
 			Name: "healthy", ProcessManager: "dynamic",
-			CurrentMaxChildren: 5, ObservedPeak: 5, QueueDepth: 10,
+			CurrentMaxChildren: 5, MaxChildrenKnown: true, ObservedPeak: 5, QueueDepth: 10,
 		},
 	)
 
@@ -122,26 +122,29 @@ func TestHitCeilingUsesTheDelta(t *testing.T) {
 		lastSeen int64
 		now      int64
 		queue    int64
+		peak     int
+		maxKids  int
 		want     bool
 	}{
-		"first run, never hit":     {0, 0, 0, false},
-		"first run, has hit":       {0, 7, 0, true},
-		"first run, queue backing": {0, 0, 3, true},
-		"hit again since":          {7, 9, 0, true},
-		"unchanged since":          {7, 7, 0, false},
-		"old history only":         {40, 40, 0, false},
+		"first run, never hit": {0, 0, 0, 0, 10, false},
+		"first run, has hit":   {0, 7, 0, 0, 10, true},
+		"hit again since":      {7, 9, 0, 0, 10, true},
+		"unchanged since":      {7, 7, 0, 0, 10, false},
+		"old history only":     {40, 40, 0, 0, 10, false},
 
-		// The counter went backwards, which only happens when the master was
-		// reloaded — and this tool is what reloads it. A plain delta goes blind
-		// here: straight after a cut the counter restarts at zero, so a pool that
-		// is now queueing looks content and can never recover the workers it
-		// needs.
-		"counter reset, saturated since": {40, 3, 0, true},
-		"counter reset, quiet since":     {40, 0, 0, false},
+		// A backlog is the instantaneous accept queue, and it reads 1-3 on any
+		// busy pool that is nowhere near its ceiling. Treating that alone as
+		// saturation compounded into a pool with real demand of 10 growing to
+		// 614 workers, starving its neighbours. It counts only when the pool is
+		// ALSO at its ceiling.
+		"queue backing, not at the ceiling": {0, 0, 3, 4, 20, false},
+		"queue backing, at the ceiling":     {0, 0, 3, 20, 20, true},
+		"queue backing, ceiling unknown":    {0, 0, 3, 0, 0, false},
 
-		// The listen queue is an instantaneous depth, not a counter, so it
-		// survives the reset that hides everything else.
-		"counter reset but queue backing": {40, 0, 5, true},
+		// The counter reset still counts on its own — that path does not depend
+		// on the queue.
+		"counter reset, saturated since": {40, 3, 0, 0, 10, true},
+		"counter reset, quiet since":     {40, 0, 0, 0, 10, false},
 	}
 
 	for name, tt := range tests {
@@ -153,6 +156,7 @@ func TestHitCeilingUsesTheDelta(t *testing.T) {
 
 			got := hitCeiling(observe.PoolView{
 				MaxChildrenReached: tt.now, QueueDepth: tt.queue,
+				ObservedPeak: tt.peak, CurrentMaxChildren: tt.maxKids,
 			}, ps)
 
 			if got != tt.want {
@@ -246,8 +250,8 @@ func TestRenderExplainsItself(t *testing.T) {
 	}
 
 	res := build(t, st,
-		observe.PoolView{Name: "measured-pool", ProcessManager: "dynamic", CurrentMaxChildren: 30, ObservedPeak: 4},
-		observe.PoolView{Name: "new-pool", ProcessManager: "dynamic", CurrentMaxChildren: 5, ObservedPeak: 5},
+		observe.PoolView{Name: "measured-pool", ProcessManager: "dynamic", CurrentMaxChildren: 30, MaxChildrenKnown: true, ObservedPeak: 4},
+		observe.PoolView{Name: "new-pool", ProcessManager: "dynamic", CurrentMaxChildren: 5, MaxChildrenKnown: true, ObservedPeak: 5},
 	)
 
 	var out strings.Builder
@@ -327,7 +331,7 @@ func TestBootstrappingPoolIsNeverCut(t *testing.T) {
 	// Looks idle: peaked at 2 while configured for 30.
 	view := observe.PoolView{
 		Name: "quiet-looking", ProcessManager: "dynamic",
-		CurrentMaxChildren: 30, ObservedPeak: 2,
+		CurrentMaxChildren: 30, MaxChildrenKnown: true, ObservedPeak: 2,
 	}
 
 	t.Run("bootstrapping holds the line", func(t *testing.T) {
@@ -359,7 +363,7 @@ func TestBootstrappingPoolIsNeverCut(t *testing.T) {
 func TestBootstrappingPoolMayStillGrow(t *testing.T) {
 	res := build(t, state.New(), observe.PoolView{
 		Name: "struggling", ProcessManager: "dynamic",
-		CurrentMaxChildren: 4, ObservedPeak: 4,
+		CurrentMaxChildren: 4, MaxChildrenKnown: true, ObservedPeak: 4,
 		QueueDepth: 25, MaxChildrenReached: 60,
 	})
 
@@ -368,71 +372,95 @@ func TestBootstrappingPoolMayStillGrow(t *testing.T) {
 	}
 }
 
-// TestColdPoolIsSizedFromMemoryNotTheFloor covers the cold start a container has
-// on every boot.
+// TestUnreadableConfigIsTreatedAsUnknownNotZero.
 //
-// The allocator sizes from observed demand, which is right once there is any. A
-// pool that has never been seen has neither a peak nor a configured size, so it
-// would take the default floor and leave the budget unused — two workers on a
-// host with three spare gigabytes. That is not a conservative answer, it is a
-// wrong one, and it is precisely the case cbox-init lives in.
-func TestColdPoolIsSizedFromMemoryNotTheFloor(t *testing.T) {
+// Parsing the effective configuration shells out to php-fpm, which fails for
+// reasons that have nothing to do with the pool being sized — an unrelated
+// include with a syntax error, the binary mid-upgrade, a permissions problem.
+// The result was zero, which is also what "this pool allows no workers" looks
+// like. They are opposite situations and were indistinguishable.
+//
+// The consequence was not subtle: the unknown deleted the bootstrap floor, so a
+// pool configured for 40 workers was resized on a reading that did not exist —
+// and if it happened to be idle at that moment it also looked brand new and was
+// handed a share of the entire budget.
+func TestUnreadableConfigIsTreatedAsUnknownNotZero(t *testing.T) {
+	t.Run("config readable", func(t *testing.T) {
+		res := build(t, state.New(), observe.PoolView{
+			Name: "web", ProcessManager: "dynamic",
+			CurrentMaxChildren: 40, MaxChildrenKnown: true, ObservedPeak: 3,
+		})
+
+		if got := res.Plan.Pools[0].MaxChildren; got != 40 {
+			t.Errorf("max_children = %d; a bootstrapping pool must keep its 40", got)
+		}
+	})
+
+	t.Run("config unreadable is never written", func(t *testing.T) {
+		res := build(t, state.New(), observe.PoolView{
+			// Same pool, same traffic; php-fpm -tt just failed this round.
+			Name: "web", ProcessManager: "dynamic",
+			CurrentMaxChildren: 0, MaxChildrenKnown: false, ObservedPeak: 3,
+		})
+
+		// The plan still reserves memory for it — a neighbour must not take it
+		// while the pool is merely unreadable — but it is marked so nothing is
+		// written. Proposing a ceiling requires knowing the one being replaced.
+		if !res.Plan.Pools[0].Unknown {
+			t.Error("a pool with an unreadable configuration was not marked; " +
+				"apply would resize it on a reading that does not exist")
+		}
+		if res.Plan.Pools[0].Reason == "" {
+			t.Error("no rationale; the operator cannot see why nothing happened")
+		}
+	})
+
+	t.Run("unreadable and idle is not a new pool", func(t *testing.T) {
+		res := build(t, state.New(), observe.PoolView{
+			Name: "web", ProcessManager: "dynamic",
+			CurrentMaxChildren: 0, MaxChildrenKnown: false, ObservedPeak: 0,
+		})
+
+		// A genuinely new pool would be seeded a share of the budget. This one
+		// must not be — we know nothing about it, which is not the same as
+		// knowing it is new.
+		if got := res.Plan.Pools[0].MaxChildren; got > 10 {
+			t.Errorf("an unreadable idle pool was seeded %d workers as if it were new", got)
+		}
+	})
+}
+
+// TestAPoolWithNoHistoryKeepsWhatItHas documents the real cold start.
+//
+// There was briefly a seedColdPools step here that handed a pool with "no
+// evidence at all" a share of the whole budget, because a probe showed the
+// allocator proposing two workers where memory allowed sixty-four. That probe
+// was built by hand with CurrentMaxChildren of zero — and PHP-FPM requires
+// pm.max_children for every pool, so a readable configuration always has one.
+// The case it fixed cannot occur; zero means the config could not be read, which
+// is now handled as Unknown and is the opposite of "help yourself to the budget".
+//
+// The genuine cold start is this: a container boots with whatever ceiling its
+// image ships, no history, and the pool keeps that ceiling until there is a
+// reason to change it.
+func TestAPoolWithNoHistoryKeepsWhatItHas(t *testing.T) {
 	res := build(t, state.New(), observe.PoolView{
 		Name: "www", ProcessManager: "dynamic",
-		// Nothing known: fresh container, no traffic, no readable config.
-		CurrentMaxChildren: 0, ObservedPeak: 0,
+		CurrentMaxChildren: 5, MaxChildrenKnown: true, ObservedPeak: 0,
 	})
 
-	got := res.Plan.Pools[0].MaxChildren
-	if got <= 2 {
-		t.Errorf("a cold pool got %d workers and left %s unused; memory was the only "+
-			"evidence available and it was ignored",
-			got, budget.HumanBytes(res.Plan.FreeBytes))
+	if got := res.Plan.Pools[0].MaxChildren; got != 5 {
+		t.Errorf("max_children = %d on first sight of a pool configured for 5; "+
+			"an unmeasured pool is neither cut nor inflated", got)
 	}
 
-	// And it must still fit.
-	if res.Plan.AllocatedBytes+res.Reserve > res.Plan.TotalBytes {
-		t.Error("the cold-start estimate exceeded the budget")
-	}
-}
-
-// TestColdPoolsShareTheBudget rather than the first one taking everything.
-func TestColdPoolsShareTheBudget(t *testing.T) {
-	res := build(t, state.New(),
-		observe.PoolView{Name: "a", ProcessManager: "dynamic"},
-		observe.PoolView{Name: "b", ProcessManager: "dynamic"},
-		observe.PoolView{Name: "c", ProcessManager: "dynamic"},
-	)
-
-	counts := map[string]int{}
-	for _, p := range res.Plan.Pools {
-		counts[p.Name] = p.MaxChildren
-	}
-
-	for name, n := range counts {
-		if n <= 2 {
-			t.Errorf("%s got %d workers", name, n)
-		}
-	}
-	// Roughly equal: none should have taken more than half the total.
-	total := counts["a"] + counts["b"] + counts["c"]
-	for name, n := range counts {
-		if n > total/2 {
-			t.Errorf("%s took %d of %d workers; cold pools should share", name, n, total)
-		}
-	}
-}
-
-// TestAKnownPoolIsNotSeeded: the seed is for pools with no evidence at all. A
-// pool with a configured size already has evidence, and overriding it would undo
-// the no-cut-while-bootstrapping rule from the other direction.
-func TestAKnownPoolIsNotSeeded(t *testing.T) {
-	res := build(t, state.New(), observe.PoolView{
-		Name: "known", ProcessManager: "dynamic",
-		CurrentMaxChildren: 8, ObservedPeak: 3,
+	// And it can still grow the moment it shows it needs to.
+	saturated := build(t, state.New(), observe.PoolView{
+		Name: "www", ProcessManager: "dynamic",
+		CurrentMaxChildren: 5, MaxChildrenKnown: true, ObservedPeak: 5,
+		QueueDepth: 20, MaxChildrenReached: 40,
 	})
-
-	if got := res.Plan.Pools[0].MaxChildren; got > 12 {
-		t.Errorf("a pool configured for 8 workers was seeded up to %d", got)
+	if got := saturated.Plan.Pools[0].MaxChildren; got <= 5 {
+		t.Errorf("a saturated pool stayed at %d on its first round", got)
 	}
 }

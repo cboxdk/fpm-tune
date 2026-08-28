@@ -13,6 +13,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -119,17 +120,27 @@ type Options struct {
 	// One mature worker is an anecdote.
 	MinMatureWorkers int
 
-	// AlphaUp and AlphaDown are the exponential weights for observations that
-	// are larger and smaller than the current estimate.
+	// AlphaUp is the weight given to an observation LARGER than the current
+	// estimate. Per sample, and deliberately high: a worker costing more than
+	// expected puts the whole budget at risk, and the budget is already
+	// committed on the old number.
+	AlphaUp float64
+
+	// HalfLifeDown is how long it takes the estimate to fall halfway toward a
+	// smaller observation.
 	//
-	// They differ on purpose, and the asymmetry is the safety property. A worker
-	// costing more than expected puts the whole budget at risk, so it is
-	// believed within a scrape or two. A worker costing less is only an
-	// opportunity, so it is taken up gradually — the estimate tracks the day
-	// rather than being pinned to its worst hour, but it never drops to a quiet
-	// reading in one step and then meets the morning under-provisioned.
-	AlphaUp   float64
-	AlphaDown float64
+	// Expressed in TIME rather than as a per-sample weight, and that distinction
+	// is the whole point. A per-sample weight is silently multiplied by the
+	// scrape rate: 0.05 per sample at a 30-second interval is a twelve-minute
+	// half-life, so a quiet night collapsed the estimate in twenty minutes while
+	// the concurrency peak was deliberately held for a day. The pool was then
+	// sized for many cheap workers, and the morning made them expensive again —
+	// measured at 147 workers × 100MiB configured on an 8GiB host.
+	//
+	// In time, the sampling rate cannot change the behaviour. Long enough to
+	// outlast a quiet night, short enough to follow a real change within a
+	// shift.
+	HalfLifeDown time.Duration
 
 	// ConfidenceSamples and ConfidenceSpan are what a baseline needs before it
 	// is trusted enough to size a pool DOWN.
@@ -158,8 +169,8 @@ func (o Options) Defaults() Options {
 	if o.AlphaUp <= 0 || o.AlphaUp > 1 {
 		o.AlphaUp = 0.5
 	}
-	if o.AlphaDown <= 0 || o.AlphaDown > 1 {
-		o.AlphaDown = 0.05
+	if o.HalfLifeDown <= 0 {
+		o.HalfLifeDown = 6 * time.Hour
 	}
 	if o.ConfidenceSamples <= 0 {
 		o.ConfidenceSamples = 20
@@ -282,6 +293,11 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		ps = &PoolState{Pool: obs.Pool, FirstSeen: at}
 		s.Pools[obs.Pool] = ps
 	}
+
+	// Captured before LastUpdated moves: the downward weight is derived from how
+	// much time has passed, not from how many times we happened to look.
+	since := at.Sub(ps.LastUpdated)
+
 	ps.Samples++
 	ps.LastUpdated = at
 
@@ -310,7 +326,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if ps.TypicalPeakBytes == 0 {
 		ps.TypicalPeakBytes = peak
 	} else {
-		alpha := opts.AlphaDown
+		alpha := decayAlpha(since, opts.HalfLifeDown)
 		if peak > ps.TypicalPeakBytes {
 			alpha = opts.AlphaUp
 		}
@@ -352,6 +368,25 @@ func (ps *PoolState) ObservePeak(current int, at time.Time, opts Options) int {
 	}
 
 	return ps.PeakWorkers
+}
+
+// decayAlpha converts elapsed time into an exponential weight with the given
+// half-life, so the estimate falls at the same rate whether it is sampled every
+// five seconds or every five minutes.
+//
+// A gap longer than the half-life is clamped: a daemon that was stopped for a
+// week should not treat its first observation on return as the whole truth.
+func decayAlpha(since, halfLife time.Duration) float64 {
+	if since <= 0 || halfLife <= 0 {
+		return 0
+	}
+
+	alpha := 1 - math.Exp2(-since.Seconds()/halfLife.Seconds())
+	if alpha > 0.5 {
+		alpha = 0.5
+	}
+
+	return alpha
 }
 
 // SizingBytes is the per-worker cost a pool should be sized against.

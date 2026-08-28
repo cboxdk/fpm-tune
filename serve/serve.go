@@ -352,11 +352,39 @@ func MasterFrom(result plan.Result, dropInDir string) (apply.Master, error) {
 		return master, errors.New("could not locate the pool configuration directory; set it explicitly")
 	}
 
-	if pidFile := PIDFileOf(t.config); pidFile != "" {
-		if pid, err := phpfpm.MasterPID(pidFile); err == nil {
-			master.PID = pid
+	master.PID = masterPID(result, t.config)
+
+	return master, nil
+}
+
+// ErrMasterUnidentified reports that pools were found but the master serving
+// them could not be identified.
+//
+// This is deliberately an error rather than a quiet fallback. Apply treats
+// PID == 0 as "provisioning: write the files, there is nothing to reload" — which
+// is correct before PHP-FPM starts and catastrophic afterwards, because it
+// records the pools as applied and never retries. The official php:8.3-fpm image
+// ships `pid` commented out, so on the most common deployment there is no pid
+// file at all: files written, master untouched, state poisoned, silent forever.
+var ErrMasterUnidentified = errors.New("PHP-FPM is running but its master process could not be identified")
+
+// masterPID resolves the running master.
+//
+// Discovery scanned the process table and had the pid in hand, so that is the
+// primary source; the pid file is a fallback for a caller that supplied targets
+// without going through discovery.
+func masterPID(result plan.Result, configPath string) int {
+	for _, v := range result.Views {
+		if v.Target.PID > 0 {
+			return v.Target.PID
 		}
 	}
 
-	return master, nil
+	if pidFile := PIDFileOf(configPath); pidFile != "" {
+		if pid, err := phpfpm.MasterPID(pidFile); err == nil {
+			return pid
+		}
+	}
+
+	return 0
 }
