@@ -73,6 +73,24 @@ type PoolState struct {
 	FirstSeen   time.Time `json:"first_seen"`
 	LastUpdated time.Time `json:"last_updated"`
 
+	// FirstBusyAt is when this pool first taught us something, as opposed to
+	// when it was first SEEN.
+	//
+	// Confidence needs both enough samples and enough elapsed time, and measuring
+	// the time from first sight let a pool that had been idle for days become
+	// trusted after ten minutes of traffic: the clock had run out long before any
+	// evidence arrived. The span has to be over the evidence.
+	FirstBusyAt time.Time `json:"first_busy_at,omitempty"`
+
+	// LastPeakBytes is the most recent per-scrape maximum from mature workers.
+	//
+	// Used as a FLOOR when sizing. The tracked estimate moves halfway towards a
+	// new reading per scrape, which is fast but not immediate — and for a memory
+	// ceiling, "not immediate" is the wrong direction to be wrong in. A deploy
+	// that triples worker cost would otherwise let a pool be grown against a
+	// figure the workers no longer resemble.
+	LastPeakBytes int64 `json:"last_peak_bytes,omitempty"`
+
 	// PeakWorkers is the most workers this pool has had busy at once, as
 	// remembered by us rather than by PHP-FPM.
 	//
@@ -352,6 +370,10 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	}
 
 	ps.BusySamples++
+	if ps.FirstBusyAt.IsZero() {
+		ps.FirstBusyAt = at
+	}
+	ps.LastPeakBytes = peak
 	if peak > ps.HighWaterBytes {
 		ps.HighWaterBytes = peak
 	}
@@ -424,17 +446,30 @@ func decayAlpha(since, halfLife time.Duration) float64 {
 
 // SizingBytes is the per-worker cost a pool should be sized against.
 //
-// The tracked estimate, which follows the workload up quickly and down slowly.
-// Falls back to the high-water mark only when nothing has been tracked yet.
+// The tracked estimate, which follows the workload up quickly and down slowly —
+// but never below the most recent reading.
+//
+// The floor is the important half. The estimate moves halfway towards a new
+// observation per scrape, which is fast, and fast is not the same as immediate:
+// a deploy that triples what a worker costs leaves the estimate at half the
+// truth for a scrape or two, and a pool grown against that figure is grown
+// against workers that no longer exist. Being slow to believe memory got CHEAPER
+// costs some unused headroom; being slow to believe it got more EXPENSIVE costs
+// the host.
 func (ps *PoolState) SizingBytes() int64 {
 	if ps == nil {
 		return 0
 	}
-	if ps.TypicalPeakBytes > 0 {
-		return ps.TypicalPeakBytes
+
+	size := ps.TypicalPeakBytes
+	if size == 0 {
+		size = ps.HighWaterBytes
+	}
+	if ps.LastPeakBytes > size {
+		size = ps.LastPeakBytes
 	}
 
-	return ps.HighWaterBytes
+	return size
 }
 
 // Confidence is how far a pool's baseline can be trusted, from 0 to 1.
@@ -457,7 +492,16 @@ func (ps *PoolState) Confidence(opts Options) float64 {
 	}
 
 	bySamples := float64(ps.BusySamples) / float64(opts.ConfidenceSamples)
-	bySpan := float64(ps.LastUpdated.Sub(ps.FirstSeen)) / float64(opts.ConfidenceSpan)
+	// Measured from the first BUSY sample, not from first sight. A pool idle for
+	// days had its clock run out long before any evidence arrived, so twenty
+	// busy samples over ten minutes made it fully trusted — and the span exists
+	// precisely to insist that a baseline has been watched through a real traffic
+	// pattern rather than a lunchtime.
+	since := ps.FirstBusyAt
+	if since.IsZero() {
+		since = ps.FirstSeen
+	}
+	bySpan := float64(ps.LastUpdated.Sub(since)) / float64(opts.ConfidenceSpan)
 
 	c := bySamples
 	if bySpan < c {

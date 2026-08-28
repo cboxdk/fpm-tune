@@ -1189,7 +1189,11 @@ func TestItGetsTheMasterBackUpWhenItsOwnFileIsTheProblem(t *testing.T) {
 	configPath := masterConfigAt(t, dir)
 	ours := DropInPath(dir)
 
-	if err := os.WriteFile(ours, []byte("[gone]\npm.max_children = 8\n"), 0o644); err != nil {
+	// Written the way this tool writes it, marker and all. A file that merely has
+	// the right NAME is not proof, and the code refuses to delete one — which is
+	// what the companion test below checks.
+	if err := os.WriteFile(ours,
+		Render([]allocate.PoolPlan{{Name: "gone", MaxChildren: 8}}), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1281,4 +1285,98 @@ func alwaysRejects(t *testing.T) string {
 	}
 
 	return path
+}
+
+// TestItWillNotDeleteAFileItDidNotWrite.
+//
+// Recovery removes its own file to get a master started again — and "zz-" is
+// exactly where an operator puts their own last-order overrides, so a file with
+// this tool's name is a natural thing for someone else to have written. Deleting
+// theirs to fix a problem would be its own outage, and they would have no idea
+// what took it.
+func TestItWillNotDeleteAFileItDidNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+	path := DropInPath(dir)
+
+	// Same name, not this tool's work.
+	theirs := "; hand-written, last in the include order on purpose\n[shop]\npm.max_children = 40\n"
+	if err := os.WriteFile(path, []byte(theirs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	master := Master{
+		// Rejects while the file is present, so removing it WOULD fix the
+		// configuration — the tool must still refuse, because it is not its file.
+		Binary: rejectsOurFile(t), ConfigPath: configPath, DropInDir: dir,
+	}
+
+	if err := Reconcile(context.Background(), master,
+		Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("an operator's own file was deleted: %v", err)
+	}
+	if string(got) != theirs {
+		t.Errorf("an operator's own file was modified:\n%s", got)
+	}
+}
+
+// TestOwnershipSurvivesLosingTheStateFile.
+//
+// The set of pools this tool overrides is recorded by the FILE, not by the
+// learned state. They go out of step in ordinary ways — state deleted to force a
+// fresh baseline, state from an older version, state never saved because the
+// process was killed — and reading ownership from state made those cases
+// dangerous rather than inconvenient.
+//
+// A pool tuned DOWN from a base of 50 to 6 is held there only by its section.
+// Lose state, change some other pool, and a rewrite without that section takes
+// the pool back to 50 on the next reload: the exact overcommit this tool exists
+// to prevent, arriving silently.
+func TestOwnershipSurvivesLosingTheStateFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// What a previous run left: two pools held below their own configuration.
+	if err := os.WriteFile(DropInPath(dir), Render([]allocate.PoolPlan{
+		{Name: "shop", MaxChildren: 6},
+		{Name: "blog", MaxChildren: 4},
+	}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// State is gone entirely.
+	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 8 << 30,
+		Pools: []allocate.PoolPlan{
+			{Name: "shop", MaxChildren: 6, Current: 6, WorkerBytes: 50 << 20},
+			{Name: "blog", MaxChildren: 4, Current: 4, WorkerBytes: 50 << 20},
+			// The only pool actually changing.
+			{Name: "api", MaxChildren: 20, Current: 8, WorkerBytes: 50 << 20},
+		},
+	}, newMaster(t, dir), state.New(), Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(res.Changed()) != 1 {
+		t.Fatalf("changed = %v, want only api", res.Changed())
+	}
+
+	body, err := os.ReadFile(DropInPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[shop]", "pm.max_children = 6", "[blog]", "pm.max_children = 4"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("losing the state file dropped an override this tool was holding "+
+				"(%q missing); those pools jump back to their own configuration on the "+
+				"next reload:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(string(body), "pm.max_children = 20") {
+		t.Errorf("the pool that changed was not written:\n%s", body)
+	}
 }

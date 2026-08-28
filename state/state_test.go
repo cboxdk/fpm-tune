@@ -589,3 +589,74 @@ func TestPeakIsPersisted(t *testing.T) {
 		t.Errorf("PeakWorkers = %d after a restart, want 18", got)
 	}
 }
+
+// TestSizingNeverTrailsTheLatestReading.
+//
+// The tracked estimate moves halfway towards a new observation per scrape. Fast
+// is not immediate, and for a memory ceiling "not immediate" is the wrong
+// direction to be wrong in: a deploy that triples what a worker costs leaves the
+// estimate at half the truth for a scrape or two, and a pool grown against that
+// figure is grown against workers that no longer exist.
+//
+// Being slow to believe memory got cheaper costs some unused headroom. Being
+// slow to believe it got more expensive costs the host.
+func TestSizingNeverTrailsTheLatestReading(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	// Settled on cheap workers.
+	for i := range 10 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * time.Minute), Workers: []WorkerSample{
+			{RSSBytes: 40 << 20, Requests: 500},
+			{RSSBytes: 40 << 20, Requests: 500},
+		}}, opts)
+	}
+
+	settled := st.Pools["shop"].SizingBytes()
+	if settled < 38<<20 || settled > 42<<20 {
+		t.Fatalf("settled at %d bytes, want about 40MiB", settled)
+	}
+
+	// A deploy: the very next scrape shows workers three times the size.
+	st.Learn(Observation{Pool: "shop", At: now.Add(11 * time.Minute), Workers: []WorkerSample{
+		{RSSBytes: 120 << 20, Requests: 500},
+		{RSSBytes: 120 << 20, Requests: 500},
+	}}, opts)
+
+	if got := st.Pools["shop"].SizingBytes(); got < 120<<20 {
+		t.Errorf("SizingBytes = %d after workers tripled to 120MiB; sizing on %d "+
+			"would allocate against workers that no longer exist", got, got)
+	}
+}
+
+// TestConfidenceIsMeasuredOverEvidence: a pool idle for days had its confidence
+// clock run out long before any evidence arrived, so twenty busy samples over
+// ten minutes made it fully trusted. The span exists to insist a baseline has
+// been watched through a real traffic pattern, not a lunchtime.
+func TestConfidenceIsMeasuredOverEvidence(t *testing.T) {
+	st := New()
+	opts := Options{ConfidenceSamples: 20, ConfidenceSpan: 2 * time.Hour}.Defaults()
+
+	start := time.Now().Add(-72 * time.Hour)
+
+	// Three days of nothing: seen every interval, teaching nothing.
+	for i := range 40 {
+		st.Learn(Observation{Pool: "quiet", At: start.Add(time.Duration(i) * time.Hour)}, opts)
+	}
+
+	// Then ten minutes of real traffic.
+	busy := start.Add(70 * time.Hour)
+	for i := range 25 {
+		st.Learn(Observation{Pool: "quiet", At: busy.Add(time.Duration(i) * 24 * time.Second),
+			Workers: []WorkerSample{
+				{RSSBytes: 60 << 20, Requests: 400},
+				{RSSBytes: 60 << 20, Requests: 400},
+			}}, opts)
+	}
+
+	if c := st.Pools["quiet"].Confidence(opts); c >= 1 {
+		t.Errorf("confidence = %.2f after ten minutes of evidence against a two-hour "+
+			"span; the pool's age was standing in for having been watched", c)
+	}
+}

@@ -313,7 +313,14 @@ func runApply(args []string) error {
 
 	master, err := serve.MasterFromMemory(*dropInDir, remembered, log)
 	if err != nil {
-		return err
+		// Same reason as in the daemon: with an explicit drop-in directory the
+		// transaction record can supply the rest, so an unfinished change is
+		// still recoverable on a host where php-fpm will not start and the state
+		// file is gone.
+		if !errors.Is(err, serve.ErrNoMaster) || *dropInDir == "" {
+			return err
+		}
+		master = apply.Master{DropInDir: *dropInDir}
 	}
 
 	// A second lock, on the pool directory itself. The state lock above does not

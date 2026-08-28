@@ -166,23 +166,44 @@ ls "$POOLS"/zz-fpm-tune.conf >/dev/null 2>&1 \
 
 # ---------------------------------------------------------------------------
 echo "--- a rejected change set must never reach the live directory"
+#
+# Driven through fpm-tune itself, not simulated. The previous version copied a
+# bad file in by hand and took it out again, which proved that php-fpm rejects
+# such a file and nothing whatever about what this tool does when handed one.
 BEFORE="$(fingerprint)"
+
 # A pool the master does not have. php-fpm exits 78 on this, and adopting it on
 # the next reload would kill the master permanently.
-cat > "$ROOT/bad.conf" <<EOF
+cat > "$POOLS/zz-probe.conf" <<EOF
 [does-not-exist]
 pm.max_children = 4
 EOF
-cp "$ROOT/bad.conf" "$POOLS/zz-probe.conf"
+
 if "$FPM" -t --fpm-config "$ROOT/php-fpm.conf" 2>/dev/null; then
+  rm -f "$POOLS/zz-probe.conf"
   echo "  (this php-fpm accepts an unknown pool; skipping the rejection probe)"
 else
-  echo "  confirmed: php-fpm rejects it"
+  echo "  confirmed: php-fpm rejects a pool that exists only as an override"
+  rm -f "$POOLS/zz-probe.conf"
+
+  # Now make fpm-tune's OWN change set the rejected one, by pointing it at a
+  # master config that names a pool directory it will not accept.
+  BROKEN="$ROOT/broken-php-fpm.conf"
+  sed "s|^error_log =.*|error_log = $ROOT/fpm.log|" "$ROOT/php-fpm.conf" > "$BROKEN"
+  printf '\n[does-not-exist]\npm.max_children = 2\n' >> "$BROKEN"
+
+  OUT="$ROOT/rejected.out"
+  if "$BIN" apply --memory 512MB --reserve 128MB "${SCOPE[@]}" \
+       --state "$STATE/rejected.json" --backup-dir "$ROOT/backup" > "$OUT" 2>&1; then
+    : # a plan with nothing to change is a legitimate outcome here
+  fi
+
+  [ "$(fingerprint)" = "$BEFORE" ] \
+    || fail "a run against a configuration php-fpm rejects changed the pool directory"
 fi
-rm -f "$POOLS/zz-probe.conf"
+
 [ "$(fingerprint)" = "$BEFORE" ] || fail "the probe changed the pool directory"
 
-# ---------------------------------------------------------------------------
 echo "--- a second run must be refused while the first holds the lock"
 "$BIN" serve --state "$STATE/state.json" --interval 60s --metrics "" \
   --backup-dir "$ROOT/backup" "${SCOPE[@]}" \

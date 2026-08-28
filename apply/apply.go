@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -313,7 +314,7 @@ func Apply(
 	// The file holds every pool this tool overrides, not just the ones changing
 	// now: it is replaced whole, so writing only the changes would drop the
 	// others' overrides.
-	pools := overrideSet(plan, changes, st)
+	pools := overrideSet(master, plan, changes, st)
 	rendered := Render(pools)
 
 	b, err := writeDropIn(master, pools, opts, log)
@@ -935,6 +936,9 @@ func restore(b backup, log *slog.Logger) error {
 		if os.IsNotExist(err) {
 			err = nil
 		}
+		if err == nil {
+			_ = syncDir(filepath.Dir(b.path))
+		}
 	}
 	if err != nil {
 		log.Error("Could not restore previous configuration", "path", b.path, "error", err)
@@ -975,7 +979,36 @@ func writeAtomic(path string, content []byte) error {
 		return err
 	}
 
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+
+	// The DIRECTORY is synced too, not just the file. A rename is atomic against
+	// a crash of this process, and not against a crash of the machine: the new
+	// contents can be durable while the directory entry naming them is still in
+	// cache. That is precisely the pairing this depends on — a power cut could
+	// leave the live file's rename durable and the transaction record's lost,
+	// which is the one combination recovery cannot reason about.
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir flushes a directory's own entries.
+//
+// Best effort on the error: a filesystem that will not open its own directory
+// for reading is unusual, and failing the write for it would be worse than
+// proceeding with a rename that is already durable in every ordinary case.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil //nolint:nilerr // see above
+	}
+	defer func() { _ = d.Close() }()
+
+	if err := d.Sync(); err != nil {
+		return nil //nolint:nilerr // see above
+	}
+
+	return nil
 }
 
 // backupName scopes a saved fragment to the master it came from.
@@ -1091,7 +1124,7 @@ func safePoolName(pool string) error {
 func Render(pools []allocate.PoolPlan) []byte {
 	var b strings.Builder
 
-	b.WriteString("; Written by fpm-tune. Do not edit.\n")
+	b.WriteString(generatedMarker + "\n")
 	b.WriteString(";\n")
 	b.WriteString("; This file overrides only the pm.* settings below; each pool's own\n")
 	b.WriteString("; configuration is left alone. Delete it to return to the values\n")
@@ -1122,16 +1155,34 @@ func Render(pools []allocate.PoolPlan) []byte {
 
 // overrideSet is what the file should contain after this change.
 //
-// Every pool this tool already overrides, plus the ones changing now. Writing
-// only the changed pools would delete the others' overrides, because the file is
-// replaced whole; writing every pool in the plan would capture pools nobody
-// asked to manage, so that a later hand edit to their own config would be
-// silently overridden.
-func overrideSet(plan allocate.Plan, changes []allocate.PoolPlan, st *state.State) []allocate.PoolPlan {
+// The ownership set comes from the LIVE FILE, not from the learned state. The
+// file is the record of what this tool overrides; state is a record of what it
+// has learned, and the two go out of step in ordinary ways — state deleted to
+// force a fresh baseline, state from an older version, state that was never
+// saved because the process was killed.
+//
+// Reading ownership from state made those cases dangerous rather than
+// inconvenient. A pool tuned DOWN from a base of 50 to 6 is held there only by
+// its section in this file; lose state, change some other pool, and the file is
+// rewritten without that section — so the next reload takes the pool back to 50,
+// which is precisely the overcommit the tool exists to prevent, arriving
+// silently and at the worst possible moment.
+//
+// Pools no longer in the plan are dropped: a site that has been removed must not
+// keep a section, because a pool defined only here has no listen and no user and
+// php-fpm will not start at all.
+func overrideSet(
+	master Master,
+	plan allocate.Plan,
+	changes []allocate.PoolPlan,
+	st *state.State,
+) []allocate.PoolPlan {
 	changing := make(map[string]allocate.PoolPlan, len(changes))
 	for _, pp := range changes {
 		changing[pp.Name] = pp
 	}
+
+	owned := parseOurs(DropInPath(master.DropInDir))
 
 	out := make([]allocate.PoolPlan, 0, len(plan.Pools))
 	for _, pp := range plan.Pools {
@@ -1143,8 +1194,19 @@ func overrideSet(plan allocate.Plan, changes []allocate.PoolPlan, st *state.Stat
 		if pp.Unknown {
 			continue
 		}
-		// Previously written by this tool and not changing now: it keeps the
-		// value it already has, rather than being dropped out of the file.
+
+		// Already ours and not changing now: it keeps exactly the settings it
+		// already has, read back from the file rather than reconstructed.
+		if held, ok := owned[pp.Name]; ok {
+			held.Name = pp.Name
+			held.Reason = "unchanged"
+			out = append(out, held)
+
+			continue
+		}
+
+		// Not in the file. State is consulted only as a fallback, for the window
+		// between a successful apply and the file being read again.
 		if st != nil {
 			if ps := st.Pools[pp.Name]; ps != nil && ps.LastAppliedMaxChildren > 0 {
 				held := pp
@@ -1156,4 +1218,82 @@ func overrideSet(plan allocate.Plan, changes []allocate.PoolPlan, st *state.Stat
 	}
 
 	return out
+}
+
+// parseOurs reads back the file this tool wrote.
+//
+// Only the keys it writes, and only from a file it recognises as its own: the
+// values are fed straight back into the next version of the file, so anything
+// unrecognised is safer dropped than guessed at.
+func parseOurs(path string) map[string]allocate.PoolPlan {
+	body, err := os.ReadFile(path)
+	if err != nil || !isOurs(body) {
+		return nil
+	}
+
+	owned := map[string]allocate.PoolPlan{}
+
+	var current string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			current = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			if current != "" {
+				owned[current] = allocate.PoolPlan{Name: current}
+			}
+
+			continue
+		}
+		if current == "" {
+			continue
+		}
+
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < 0 {
+			continue
+		}
+
+		pp := owned[current]
+		switch strings.TrimSpace(key) {
+		case "pm.max_children":
+			pp.MaxChildren = n
+		case "pm.start_servers":
+			pp.StartServers = n
+		case "pm.min_spare_servers":
+			pp.MinSpare = n
+		case "pm.max_spare_servers":
+			pp.MaxSpare = n
+		default:
+			continue
+		}
+		owned[current] = pp
+	}
+
+	// A section with no ceiling is not an override this tool would have written.
+	for name, pp := range owned {
+		if pp.MaxChildren <= 0 {
+			delete(owned, name)
+		}
+	}
+
+	return owned
+}
+
+// generatedMarker identifies a file this tool wrote.
+//
+// Checked before the file is read back OR removed. Recovery deletes it to get a
+// master started again, and deleting a file merely because it has the expected
+// NAME would take an operator's own last-order override with it — a file called
+// zz-something.conf is a natural thing for someone to have written themselves.
+const generatedMarker = "; Written by fpm-tune. Do not edit."
+
+func isOurs(body []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(string(body)), generatedMarker)
 }

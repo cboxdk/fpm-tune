@@ -329,17 +329,26 @@ func (l *Loop) reconcile(ctx context.Context) {
 	// From memory when nothing is running, because that is exactly when this
 	// matters: a master this tool's own file will not let start has no process
 	// to discover.
-	master, err := MasterFromMemory(l.cfg.DropInDir, l.state.Master, l.log)
-	if err != nil {
-		if !errors.Is(err, ErrNoMaster) {
-			l.log.Warn("Cannot identify the master to reconcile against", "error", err)
-		}
-
-		return
-	}
-
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
+
+	master, err := MasterFromMemory(l.cfg.DropInDir, l.state.Master, l.log)
+	if err != nil {
+		// Nothing running and nothing remembered. The transaction record carries
+		// the binary and config for exactly this case, and Reconcile fills the
+		// master in from it — but only if it is called, and requiring an
+		// identified master to get there made that promise empty whenever the
+		// state file was missing, corrupt, or from an older version.
+		if !errors.Is(err, ErrNoMaster) {
+			l.log.Warn("Cannot identify the master to reconcile against", "error", err)
+
+			return
+		}
+		if l.cfg.DropInDir == "" {
+			return
+		}
+		master = apply.Master{DropInDir: l.cfg.DropInDir}
+	}
 
 	// Held for the life of the daemon. The state lock does not cover the pool
 	// directory: a run given a different --state path takes a different state

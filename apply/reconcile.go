@@ -133,8 +133,12 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err == nil {
 		return nil
 	}
-	if ctx.Err() != nil {
-		return nil
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// Interrupted, not answered. Returning nil here marked the repair as
+		// done for the life of the process, so a `php-fpm -t` that timed out
+		// once under load left the host down until someone restarted the daemon.
+		return fmt.Errorf("%w: could not determine whether this tool's file is the "+
+			"problem: %w", ErrUnreconciled, ctxErr)
 	}
 
 	path := DropInPath(master.DropInDir)
@@ -144,7 +148,23 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 		return nil
 	}
 
+	// Proved ours before it is deleted, not assumed from the name. A file called
+	// zz-something.conf is a natural thing for an operator to have written
+	// themselves — last in the include order is exactly where you put your own
+	// overrides — and removing theirs to fix a problem would be its own outage.
+	if !isOurs(body) {
+		log.Error("The configuration is rejected and a file with this tool's name is "+
+			"present, but it was not written by this tool; leaving it alone", "path", path)
+
+		return nil
+	}
+
 	if err := validateReplacement(ctx, master, path, nil); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%w: could not determine whether removing this tool's "+
+				"file would help: %w", ErrUnreconciled, ctxErr)
+		}
+
 		log.Error("The configuration is rejected, and it is not this tool's file that " +
 			"is doing it; leaving it alone")
 
@@ -162,6 +182,7 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 		return fmt.Errorf("%w: this tool's file is stopping php-fpm from starting and "+
 			"could not be removed: %w", ErrUnreconciled, err)
 	}
+	_ = syncDir(filepath.Dir(path))
 
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
 		// Put it back: removing it did not help after all, and leaving the host
@@ -266,6 +287,7 @@ func applyPrevious(txn transaction, previous []byte) error {
 		if err := os.Remove(txn.Path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		_ = syncDir(filepath.Dir(txn.Path))
 
 		return nil
 	}

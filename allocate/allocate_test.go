@@ -494,3 +494,81 @@ func mustComputeWith(t *testing.T, b Budget, pools []Pool) Plan {
 
 	return plan
 }
+
+// TestAnEstimatedPoolIsNotCutToPayForAMeasuredOne.
+//
+// An unmeasured pool's floor is its own current setting, held there so a first
+// run can only ever help, and its cost is a profile estimate rather than an
+// observation. Scaling every floor uniformly cut healthy pools on that guess: a
+// first install on a tight host, with real workers cheaper than the profile
+// assumes, queued traffic on sites nobody had any evidence to touch.
+func TestAnEstimatedPoolIsNotCutToPayForAMeasuredOne(t *testing.T) {
+	plan, err := Compute(
+		Budget{TotalBytes: 1200 * mb},
+		[]Pool{
+			// Measured, and expensive: this is what there is evidence to reduce.
+			{Name: "measured", CurrentMaxChildren: 20, WorkerBytes: 100 * mb, Measured: true,
+				ProcessManager: "dynamic", Floor: 20},
+			// Still an estimate, sitting at what the operator configured.
+			{Name: "guessed", CurrentMaxChildren: 10, WorkerBytes: 48 * mb,
+				ProcessManager: "dynamic", Floor: 10},
+		},
+		Options{},
+	)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+
+	byName := map[string]PoolPlan{}
+	for _, pp := range plan.Pools {
+		byName[pp.Name] = pp
+	}
+
+	if got := byName["guessed"].MaxChildren; got < 10 {
+		t.Errorf("the pool whose cost is still a guess was cut from 10 to %d to pay for "+
+			"one whose cost is known; there is no evidence it needed touching", got)
+	}
+	if got := byName["measured"].MaxChildren; got >= 20 {
+		t.Errorf("the measured pool was not reduced (%d); something has to give when the "+
+			"budget does not fit", got)
+	}
+
+	var total int64
+	for _, pp := range plan.Pools {
+		total += pp.Bytes
+	}
+	if total > plan.TotalBytes-plan.ReserveBytes {
+		t.Errorf("the plan commits %d of %d bytes", total, plan.TotalBytes-plan.ReserveBytes)
+	}
+}
+
+// TestEverythingGivesWayWhenTheMeasuredPoolsAreNotEnough: the protection above
+// cannot become a refusal to fit. If reducing every measured pool to one worker
+// still does not fit, the estimated ones have to give too — and the plan says so.
+func TestEverythingGivesWayWhenTheMeasuredPoolsAreNotEnough(t *testing.T) {
+	plan, err := Compute(
+		Budget{TotalBytes: 300 * mb},
+		[]Pool{
+			{Name: "measured", CurrentMaxChildren: 20, WorkerBytes: 100 * mb, Measured: true,
+				ProcessManager: "dynamic", Floor: 20},
+			{Name: "guessed", CurrentMaxChildren: 20, WorkerBytes: 48 * mb,
+				ProcessManager: "dynamic", Floor: 20},
+		},
+		Options{},
+	)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+
+	var total int64
+	for _, pp := range plan.Pools {
+		total += pp.Bytes
+	}
+	if total > plan.TotalBytes-plan.ReserveBytes {
+		t.Errorf("the plan commits %d of %d bytes; nothing gave way",
+			total, plan.TotalBytes-plan.ReserveBytes)
+	}
+	if len(plan.Warnings) == 0 {
+		t.Error("pools were cut below what anyone asked for and the plan says nothing")
+	}
+}

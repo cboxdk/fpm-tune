@@ -377,13 +377,65 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 			ErrCannotFit, len(pools), humanBytes(minimum), humanBytes(allocatable))
 	}
 
+	// Pools with a MEASURED cost give way first.
+	//
+	// An unmeasured pool's floor is its own current setting, held there so a
+	// first run can only ever help — and its cost is a profile estimate, not an
+	// observation. Scaling everything uniformly cut healthy pools on that guess:
+	// a first install on a tight host, with real workers cheaper than the 48MiB
+	// the profile assumes, queued traffic on sites that never needed touching.
+	// The pools whose cost is known are the only ones there is any evidence to
+	// act on.
+	var unmeasuredNeed, measuredNeed int64
+	for i, p := range pools {
+		if p.Measured {
+			measuredNeed += int64(floors[i]) * p.WorkerBytes
+		} else {
+			unmeasuredNeed += int64(floors[i]) * p.WorkerBytes
+		}
+	}
+
+	var measuredMinimum int64
+	for _, p := range pools {
+		if p.Measured {
+			measuredMinimum += p.WorkerBytes
+		}
+	}
+
+	var used int64
+	if measuredNeed > 0 && unmeasuredNeed+measuredMinimum <= allocatable {
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+			"the configuration needs %s but only %s is available: the pools whose worker "+
+				"cost has been measured were reduced to fit, and the ones still being "+
+				"estimated were left alone",
+			humanBytes(need), humanBytes(allocatable)))
+
+		scale := float64(allocatable-unmeasuredNeed) / float64(measuredNeed)
+		for i, p := range pools {
+			if !p.Measured {
+				granted[i] = floors[i]
+				used += int64(floors[i]) * p.WorkerBytes
+
+				continue
+			}
+			n := int(float64(floors[i]) * scale)
+			if n < 1 {
+				n = 1
+			}
+			granted[i] = n
+			used += int64(n) * p.WorkerBytes
+		}
+
+		return granted, allocatable - used, true, nil
+	}
+
 	plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 		"the minimum viable configuration for %d pools needs %s but only %s is available: "+
-			"floors have been reduced and every pool is undersized",
+			"floors have been reduced and every pool is undersized, including pools whose "+
+			"worker cost is still an estimate",
 		len(pools), humanBytes(need), humanBytes(allocatable)))
 
 	scale := float64(allocatable) / float64(need)
-	var used int64
 	for i, p := range pools {
 		n := int(float64(floors[i]) * scale)
 		if n < 1 {
