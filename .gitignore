@@ -1,0 +1,15 @@
+.idea
+.serena/
+.claude/settings.local.json
+/data/
+
+# Test coverage files
+coverage.out
+coverage.html
+/coverage*
+
+# Build output
+/build/
+/dist/
+/fpm-exporter
+/phpeek-fpm-exporter
