@@ -212,6 +212,10 @@ func (l *Loop) round(ctx context.Context) {
 		return
 	}
 	if len(targets) == 0 {
+		// Retried every round rather than once at startup. A master killed by
+		// this tool's own file cannot be discovered, so the repair has to keep
+		// looking — and it is cheap: one fork when there is nothing else to do.
+		l.reconciled = false
 		l.log.Warn("No PHP-FPM pools found")
 
 		return
@@ -282,6 +286,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 
 		return
 	}
+	l.state.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
@@ -309,7 +314,10 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 // metrics, which is exactly what an operator needs while the host is in a state
 // nobody can write to. It simply does not apply until the repair succeeds.
 func (l *Loop) reconcile(ctx context.Context) {
-	master, err := MasterOnHost(l.cfg.DropInDir, l.log)
+	// From memory when nothing is running, because that is exactly when this
+	// matters: a master this tool's own file will not let start has no process
+	// to discover.
+	master, err := MasterFromMemory(l.cfg.DropInDir, l.state.Master, l.log)
 	if err != nil {
 		if !errors.Is(err, ErrNoMaster) {
 			l.log.Warn("Cannot identify the master to reconcile against", "error", err)
@@ -438,13 +446,45 @@ func MasterPIDOf(views []observe.PoolView) int {
 // the master it exists to recover. Observed as "no PHP-FPM pools found" — blamed
 // on permissions — against a perfectly healthy master.
 func MasterOnHost(dropInDir string, log *slog.Logger) (apply.Master, error) {
+	return masterOnHost(dropInDir, nil, log)
+}
+
+// MasterFromMemory finds the installation even when nothing is running, using
+// what a previous run recorded.
+//
+// The moment this matters is the moment discovery cannot help: if this tool's
+// own file is what stops php-fpm from starting, there is no process to scan for,
+// so the repair could never run and the master stayed down through every restart
+// attempt — with fpm-tune alongside it, having caused it.
+func MasterFromMemory(dropInDir string, remembered state.MasterRef, log *slog.Logger) (apply.Master, error) {
+	return masterOnHost(dropInDir, &remembered, log)
+}
+
+func masterOnHost(dropInDir string, remembered *state.MasterRef, log *slog.Logger) (apply.Master, error) {
 	masters, err := phpfpm.DiscoverMasters(log)
 	if err != nil {
 		return apply.Master{}, fmt.Errorf("cannot scan for PHP-FPM masters: %w", err)
 	}
 
 	if len(masters) == 0 {
-		return apply.Master{}, ErrNoMaster
+		if remembered == nil || !remembered.Known() {
+			return apply.Master{}, ErrNoMaster
+		}
+
+		// Nothing running, but a previous run recorded where it lives. PID stays
+		// zero: there is nothing to signal, and the caller must not mistake that
+		// for "provisioning, go ahead".
+		m := apply.Master{
+			Binary:          remembered.Binary,
+			ConfigPath:      remembered.ConfigPath,
+			DropInDir:       remembered.DropInDir,
+			IncludePatterns: IncludePatternsOf(remembered.ConfigPath),
+		}
+		if dropInDir != "" {
+			m.DropInDir = dropInDir
+		}
+
+		return m, nil
 	}
 
 	// An explicit drop-in directory picks the master out. Without this the

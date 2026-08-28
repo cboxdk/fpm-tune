@@ -102,6 +102,39 @@ type PoolState struct {
 type State struct {
 	Version int                   `json:"version"`
 	Pools   map[string]*PoolState `json:"pools"`
+
+	// Master is how to find the php-fpm installation again when nothing is
+	// running.
+	//
+	// Discovery scans the process table, which answers only while there is a
+	// process to find. That is the wrong moment: if this tool's own file is what
+	// stops php-fpm from starting — a pool it still overrides having been
+	// removed, say — then there is no master to discover, so the repair can
+	// never run, and the master stays down through every restart attempt with
+	// fpm-tune sitting alongside it having caused it. Observed exactly that on a
+	// VM.
+	Master MasterRef `json:"master,omitempty"`
+}
+
+// MasterRef is the identity of a php-fpm installation, remembered across runs.
+type MasterRef struct {
+	Binary     string `json:"binary,omitempty"`
+	ConfigPath string `json:"config_path,omitempty"`
+	DropInDir  string `json:"drop_in_dir,omitempty"`
+}
+
+// Known reports whether there is enough here to act on.
+func (m MasterRef) Known() bool {
+	return m.Binary != "" && m.ConfigPath != "" && m.DropInDir != ""
+}
+
+// RememberMaster records where php-fpm lives, so a later run can find it when
+// it is not running.
+func (s *State) RememberMaster(binary, configPath, dropInDir string) {
+	if binary == "" || configPath == "" || dropInDir == "" {
+		return
+	}
+	s.Master = MasterRef{Binary: binary, ConfigPath: configPath, DropInDir: dropInDir}
 }
 
 // Options tunes learning. The zero value is usable.

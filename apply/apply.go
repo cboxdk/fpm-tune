@@ -260,8 +260,22 @@ func Apply(
 
 	changes = requireShrinksWithGrowth(plan, changes, &result)
 
-	if len(changes) == 0 {
+	// A section for a pool that no longer exists is a landmine, and removing one
+	// is cleanup rather than a resize — so it is not subject to the thresholds
+	// that stop this tool churning.
+	//
+	// A pool defined ONLY by this file has no listen and no user, so php-fpm
+	// refuses to start at all. Observed on a VM: a site was removed, php-fpm was
+	// reloaded before the next round noticed, and the master died and stayed
+	// dead through six systemd restart attempts. The operator removing a site
+	// reloads php-fpm as part of doing so, which makes this the likely order
+	// rather than an exotic one.
+	stale := staleSections(master, plan)
+	if len(changes) == 0 && len(stale) == 0 {
 		return result, nil
+	}
+	if len(stale) > 0 {
+		log.Warn("Removing overrides for pools that no longer exist", "pools", stale)
 	}
 
 	// Refused BEFORE anything is written. This used to be checked after the
@@ -703,6 +717,33 @@ func holdGrowths(
 	}
 
 	return kept
+}
+
+// staleSections lists pools this file still overrides that are no longer there.
+func staleSections(master Master, plan allocate.Plan) []string {
+	body, err := os.ReadFile(DropInPath(master.DropInDir))
+	if err != nil {
+		return nil
+	}
+
+	live := make(map[string]bool, len(plan.Pools))
+	for _, pp := range plan.Pools {
+		live[pp.Name] = true
+	}
+
+	var stale []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+		if name != "" && !live[name] {
+			stale = append(stale, name)
+		}
+	}
+
+	return stale
 }
 
 // commitmentOf is what the host would be running with these changes applied and

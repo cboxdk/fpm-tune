@@ -62,7 +62,7 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		// precisely so this is the harmless order — and nothing will read them.
 		sweepOrphanBackups(opts.BackupDir, master.DropInDir, log)
 
-		return nil
+		return repairIfOursIsBroken(ctx, master, opts, log)
 	}
 
 	// The record carries the binary and config, so recovery works even when no
@@ -106,6 +106,71 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 	}
 
 	discard(txn, opts.BackupDir, log)
+
+	return nil
+}
+
+// repairIfOursIsBroken puts the master back on its feet when this tool's own
+// file is what is stopping it.
+//
+// A transaction only covers a run that died mid-change. The configuration can
+// become invalid long afterwards, through no crash at all: an operator removes a
+// site, this file still declares that pool, and a pool defined only here has no
+// listen and no user — so php-fpm refuses to start. Observed on a VM, where the
+// master then stayed down through six systemd restart attempts with fpm-tune
+// running alongside it, doing nothing, having caused it.
+//
+// The file is removed whole rather than edited, because a running master on its
+// configured defaults beats a dead one on tuned settings, and the next round
+// rewrites it correctly within one interval. Nothing is touched unless removing
+// it demonstrably fixes the problem: if the configuration is broken for some
+// other reason, deleting this tool's work would achieve nothing except deleting
+// this tool's work.
+func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
+	if master.Binary == "" || master.ConfigPath == "" {
+		return nil
+	}
+	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	path := DropInPath(master.DropInDir)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		// Nothing of ours on disk, so the breakage is not ours to fix.
+		return nil
+	}
+
+	if err := validateReplacement(ctx, master, path, nil); err != nil {
+		log.Error("The configuration is rejected, and it is not this tool's file that " +
+			"is doing it; leaving it alone")
+
+		return nil
+	}
+
+	log.Error("php-fpm will not accept its configuration, and removing this tool's "+
+		"file fixes it — most likely a pool it still overrides has been removed. "+
+		"Taking the file out; the next round writes it again for the pools that "+
+		"remain. If php-fpm is DOWN it will not come back on its own: systemd gives "+
+		"up after a few rapid restarts, long before this repair lands, so start it "+
+		"once you are satisfied with what happened here.", "path", path)
+
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("%w: this tool's file is stopping php-fpm from starting and "+
+			"could not be removed: %w", ErrUnreconciled, err)
+	}
+
+	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
+		// Put it back: removing it did not help after all, and leaving the host
+		// both broken AND untuned is worse than broken alone.
+		_ = writeAtomic(path, body)
+
+		return fmt.Errorf("%w: removing this tool's file did not make the configuration "+
+			"valid: %w", ErrUnreconciled, err)
+	}
 
 	return nil
 }

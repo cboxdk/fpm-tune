@@ -1124,3 +1124,161 @@ func TestATightButNotExhaustedHostStillRebalances(t *testing.T) {
 		t.Errorf("a satisfiable plan was not applied whole: %+v", res.Outcomes)
 	}
 }
+
+// TestARemovedPoolsOverrideIsTakenOutImmediately.
+//
+// A section for a pool that no longer exists is a landmine, not a stale
+// setting. A pool defined ONLY by this file has no listen and no user, so
+// php-fpm refuses to start at all.
+//
+// Observed on a VM: a site was removed, php-fpm was reloaded before the next
+// round noticed, and the master died and stayed dead through six systemd restart
+// attempts. An operator removing a site reloads php-fpm as part of doing so,
+// which makes that the likely order rather than an exotic one — so removing the
+// section is cleanup, and not subject to the thresholds that stop this tool
+// churning.
+func TestARemovedPoolsOverrideIsTakenOutImmediately(t *testing.T) {
+	dir := t.TempDir()
+
+	// The file this tool wrote when "news" still existed.
+	if err := os.WriteFile(DropInPath(dir),
+		[]byte("[shop]\npm.max_children = 10\n\n[news]\npm.max_children = 8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := state.New()
+	st.RecordApplied("shop", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("news", 8, time.Now().Add(-time.Hour))
+
+	// The plan no longer has "news": the site is gone. Nothing else changed, so
+	// without this the file would keep the section indefinitely.
+	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 8 << 30,
+		Pools: []allocate.PoolPlan{
+			{Name: "shop", MaxChildren: 10, Current: 10, WorkerBytes: 50 << 20},
+		},
+	}, newMaster(t, dir), st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Reloaded {
+		t.Error("the file was rewritten but the master was never told")
+	}
+
+	body, err := os.ReadFile(DropInPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "[news]") {
+		t.Errorf("the override for a pool that no longer exists was left in place; "+
+			"the next reload from any source kills the master:\n%s", body)
+	}
+	if !strings.Contains(string(body), "[shop]") {
+		t.Errorf("the remaining pool lost its override:\n%s", body)
+	}
+}
+
+// TestItGetsTheMasterBackUpWhenItsOwnFileIsTheProblem.
+//
+// A transaction only covers a run that died mid-change. The configuration can
+// become invalid long afterwards with no crash at all — and then fpm-tune sat
+// alongside a master it had killed, doing nothing, because there was no record
+// to reconcile.
+func TestItGetsTheMasterBackUpWhenItsOwnFileIsTheProblem(t *testing.T) {
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+	ours := DropInPath(dir)
+
+	if err := os.WriteFile(ours, []byte("[gone]\npm.max_children = 8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	master := Master{Binary: rejectsOurFile(t), ConfigPath: configPath, DropInDir: dir}
+
+	if err := Reconcile(context.Background(), master,
+		Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if _, err := os.Stat(ours); !os.IsNotExist(err) {
+		t.Error("this tool's file was stopping php-fpm from starting and was left in " +
+			"place; the master stays down")
+	}
+}
+
+// TestItLeavesAlonePhpFpmBreakageThatIsNotItsDoing: removing this tool's work
+// achieves nothing when the configuration is broken for some other reason, and
+// leaves the host both broken AND untuned.
+func TestItLeavesAlonePhpFpmBreakageThatIsNotItsDoing(t *testing.T) {
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+	ours := DropInPath(dir)
+
+	body := "[shop]\npm.max_children = 8\n"
+	if err := os.WriteFile(ours, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	master := Master{
+		// Rejects whatever it is given, so removing this tool's file cannot help.
+		Binary: alwaysRejects(t), ConfigPath: configPath, DropInDir: dir,
+	}
+
+	if err := Reconcile(context.Background(), master,
+		Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, err := os.ReadFile(ours)
+	if err != nil {
+		t.Fatalf("this tool's file was removed for a breakage it did not cause: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("the file was modified:\n%s", got)
+	}
+}
+
+// rejectsOurFile is a php-fpm stand-in that refuses any configuration whose
+// pool directory contains this tool's drop-in — the shape of a pool that exists
+// only in that file, with no listen and no user.
+//
+// It reads the config it is HANDED rather than a fixed path, because validation
+// happens twice against two different trees: a sandbox copy, and the real one. A
+// stub that looked at the real path would report the sandbox wrongly, and the
+// rehearsal is what decides whether removing the file is worth doing.
+func rejectsOurFile(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "php-fpm-stub")
+	script := `#!/bin/sh
+cfg=""
+prev=""
+for a in "$@"; do
+  case "$prev" in -y|--fpm-config) cfg="$a" ;; esac
+  prev="$a"
+done
+[ -n "$cfg" ] || exit 0
+dir=$(grep -E '^ *include' "$cfg" | head -1 | sed 's/.*= *//')
+dir=$(dirname "$dir")
+[ -f "$dir/zz-fpm-tune.conf" ] && exit 78
+exit 0
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+// alwaysRejects stands in for a configuration broken by something else
+// entirely.
+func alwaysRejects(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "php-fpm-stub")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 78\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
