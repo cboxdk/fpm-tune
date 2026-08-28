@@ -498,6 +498,33 @@ func TestSandboxDoesNotPullInTheRealPoolDirectory(t *testing.T) {
 func fakeMaster(t *testing.T, configPath string) int {
 	t.Helper()
 
+	return fakeMasterWithLog(t, configPath).pid
+}
+
+type stub struct {
+	pid     int
+	signals string
+}
+
+// signalsSeen counts the SIGUSR2s the stub master has received.
+//
+// Needed because "the master is still running" proves nothing about whether it
+// was reloaded — a test asserting only liveness passes against a reload path
+// that does nothing at all.
+func (s stub) signalsSeen(t *testing.T) int {
+	t.Helper()
+
+	data, err := os.ReadFile(s.signals)
+	if err != nil {
+		return 0
+	}
+
+	return len(strings.TrimSpace(string(data)))
+}
+
+func fakeMasterWithLog(t *testing.T, configPath string) stub {
+	t.Helper()
+
 	binDir := t.TempDir()
 	binary := filepath.Join(binDir, "php-fpm")
 
@@ -510,12 +537,14 @@ func fakeMaster(t *testing.T, configPath string) int {
 	}
 
 	ready := filepath.Join(binDir, "ready")
+	signals := filepath.Join(binDir, "signals")
 
 	// The title goes in as an argument so it reaches the command line, which is
 	// where the identity check reads it.
 	cmd := exec.Command(binary, "-test.run=TestStubMasterHelper",
 		"php-fpm: master process ("+configPath+")")
-	cmd.Env = append(os.Environ(), "FPM_TUNE_STUB=1", "FPM_TUNE_STUB_READY="+ready)
+	cmd.Env = append(os.Environ(), "FPM_TUNE_STUB=1",
+		"FPM_TUNE_STUB_READY="+ready, "FPM_TUNE_STUB_SIGNALS="+signals)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +559,7 @@ func fakeMaster(t *testing.T, configPath string) int {
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if _, err := os.Stat(ready); err == nil {
-			return cmd.Process.Pid
+			return stub{pid: cmd.Process.Pid, signals: signals}
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the stub master never signalled that its handler was installed")
@@ -555,10 +584,21 @@ func TestStubMasterHelper(t *testing.T) {
 		}
 	}
 
-	// Survives the reload, as a healthy master does.
+	// Survives the reload, as a healthy master does, and leaves a mark so a test
+	// can tell a reload that happened from one that did not.
+	log := os.Getenv("FPM_TUNE_STUB_SIGNALS")
 	for {
 		select {
 		case <-got:
+			if log == "" {
+				continue
+			}
+			f, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				continue
+			}
+			_, _ = f.WriteString("x")
+			_ = f.Close()
 		case <-time.After(30 * time.Second):
 			return
 		}
@@ -814,7 +854,8 @@ func TestReconcileFinishesAReloadTheDeadRunNeverReached(t *testing.T) {
 	}
 
 	configPath := masterConfigAt(t, dir)
-	pid := fakeMaster(t, configPath)
+	stubbed := fakeMasterWithLog(t, configPath)
+	pid := stubbed.pid
 	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir, PID: pid}
 
 	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
@@ -824,14 +865,18 @@ func TestReconcileFinishesAReloadTheDeadRunNeverReached(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// The stub survives its reload, so a completed Reconcile leaves it running.
-	// A Reconcile that skipped the reload would leave it running too — what is
-	// asserted here is that the record was closed only after the reload was
-	// attempted, which the error path above would otherwise have surfaced.
+	// The signal is counted, not inferred. Asserting only that the master is
+	// still running would pass against a finishReload that did nothing at all —
+	// which is precisely the bug being guarded, since a master left serving the
+	// old configuration is alive and well and wrong.
+	if n := stubbed.signalsSeen(t); n != 1 {
+		t.Errorf("the master received %d reloads, want exactly 1: the change the dead "+
+			"run wrote was never adopted", n)
+	}
 	if err := phpfpmProcessAlive(pid); err != nil {
 		t.Errorf("the master did not survive the completing reload: %v", err)
 	}
-	if _, found := readTransaction(backupDir, dir); found {
+	if _, found, _ := readTransaction(backupDir, dir); found {
 		t.Error("the transaction is still open after a successful reconcile; the next " +
 			"start would reconcile all over again")
 	}
@@ -848,4 +893,96 @@ func phpfpmProcessAlive(pid int) error {
 	}
 
 	return proc.Signal(syscall.Signal(0))
+}
+
+// TestHalfAWrittenPlanIsUndoneRatherThanAdopted.
+//
+// The record is written before the first live write, which is what makes
+// recovery possible — and means a run can die partway through the loop. Half a
+// plan often validates perfectly: the growth without the shrink that funds it
+// passes `php-fpm -t` and commits the host past its budget. Finishing the reload
+// on that basis would adopt a configuration nobody ever intended, and discard
+// the rollback data on the way.
+func TestHalfAWrittenPlanIsUndoneRatherThanAdopted(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	grew := DropInPath(dir, "busy")
+	if err := os.WriteFile(grew, []byte("[busy]\npm.max_children = 10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := masterConfigAt(t, dir)
+	stubbed := fakeMasterWithLog(t, configPath)
+	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir, PID: stubbed.pid}
+
+	crashAfterWriting(t, master, backupDir,
+		allocate.PoolPlan{Name: "busy", MaxChildren: 40},
+		allocate.PoolPlan{Name: "quiet", MaxChildren: 5})
+
+	// The shrink never made it to disk: the process died between the two writes.
+	if err := os.Remove(DropInPath(dir, "quiet")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Reconcile(context.Background(), master,
+		Options{BackupDir: backupDir, SettleTime: 100 * time.Millisecond}, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if n := stubbed.signalsSeen(t); n != 0 {
+		t.Errorf("the master was reloaded into half a plan (%d signals); the growth "+
+			"would be adopted without the reduction that pays for it", n)
+	}
+
+	body, err := os.ReadFile(grew)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "pm.max_children = 10") {
+		t.Errorf("the half-written growth was left in place:\n%s", body)
+	}
+}
+
+// TestAMalformedTransactionDoesNotSweepItsOwnBackups.
+//
+// A record that cannot be used is not the same as no record. It exists precisely
+// because a run died with files half-written — and treating it as "nothing
+// happened" swept away the saved copies that were the only route back, exactly
+// when the state was worst. Truncation, a hand edit, or a record from an older
+// build all land here.
+func TestAMalformedTransactionDoesNotSweepItsOwnBackups(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	live := DropInPath(dir, "www")
+	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := masterConfigAt(t, dir)
+	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir}
+
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+
+	saved := filepath.Join(backupDir, backupName(dir, live))
+	if _, err := os.Stat(saved); err != nil {
+		t.Fatalf("setting up: no backup was taken: %v", err)
+	}
+
+	// Truncated on the way to disk, the way a power cut leaves a file.
+	if err := os.WriteFile(transactionPath(backupDir, dir), []byte(`{"drop_in_dir":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	if !errors.Is(err, ErrUnreconciled) {
+		t.Fatalf("err = %v, want ErrUnreconciled: an unusable record must stop the run, "+
+			"not be read as an all-clear", err)
+	}
+
+	if _, statErr := os.Stat(saved); statErr != nil {
+		t.Error("the backup was swept away on the strength of a record that could not " +
+			"be read; there is now no way back at all")
+	}
 }

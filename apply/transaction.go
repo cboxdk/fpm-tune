@@ -70,24 +70,63 @@ func writeTransaction(backupDir string, txn transaction) error {
 	return writeAtomic(transactionPath(backupDir, txn.DropInDir), append(data, '\n'))
 }
 
-func readTransaction(backupDir, dropInDir string) (transaction, bool) {
-	data, err := os.ReadFile(transactionPath(backupDir, dropInDir))
+// readTransaction distinguishes three states, and the distinction is the point.
+//
+// (found=false, err=nil) — no record: nothing was in flight.
+// (found=false, err!=nil) — a record that cannot be used: truncated, hand-edited,
+//
+//	written by an older build, or failing validation.
+//
+// (found=true) — a record to act on.
+//
+// Collapsing the middle case into the first is the opposite of failing closed.
+// A record exists precisely because a run died with files half-written, and
+// treating an unreadable one as "nothing happened" meant the caller swept away
+// the backups that were the only route back — throwing out the rollback data
+// exactly when the state was worst.
+func readTransaction(backupDir, dropInDir string) (transaction, bool, error) {
+	path := transactionPath(backupDir, dropInDir)
+
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return transaction{}, false
+		if os.IsNotExist(err) {
+			return transaction{}, false, nil
+		}
+
+		return transaction{}, false, fmt.Errorf("cannot read %s: %w", path, err)
 	}
 
 	var txn transaction
 	if err := json.Unmarshal(data, &txn); err != nil {
-		return transaction{}, false
+		return transaction{}, false, fmt.Errorf("%w: %s is not readable JSON: %w",
+			errBadTransaction, path, err)
 	}
 	if filepath.Clean(txn.DropInDir) != filepath.Clean(dropInDir) {
-		return transaction{}, false
+		return transaction{}, false, nil
 	}
 	if err := txn.valid(dropInDir); err != nil {
-		return transaction{}, false
+		return transaction{}, false, err
 	}
 
-	return txn, true
+	return txn, true, nil
+}
+
+// materialised reports whether every file the record names is on disk with the
+// contents it says were written.
+//
+// The record is written BEFORE the live writes, which is what makes recovery
+// possible at all — and means a run can die partway through the loop. A partial
+// change often still passes `php-fpm -t`: half of a growth-plus-shrink plan
+// validates perfectly and commits the host past its budget. So finishing the
+// reload has to be gated on the whole change actually being there.
+func (t transaction) materialised() bool {
+	for _, f := range t.Files {
+		if hashOf(f.Path) != f.Wrote {
+			return false
+		}
+	}
+
+	return true
 }
 
 // valid checks a record before anything acts on it.

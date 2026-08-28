@@ -443,8 +443,16 @@ func MasterOnHost(dropInDir string, log *slog.Logger) (apply.Master, error) {
 
 		var matched []phpfpm.Master
 		for _, m := range masters {
-			if filepath.Clean(IncludeDirOf(m.ConfigPath)) == want {
-				matched = append(matched, m)
+			// Every include, not the first. A master including a distribution's
+			// conf.d before its pool directory could not be selected by naming
+			// the pool directory, which is the only handle the error message
+			// offers.
+			for _, pattern := range IncludePatternsOf(m.ConfigPath) {
+				if filepath.Clean(filepath.Dir(pattern)) == want {
+					matched = append(matched, m)
+
+					break
+				}
 			}
 		}
 		if len(matched) > 0 {

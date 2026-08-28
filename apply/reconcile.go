@@ -45,7 +45,15 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	txn, found := readTransaction(opts.BackupDir, master.DropInDir)
+	txn, found, err := readTransaction(opts.BackupDir, master.DropInDir)
+	if err != nil {
+		// A record that cannot be used is not the same as no record, and must
+		// not be treated as one. It exists because a run died with files
+		// half-written; sweeping on the strength of it being unreadable would
+		// delete the backups that are the only route back, exactly when the
+		// state is worst.
+		return fmt.Errorf("%w: %w", ErrUnreconciled, err)
+	}
 	if !found {
 		// No record, so nothing was in flight. Any saved copies still lying
 		// around belong to a transaction that was closed after they were taken —
@@ -59,7 +67,18 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 	log.Warn("A previous run did not finish; checking what it left behind",
 		"files", len(txn.Files), "dir", opts.BackupDir)
 
-	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err == nil {
+	// A record is written before the first live write, so a run can die partway
+	// through the loop. Half a plan often validates perfectly — the growth
+	// without the shrink that funds it validates and commits the host past its
+	// budget — so a change that never fully landed is undone rather than
+	// finished, whatever `php-fpm -t` makes of it.
+	complete := txn.materialised()
+	if !complete {
+		log.Warn("The previous run did not finish writing; undoing what it had written " +
+			"rather than adopting half a plan")
+	}
+
+	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); complete && err == nil {
 		// Valid, so the change is kept — but validation is not the commit point
 		// for a RUNNING master. The run may have died after writing the files
 		// and before signalling, in which case the master is still serving the
@@ -76,7 +95,9 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		return nil
 	}
 
-	log.Error("The configuration left on disk is invalid; undoing what the run had written")
+	if complete {
+		log.Error("The configuration left on disk is invalid; undoing what the run had written")
+	}
 
 	var failed, foreign []string
 	for _, file := range txn.Files {
@@ -146,6 +167,18 @@ func finishReload(ctx context.Context, master Master, opts Options, log *slog.Lo
 		PIDFile:    master.PIDFile,
 		ConfigPath: master.ConfigPath,
 	}, opts.SettleTime, log); err != nil {
+		// A cancelled context is not a failed reload: the signal is delivered
+		// before the settle watch begins, so the master already has the change.
+		// Returning an error here kept the record open, and the next start
+		// reloaded a second time for a change that had already been adopted —
+		// once per restart, indefinitely.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			log.Warn("Interrupted while watching the completing reload settle; "+
+				"the signal was delivered and the change stands", "error", ctxErr)
+
+			return nil
+		}
+
 		return fmt.Errorf("%w: the leftover configuration is valid but the master could "+
 			"not be reloaded to adopt it: %w", ErrUnreconciled, err)
 	}
