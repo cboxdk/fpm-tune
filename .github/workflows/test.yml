@@ -43,10 +43,13 @@ jobs:
             exit 1
           fi
 
+      # Diff the whole tree rather than naming go.sum: a module with no
+      # dependencies yet has no go.sum, and naming a path git does not know
+      # fails with exit 128 instead of reporting "tidy".
       - name: Verify go.mod is tidy
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum
+          git diff --exit-code
 
       - name: Run go vet
         run: go vet ./...
