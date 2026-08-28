@@ -234,7 +234,9 @@ func (l *Loop) round(ctx context.Context) {
 		l.log.Info("Forgot pools that are no longer configured", "pools", dropped)
 	}
 
-	limits := budget.Detect()
+	// The MASTER's limit, not this process's. On a VM the cap lives on php-fpm's
+	// own systemd slice, and reading the root cgroup finds nothing at all.
+	limits := budget.DetectFor(MasterPIDOf(views))
 	if l.cfg.MemoryOverride > 0 {
 		limits = limits.WithOverride(l.cfg.MemoryOverride)
 	}
@@ -414,6 +416,17 @@ func (l *Loop) Metrics() *metrics.Collectors { return l.metrics }
 
 // State exposes the store, for tests.
 func (l *Loop) State() *state.State { return l.state }
+
+// MasterPIDOf picks the master serving these pools, for budget detection.
+func MasterPIDOf(views []observe.PoolView) int {
+	for _, v := range views {
+		if v.Target.PID > 0 {
+			return v.Target.PID
+		}
+	}
+
+	return 0
+}
 
 // MasterOnHost identifies the PHP-FPM instance to reconfigure, WITHOUT reading
 // its configuration.

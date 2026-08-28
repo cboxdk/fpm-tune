@@ -296,7 +296,13 @@ func Apply(
 		return result, nil
 	}
 
-	backups, err := writeDropIns(master, changes, opts, log)
+	// The file holds every pool this tool overrides, not just the ones changing
+	// now: it is replaced whole, so writing only the changes would drop the
+	// others' overrides.
+	pools := overrideSet(plan, changes, st)
+	rendered := Render(pools)
+
+	b, err := writeDropIn(master, pools, opts, log)
 	if err != nil {
 		return result, err
 	}
@@ -308,53 +314,56 @@ func Apply(
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
 		// Nothing has been signalled yet, so restoring here means the running
 		// master never saw any of this.
-		result.RollbackFailed = restore(backups, log)
-		result.RolledBack = len(result.RollbackFailed) == 0
-		if result.RolledBack {
-			commit(opts.BackupDir, master.DropInDir, backups, log)
-		}
+		if rerr := restore(b, log); rerr != nil {
+			result.RollbackFailed = []string{b.path}
 
-		if !result.RolledBack {
 			return result, fmt.Errorf("%w: %w; AND the rejected configuration could not be "+
 				"removed from %s — the next reload from any source will adopt it",
-				ErrValidationFailed, err, strings.Join(result.RollbackFailed, ", "))
+				ErrValidationFailed, err, b.path)
 		}
+
+		result.RolledBack = true
+		commit(opts.BackupDir, master.DropInDir, b, log)
 
 		return result, fmt.Errorf("%w: %w", ErrValidationFailed, err)
 	}
 
 	if master.PID <= 0 {
-		// Provisioning: the files are in place for whenever PHP-FPM starts.
-		log.Info("Wrote pool configuration; no running master to reload", "pools", len(changes))
+		// Provisioning: the file is in place for whenever PHP-FPM starts.
+		log.Info("Wrote pool configuration; no running master to reload", "pools", len(pools))
 		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
-		commit(opts.BackupDir, master.DropInDir, backups, log)
+		commit(opts.BackupDir, master.DropInDir, b, log)
 		record(st, changes, now)
 
 		return result, nil
 	}
 
+	// Recorded BEFORE the signal, because the record's job is to describe what
+	// might have happened. Writing it afterwards leaves a window in which the
+	// master has adopted the change and the record still says nobody was told.
+	markSignalled(opts.BackupDir, master, b, rendered)
+
 	// PIDFile and ConfigPath let a reload be confirmed when the master comes
 	// back under a NEW pid, which is what a daemonized reload does — php-fpm's
 	// own default. Watching only the original pid reported those as a dead
 	// master and rolled good changes back.
-	newPID, err := phpfpm.ReloadAndWait(ctx, phpfpm.ReloadTarget{
+	_, err = phpfpm.ReloadAndWait(ctx, phpfpm.ReloadTarget{
 		PID:        master.PID,
 		PIDFile:    master.PIDFile,
 		ConfigPath: master.ConfigPath,
 	}, opts.SettleTime, log)
 	if err != nil {
-		// A cancelled context is not a dead master. The settle watch takes the
-		// context, so a SIGTERM to fpm-tune during the watch surfaced here as
-		// "the master did not survive" — and the handler rolled the (valid,
-		// already-adopted) configuration back and reloaded a second time, on the
-		// way out, on a master that was perfectly healthy. Shutting the daemon
-		// down must not reconfigure the host.
+		// A cancelled context is not a dead master, and it is not a healthy one
+		// either: the signal was delivered, but the settle window never proved
+		// the master stayed up. Rolling back would undo a change that may well
+		// have been adopted; declaring success would delete the only record of
+		// it. So the record STAYS, and the next start settles the question.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			log.Warn("Interrupted while watching the master settle; the change stands",
+			log.Warn("Interrupted while watching the master settle; leaving the change "+
+				"recorded so the next start can finish checking it",
 				"pid", master.PID, "error", ctxErr)
 			result.Reloaded = true
 			phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
-			commit(opts.BackupDir, master.DropInDir, backups, log)
 			record(st, changes, now)
 
 			return result, nil
@@ -376,29 +385,31 @@ func Apply(
 			log.Error("Master did not survive the reload; restoring the previous configuration",
 				"pid", master.PID, "error", err)
 		}
-		result.RollbackFailed = restore(backups, log)
-		result.RolledBack = len(result.RollbackFailed) == 0
-		if result.RolledBack {
-			commit(opts.BackupDir, master.DropInDir, backups, log)
+
+		if rerr := restore(b, log); rerr != nil {
+			result.RollbackFailed = []string{b.path}
+
+			return result, fmt.Errorf("%w: %w; AND the configuration could not be taken "+
+				"back out of %s", reason, err, b.path)
 		}
+		result.RolledBack = true
 
 		// Best effort: the master is already gone, so this may do nothing. It
 		// costs one signal and is the difference between a host that recovers
 		// when the master is restarted and one that comes back to the config
 		// that broke it.
 		if !neverSignalled {
-			if rerr := phpfpm.Reload(master.PID); rerr != nil {
+			if rerr := phpfpm.ReloadMaster(master.PID, master.ConfigPath); rerr != nil {
 				log.Debug("Could not reload after restoring", "error", rerr)
 			}
 		}
+
+		commit(opts.BackupDir, master.DropInDir, b, log)
 
 		return result, fmt.Errorf("%w: %w", reason, err)
 	}
 
 	result.Reloaded = true
-	if newPID != master.PID {
-		log.Info("The master reloaded into a new pid", "was", master.PID, "now", newPID)
-	}
 
 	// The parsed configuration is cached, so without this the next scrape reads
 	// the settings from before this change and reports a pool as configured for
@@ -406,7 +417,7 @@ func Apply(
 	// been set to 12.
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
-	commit(opts.BackupDir, master.DropInDir, backups, log)
+	commit(opts.BackupDir, master.DropInDir, b, log)
 	record(st, changes, now)
 
 	return result, nil
@@ -539,6 +550,22 @@ func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, r
 		return changes
 	}
 
+	// On a host that is already full, redistribution is churn. Measured on a
+	// five-site VM under sustained load: shop went 7 → 6 → 7 → 6, because api
+	// wanted more, the budget was fully committed, and the coupling cut shop
+	// below its own threshold to pay for it — whereupon shop's own demand
+	// justified growing it straight back. Every cycle costs a reload of both
+	// pools and changes nothing, because the shortfall is real and moving it
+	// around does not make it smaller.
+	//
+	// Reductions a pool deserves ON ITS OWN MERITS still apply: those cleared
+	// the threshold in decide and never reach here. What is refused is buying a
+	// neighbour's growth with a cut nobody could justify otherwise, on a host
+	// where the operator has already been told to add memory or move sites.
+	if plan.CapacityExhausted {
+		return holdGrowths(plan, changes, result, limit)
+	}
+
 	action := make(map[string]Action, len(result.Outcomes))
 	for _, o := range result.Outcomes {
 		action[o.Pool] = o.Action
@@ -632,6 +659,52 @@ const (
 	maxPlausibleChildren    = 1_000_000
 )
 
+// holdGrowths defers the growths a full host cannot pay for.
+//
+// The safe direction. Deferring a growth costs queueing on one pool; taking the
+// memory anyway overcommits the host, and taking it by cutting a neighbour
+// below its own threshold buys a reload every interval for no lasting change.
+func holdGrowths(
+	plan allocate.Plan,
+	changes []allocate.PoolPlan,
+	result *Result,
+	limit int64,
+) []allocate.PoolPlan {
+	growing := make([]allocate.PoolPlan, 0, len(changes))
+	kept := make([]allocate.PoolPlan, 0, len(changes))
+
+	for _, pp := range changes {
+		if pp.Current > 0 && pp.MaxChildren > pp.Current {
+			growing = append(growing, pp)
+
+			continue
+		}
+		kept = append(kept, pp)
+	}
+
+	// Largest claim first: dropping one big one beats dropping several small
+	// ones, and the small ones are cheapest to satisfy on the next round.
+	sort.Slice(growing, func(i, j int) bool {
+		return int64(growing[i].MaxChildren-growing[i].Current)*growing[i].WorkerBytes >
+			int64(growing[j].MaxChildren-growing[j].Current)*growing[j].WorkerBytes
+	})
+
+	for _, g := range growing {
+		if commitmentOf(plan, append(kept, g)) <= limit {
+			kept = append(kept, g)
+
+			continue
+		}
+
+		setOutcome(result, g.Name, ActionHeldBack, fmt.Sprintf(
+			"%d to %d, held back: the host is already fully committed, and taking the "+
+				"memory from a neighbour would cost a reload of both without making the "+
+				"shortfall any smaller", g.Current, g.MaxChildren))
+	}
+
+	return kept
+}
+
 // commitmentOf is what the host would be running with these changes applied and
 // everything else left where it is.
 func commitmentOf(plan allocate.Plan, changes []allocate.PoolPlan) int64 {
@@ -671,33 +744,25 @@ func includesOurFragments(master Master, changes []allocate.PoolPlan) error {
 		return nil
 	}
 
-	for _, pp := range changes {
-		path := DropInPath(master.DropInDir, pp.Name)
+	path := DropInPath(master.DropInDir)
 
-		matched := false
-		for _, pattern := range master.IncludePatterns {
-			// The WHOLE path, not the basename. Comparing basenames meant a
-			// drop-in directory the master does not include at all still passed
-			// as long as the filename matched the glob — so an operator who
-			// pointed --drop-in-dir at the wrong place got a successful apply, a
-			// successful reload, a recorded change, and no effect whatsoever.
-			if ok, err := filepath.Match(pattern, path); err == nil && ok {
-				matched = true
-
-				break
-			}
-		}
-		if !matched {
-			return fmt.Errorf("%w: %s would be written to %s, which none of %v includes — "+
-				"the change would validate and reload and have no effect",
-				ErrNotIncluded, pp.Name, path, master.IncludePatterns)
+	for _, pattern := range master.IncludePatterns {
+		// The WHOLE path, not the basename. Comparing basenames meant a drop-in
+		// directory the master does not include at all still passed as long as
+		// the filename matched the glob — so an operator who pointed
+		// --drop-in-dir at the wrong place got a successful apply, a successful
+		// reload, a recorded change, and no effect whatsoever.
+		if ok, err := filepath.Match(pattern, path); err == nil && ok {
+			return nil
 		}
 	}
 
-	return nil
+	return fmt.Errorf("%w: %s would be written to %s, which none of %v includes — "+
+		"the change would validate and reload and have no effect",
+		ErrNotIncluded, filepath.Base(path), path, master.IncludePatterns)
 }
 
-// backup is one drop-in's previous state.
+// backup is the drop-in file's previous state.
 type backup struct {
 	path string
 	// content is what was there before; existed distinguishes an empty file from
@@ -706,126 +771,137 @@ type backup struct {
 	content []byte
 	existed bool
 	saved   string
-
-	// rendered is what this run is about to write, kept so the transaction can
-	// record its hash before anything reaches the live directory.
-	rendered []byte
 }
 
-// writeDropIns saves the current fragments and writes the new ones.
-func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options, log *slog.Logger) ([]backup, error) {
+// writeDropIn records the change and then makes it, in that order.
+//
+// Everything is prepared and recorded BEFORE the single live write, so a run
+// that dies has left a record of what it intended — the only thing that makes
+// the leftovers recoverable, since a file that did not exist before has no
+// backup to find.
+//
+// The write itself is one temp-and-rename, so there is no partial state to
+// reason about afterwards: the file holds the old bytes or the new ones.
+func writeDropIn(master Master, pools []allocate.PoolPlan, opts Options, log *slog.Logger) (backup, error) {
 	if err := os.MkdirAll(opts.BackupDir, 0o755); err != nil {
-		return nil, fmt.Errorf("cannot create backup directory: %w", err)
+		return backup{}, fmt.Errorf("cannot create backup directory: %w", err)
 	}
 
-	// Everything is prepared and recorded BEFORE the first live write. A run
-	// that dies partway through then leaves a record of what it intended, which
-	// is the only thing that makes the leftovers recoverable — a fragment that
-	// did not exist before has no backup, so without this there was nothing at
-	// all to say it was ours.
-	backups := make([]backup, 0, len(changes))
-	txn := transaction{DropInDir: master.DropInDir}
-
-	for _, pp := range changes {
+	for _, pp := range pools {
 		if err := safePoolName(pp.Name); err != nil {
-			return nil, err
+			return backup{}, err
 		}
-
-		path := DropInPath(master.DropInDir, pp.Name)
-		rendered := Render(pp)
-
-		b := backup{path: path, rendered: rendered}
-		if content, err := os.ReadFile(path); err == nil {
-			b.content, b.existed = content, true
-			b.saved = filepath.Join(opts.BackupDir, backupName(master.DropInDir, path))
-		}
-
-		backups = append(backups, b)
-
-		// filepath.Base("") is ".", not "" — so a fragment that did not exist
-		// before was recorded as having a backup called ".", which is neither a
-		// file nor nothing. The record then failed its own validation and the
-		// whole transaction was ignored, which is exactly the case the tombstone
-		// exists for.
-		saved := ""
-		if b.saved != "" {
-			saved = filepath.Base(b.saved)
-		}
-		txn.Files = append(txn.Files, txnFile{
-			Path:    path,
-			Existed: b.existed,
-			Saved:   saved,
-			Wrote:   hashBytes(rendered),
-		})
 	}
 
-	for i := range backups {
-		if !backups[i].existed {
-			continue
-		}
-		if err := writeAtomic(backups[i].saved, backups[i].content); err != nil {
-			restore(backups[:i], log)
+	path := DropInPath(master.DropInDir)
+	rendered := Render(pools)
 
-			return nil, fmt.Errorf("cannot back up %s: %w", backups[i].path, err)
+	b := backup{path: path}
+	if content, err := os.ReadFile(path); err == nil {
+		b.content, b.existed = content, true
+		b.saved = filepath.Join(opts.BackupDir, backupName(master.DropInDir, path))
+
+		if err := writeAtomic(b.saved, content); err != nil {
+			return backup{}, fmt.Errorf("cannot back up %s: %w", path, err)
 		}
+	}
+
+	txn := transaction{
+		DropInDir:  master.DropInDir,
+		Binary:     master.Binary,
+		ConfigPath: master.ConfigPath,
+		Path:       path,
+		Existed:    b.existed,
+		Wrote:      hashBytes(rendered),
+		Phase:      PhaseWritten,
+	}
+	if b.saved != "" {
+		txn.Saved = filepath.Base(b.saved)
 	}
 
 	if err := writeTransaction(opts.BackupDir, txn); err != nil {
-		restore(backups, log)
-
-		return nil, err
-	}
-
-	for i := range backups {
-		if err := writeAtomic(backups[i].path, backups[i].rendered); err != nil {
-			restore(backups, log)
-			clearTransaction(opts.BackupDir, master.DropInDir)
-
-			return nil, fmt.Errorf("cannot write %s: %w", backups[i].path, err)
+		// Nothing has been written yet, so there is nothing to take back — but
+		// the saved copy would otherwise be orphaned with no record naming it.
+		if rerr := restore(b, log); rerr != nil {
+			return backup{}, fmt.Errorf("%w (and the previous configuration could not be "+
+				"restored: %w)", err, rerr)
 		}
+
+		return backup{}, err
 	}
 
-	return backups, nil
+	if err := writeAtomic(path, rendered); err != nil {
+		// The record is cleared only if the file really is back the way it was.
+		// Clearing it regardless meant a failed write whose rollback ALSO failed
+		// left new configuration on disk with nothing recording that it was
+		// ours — so the next start would sweep the only backup and never look at
+		// the file again.
+		if rerr := restore(b, log); rerr != nil {
+			return backup{}, fmt.Errorf("cannot write %s: %w (and it could not be taken "+
+				"back out: %w)", path, err, rerr)
+		}
+		clearTransaction(opts.BackupDir, master.DropInDir)
+
+		return backup{}, fmt.Errorf("cannot write %s: %w", path, err)
+	}
+
+	return b, nil
 }
 
-// restore puts the previous fragments back.
-// restore puts the previous fragments back, and reports the ones it could not.
+// markSignalled records that the master has been sent SIGUSR2.
+//
+// Written before the signal, because the record's job is to describe what MIGHT
+// have happened. Recording it afterwards would leave a window in which the
+// master had adopted the change and the record still said nobody had been told.
+func markSignalled(backupDir string, master Master, b backup, rendered []byte) {
+	txn := transaction{
+		DropInDir:  master.DropInDir,
+		Binary:     master.Binary,
+		ConfigPath: master.ConfigPath,
+		Path:       b.path,
+		Existed:    b.existed,
+		Wrote:      hashBytes(rendered),
+		Phase:      PhaseSignalled,
+	}
+	if b.saved != "" {
+		txn.Saved = filepath.Base(b.saved)
+	}
+
+	_ = writeTransaction(backupDir, txn)
+}
+
+// restore puts the previous file back, and reports whether it could.
 //
 // The return value is the point. This used to log and move on while the caller
 // set RolledBack unconditionally, so `fpm-tune apply` printed "the previous
 // configuration has been restored" with the configuration php-fpm had just
 // rejected still sitting in the pool directory, armed for whatever reloads next.
-func restore(backups []backup, log *slog.Logger) []string {
+func restore(b backup, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-
-	var failed []string
-	for _, b := range backups {
-		var err error
-		if b.existed {
-			err = writeAtomic(b.path, b.content)
-		} else {
-			// There was no fragment before, so undoing means removing ours
-			// rather than leaving an empty one behind.
-			err = os.Remove(b.path)
-			if os.IsNotExist(err) {
-				err = nil
-			}
-		}
-		if err != nil {
-			log.Error("Could not restore previous configuration", "path", b.path, "error", err)
-			failed = append(failed, b.path)
-
-			// The saved copy is the only remaining route back, so it stays.
-			continue
-		}
-		if b.saved != "" {
-			_ = os.Remove(b.saved)
-		}
+	if b.path == "" {
+		return nil
 	}
 
-	return failed
+	var err error
+	if b.existed {
+		err = writeAtomic(b.path, b.content)
+	} else {
+		// There was no file before, so undoing means removing ours rather than
+		// leaving an empty one behind.
+		err = os.Remove(b.path)
+		if os.IsNotExist(err) {
+			err = nil
+		}
+	}
+	if err != nil {
+		log.Error("Could not restore previous configuration", "path", b.path, "error", err)
+
+		return err
+	}
+
+	return nil
 }
 
 // writeAtomic writes a file via a temporary name and a rename, so a reader never
@@ -877,29 +953,21 @@ func backupName(dropInDir, path string) string {
 	return hex.EncodeToString(sum[:4]) + "-" + filepath.Base(path) + ".bak"
 }
 
-// commit closes a transaction: the record goes first, then the copies it took.
+// commit closes a transaction: the record goes first, then the copy it took.
 //
-// The order is the point. Removing the backups first left a window in which a
-// record still named files whose saved copies were already gone — so a run that
-// died there handed the next reconcile a manifest it could not honour, and if
-// the configuration happened to be invalid for some unrelated reason, that
-// reconcile would delete a good newly-created fragment or fail trying to restore
-// one. With the record cleared first, a death in the window leaves orphaned .bak
-// files that nothing reads, which the next reconcile sweeps.
-func commit(backupDir, dropInDir string, backups []backup, log *slog.Logger) {
+// The order is the point. Removing the backup first left a window in which a
+// record still named a saved copy that was already gone, so a run that died
+// there handed the next recovery a manifest it could not honour. With the record
+// cleared first, a death in the window leaves an orphaned .bak that nothing
+// reads, which the next run sweeps.
+func commit(backupDir, dropInDir string, b backup, log *slog.Logger) {
 	clearTransaction(backupDir, dropInDir)
-	cleanup(backups, log)
-}
 
-// cleanup removes the saved copies once a change has stuck.
-func cleanup(backups []backup, log *slog.Logger) {
-	for _, b := range backups {
-		if b.saved == "" {
-			continue
-		}
-		if err := os.Remove(b.saved); err != nil && !os.IsNotExist(err) && log != nil {
-			log.Debug("Could not remove backup", "path", b.saved, "error", err)
-		}
+	if b.saved == "" {
+		return
+	}
+	if err := os.Remove(b.saved); err != nil && !os.IsNotExist(err) && log != nil {
+		log.Debug("Could not remove backup", "path", b.saved, "error", err)
 	}
 }
 
@@ -928,12 +996,24 @@ func record(st *state.State, changes []allocate.PoolPlan, at time.Time) {
 	}
 }
 
-// DropInPath is where one pool's fragment lives.
+// DropInPath is the single file this tool writes.
+//
+// One file for every pool it overrides, not one per pool. The per-pool layout
+// meant a run could die between writes and leave half a plan on disk — and half
+// a plan validates perfectly: the growth without the reduction that funds it
+// passes `php-fpm -t` and commits the host past its budget. Recovery then had to
+// work out which of N files had landed, from hashes, with no way to see what the
+// master had actually adopted.
+//
+// One atomic rename removes that whole class. The file holds either the old
+// bytes or the new ones. It also makes the change set indivisible, which is what
+// the allocator assumes: it divides ONE budget, so its reductions and its
+// growths are two halves of one decision.
 //
 // The zz- prefix makes it sort last in the include glob, so it wins over
 // anything the distribution or the operator has already placed there.
-func DropInPath(dir, pool string) string {
-	return filepath.Join(dir, "zz-fpm-tune-"+pool+".conf")
+func DropInPath(dir string) string {
+	return filepath.Join(dir, "zz-fpm-tune.conf")
 }
 
 // ErrUnsafePoolName reports a pool name that cannot be used as a filename.
@@ -961,35 +1041,78 @@ func safePoolName(pool string) error {
 	return nil
 }
 
-// Render produces one pool's fragment.
+// Render produces the whole override file.
 //
-// Only pm.* keys are written, and the pool's own configuration is not touched.
+// Only pm.* keys are written, and the pools' own configuration is not touched.
 // PHP-FPM merges a section defined across several included files, so repeating
-// the section header with just these keys overrides them and leaves listen, user
-// and everything else exactly as the operator wrote it.
-func Render(pp allocate.PoolPlan) []byte {
+// each section header with just these keys overrides them and leaves listen,
+// user and everything else exactly as the operator wrote it.
+func Render(pools []allocate.PoolPlan) []byte {
 	var b strings.Builder
 
 	b.WriteString("; Written by fpm-tune. Do not edit.\n")
 	b.WriteString(";\n")
-	b.WriteString("; This file overrides only the pm.* settings below; the pool's own\n")
+	b.WriteString("; This file overrides only the pm.* settings below; each pool's own\n")
 	b.WriteString("; configuration is left alone. Delete it to return to the values\n")
 	b.WriteString("; configured elsewhere.\n")
-	if pp.Reason != "" {
-		fmt.Fprintf(&b, ";\n; %s\n", pp.Reason)
-	}
-	b.WriteString("\n")
 
-	fmt.Fprintf(&b, "[%s]\n", pp.Name)
-	fmt.Fprintf(&b, "pm.max_children = %d\n", pp.MaxChildren)
+	sorted := append([]allocate.PoolPlan(nil), pools...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
-	// The spare settings are only meaningful for dynamic pools, and writing them
-	// for a static one is a configuration error PHP-FPM will refuse.
-	if pp.StartServers > 0 {
-		fmt.Fprintf(&b, "pm.start_servers = %d\n", pp.StartServers)
-		fmt.Fprintf(&b, "pm.min_spare_servers = %d\n", pp.MinSpare)
-		fmt.Fprintf(&b, "pm.max_spare_servers = %d\n", pp.MaxSpare)
+	for _, pp := range sorted {
+		b.WriteString("\n")
+		if pp.Reason != "" {
+			fmt.Fprintf(&b, "; %s\n", pp.Reason)
+		}
+		fmt.Fprintf(&b, "[%s]\n", pp.Name)
+		fmt.Fprintf(&b, "pm.max_children = %d\n", pp.MaxChildren)
+
+		// The spare settings are only meaningful for dynamic pools, and writing
+		// them for a static one is a configuration error PHP-FPM will refuse.
+		if pp.StartServers > 0 {
+			fmt.Fprintf(&b, "pm.start_servers = %d\n", pp.StartServers)
+			fmt.Fprintf(&b, "pm.min_spare_servers = %d\n", pp.MinSpare)
+			fmt.Fprintf(&b, "pm.max_spare_servers = %d\n", pp.MaxSpare)
+		}
 	}
 
 	return []byte(b.String())
+}
+
+// overrideSet is what the file should contain after this change.
+//
+// Every pool this tool already overrides, plus the ones changing now. Writing
+// only the changed pools would delete the others' overrides, because the file is
+// replaced whole; writing every pool in the plan would capture pools nobody
+// asked to manage, so that a later hand edit to their own config would be
+// silently overridden.
+func overrideSet(plan allocate.Plan, changes []allocate.PoolPlan, st *state.State) []allocate.PoolPlan {
+	changing := make(map[string]allocate.PoolPlan, len(changes))
+	for _, pp := range changes {
+		changing[pp.Name] = pp
+	}
+
+	out := make([]allocate.PoolPlan, 0, len(plan.Pools))
+	for _, pp := range plan.Pools {
+		if changed, ok := changing[pp.Name]; ok {
+			out = append(out, changed)
+
+			continue
+		}
+		if pp.Unknown {
+			continue
+		}
+		// Previously written by this tool and not changing now: it keeps the
+		// value it already has, rather than being dropped out of the file.
+		if st != nil {
+			if ps := st.Pools[pp.Name]; ps != nil && ps.LastAppliedMaxChildren > 0 {
+				held := pp
+				held.MaxChildren = ps.LastAppliedMaxChildren
+				held.Reason = "unchanged"
+				out = append(out, held)
+			}
+		}
+	}
+
+	return out
 }

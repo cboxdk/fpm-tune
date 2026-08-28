@@ -25,7 +25,7 @@ import (
 // A crash in that window left it permanently.
 func TestDryRunNeverTouchesTheLiveDirectory(t *testing.T) {
 	dir := t.TempDir()
-	existing := DropInPath(dir, "shop")
+	existing := DropInPath(dir)
 	original := "[shop]\npm.max_children = 5\n"
 
 	if err := os.WriteFile(existing, []byte(original), 0o644); err != nil {
@@ -66,8 +66,9 @@ func TestDryRunNeverTouchesTheLiveDirectory(t *testing.T) {
 		t.Error("the dry run rewrote a live fragment with identical content")
 	}
 
-	if _, err := os.Stat(DropInPath(dir, "blog")); !os.IsNotExist(err) {
-		t.Error("the dry run created a fragment for a pool that had none")
+	// A second pool was in the plan and must not have reached the file either.
+	if strings.Contains(string(got), "[blog]") {
+		t.Errorf("the dry run wrote a pool that had no override:\n%s", got)
 	}
 }
 
@@ -81,12 +82,6 @@ func TestDryRunNeverTouchesTheLiveDirectory(t *testing.T) {
 // as one that does not.
 func TestShrinksGoWithTheGrowthTheyPayFor(t *testing.T) {
 	dir := t.TempDir()
-
-	for _, pool := range []string{"busy", "quiet"} {
-		if err := os.WriteFile(DropInPath(dir, pool), []byte("["+pool+"]\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
 
 	st := state.New()
 	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
@@ -125,12 +120,17 @@ func TestShrinksGoWithTheGrowthTheyPayFor(t *testing.T) {
 			applied["busy"]+40, applied["busy"]+applied["quiet"], res.Outcomes)
 	}
 
-	body, err := os.ReadFile(DropInPath(dir, "quiet"))
+	body, err := os.ReadFile(DropInPath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "pm.max_children = 30") {
-		t.Errorf("the cut was reported as applied but not written:\n%s", body)
+	// One file holding both pools, which is what makes the change indivisible:
+	// the allocator divides ONE budget, so its reductions and its growths are two
+	// halves of one decision and must reach the host together or not at all.
+	for _, want := range []string{"[busy]", "pm.max_children = 20", "[quiet]", "pm.max_children = 30"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the file does not carry %q:\n%s", want, body)
+		}
 	}
 }
 
@@ -245,7 +245,7 @@ func TestDecideComparesAgainstTheRunningSystem(t *testing.T) {
 func crashAfterWriting(t *testing.T, master Master, backupDir string, changes ...allocate.PoolPlan) {
 	t.Helper()
 
-	if _, err := writeDropIns(master, changes, Options{BackupDir: backupDir}.Defaults(), nil); err != nil {
+	if _, err := writeDropIn(master, changes, Options{BackupDir: backupDir}.Defaults(), nil); err != nil {
 		t.Fatalf("setting up the crashed state: %v", err)
 	}
 }
@@ -261,7 +261,7 @@ func TestReconcileUndoesWhatACrashLeftBehind(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	live := DropInPath(dir, "www")
+	live := DropInPath(dir)
 	original := "[www]\npm.max_children = 10\n"
 	if err := os.WriteFile(live, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
@@ -306,7 +306,7 @@ func TestReconcileRemovesAFragmentThatDidNotExistBefore(t *testing.T) {
 
 	crashAfterWriting(t, rejecting, backupDir, allocate.PoolPlan{Name: "brand-new", MaxChildren: 8})
 
-	created := DropInPath(dir, "brand-new")
+	created := DropInPath(dir)
 	if _, err := os.Stat(created); err != nil {
 		t.Fatalf("setting up: the fragment was not created: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestReconcileLeavesAFileSomeoneElseChanged(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	live := DropInPath(dir, "www")
+	live := DropInPath(dir)
 	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestReconcileLeavesAValidConfigurationAlone(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	live := DropInPath(dir, "www")
+	live := DropInPath(dir)
 	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -429,11 +429,11 @@ func TestReconcileIgnoresAnotherMastersTransaction(t *testing.T) {
 	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
 		t.Fatalf("Reconcile acted on another master's transaction: %v", err)
 	}
-	if _, err := os.Stat(DropInPath(ours, "elsewhere")); !os.IsNotExist(err) {
+	if _, err := os.Stat(DropInPath(ours)); !os.IsNotExist(err) {
 		t.Error("a fragment belonging to another master was written into this one's " +
 			"pool directory")
 	}
-	if _, err := os.Stat(DropInPath(theirs, "elsewhere")); err != nil {
+	if _, err := os.Stat(DropInPath(theirs)); err != nil {
 		t.Error("the other master's own fragment was removed by a run that does not " +
 			"manage it")
 	}
@@ -632,7 +632,7 @@ func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 		t.Error("a successful apply was rolled back")
 	}
 
-	body, err := os.ReadFile(DropInPath(dir, "shop"))
+	body, err := os.ReadFile(DropInPath(dir))
 	if err != nil {
 		t.Fatalf("nothing was written: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestAFragmentTheMasterDoesNotIncludeIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrNotIncluded) {
 		t.Fatalf("err = %v, want ErrNotIncluded", err)
 	}
-	if _, statErr := os.Stat(DropInPath(dir, "www")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(DropInPath(dir)); !os.IsNotExist(statErr) {
 		t.Error("a fragment the master will never read was written anyway")
 	}
 }
@@ -716,7 +716,7 @@ func TestAnUnidentifiedMasterIsRefusedBeforeAnythingIsWritten(t *testing.T) {
 	if !errors.Is(err, ErrMasterUnknown) {
 		t.Fatalf("err = %v, want ErrMasterUnknown", err)
 	}
-	if _, statErr := os.Stat(DropInPath(dir, "www")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(DropInPath(dir)); !os.IsNotExist(statErr) {
 		t.Error("a fragment was written for a master that could not be identified")
 	}
 	if entries, _ := os.ReadDir(backupDir); len(entries) > 0 {
@@ -789,7 +789,7 @@ func TestAGrowthWaitsRatherThanForceAReloadTooSoon(t *testing.T) {
 		}
 	}
 
-	if _, err := os.Stat(DropInPath(dir, "busy")); !os.IsNotExist(err) {
+	if _, err := os.Stat(DropInPath(dir)); !os.IsNotExist(err) {
 		t.Error("the held-back growth was written anyway")
 	}
 }
@@ -832,7 +832,7 @@ func TestAWrongDropInDirectoryIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrNotIncluded) {
 		t.Fatalf("err = %v, want ErrNotIncluded", err)
 	}
-	if _, statErr := os.Stat(DropInPath(wrong, "www")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(DropInPath(wrong)); !os.IsNotExist(statErr) {
 		t.Error("a fragment was written to a directory the master does not include")
 	}
 }
@@ -848,7 +848,7 @@ func TestReconcileFinishesAReloadTheDeadRunNeverReached(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	if err := os.WriteFile(DropInPath(dir, "www"),
+	if err := os.WriteFile(DropInPath(dir),
 		[]byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -895,20 +895,24 @@ func phpfpmProcessAlive(pid int) error {
 	return proc.Signal(syscall.Signal(0))
 }
 
-// TestHalfAWrittenPlanIsUndoneRatherThanAdopted.
+// TestAChangeThatNeverReachedDiskIsANoOp.
 //
-// The record is written before the first live write, which is what makes
-// recovery possible — and means a run can die partway through the loop. Half a
-// plan often validates perfectly: the growth without the shrink that funds it
-// passes `php-fpm -t` and commits the host past its budget. Finishing the reload
-// on that basis would adopt a configuration nobody ever intended, and discard
-// the rollback data on the way.
-func TestHalfAWrittenPlanIsUndoneRatherThanAdopted(t *testing.T) {
+// This replaces a test for a state that can no longer occur. The old layout
+// wrote a fragment per pool, so a run could die between them and leave HALF a
+// plan on disk — and half a plan validates perfectly: the growth without the
+// reduction that funds it passes `php-fpm -t` and commits the host past its
+// budget. Recovery had to reconstruct which of N files had landed, from hashes,
+// with no way to see what the master had adopted.
+//
+// One file and one rename removes the whole class. The file holds the old bytes
+// or the new ones, so "did it land" is a single clean question — and when the
+// answer is no, there is nothing to undo.
+func TestAChangeThatNeverReachedDiskIsANoOp(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	grew := DropInPath(dir, "busy")
-	if err := os.WriteFile(grew, []byte("[busy]\npm.max_children = 10\n"), 0o644); err != nil {
+	before := "[www]\npm.max_children = 10\n"
+	if err := os.WriteFile(DropInPath(dir), []byte(before), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -920,8 +924,8 @@ func TestHalfAWrittenPlanIsUndoneRatherThanAdopted(t *testing.T) {
 		allocate.PoolPlan{Name: "busy", MaxChildren: 40},
 		allocate.PoolPlan{Name: "quiet", MaxChildren: 5})
 
-	// The shrink never made it to disk: the process died between the two writes.
-	if err := os.Remove(DropInPath(dir, "quiet")); err != nil {
+	// The rename never happened: the record exists, the file is as it was.
+	if err := os.WriteFile(DropInPath(dir), []byte(before), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -931,16 +935,63 @@ func TestHalfAWrittenPlanIsUndoneRatherThanAdopted(t *testing.T) {
 	}
 
 	if n := stubbed.signalsSeen(t); n != 0 {
-		t.Errorf("the master was reloaded into half a plan (%d signals); the growth "+
-			"would be adopted without the reduction that pays for it", n)
+		t.Errorf("the master was reloaded (%d signals) for a change that never reached "+
+			"disk", n)
 	}
 
-	body, err := os.ReadFile(grew)
+	body, err := os.ReadFile(DropInPath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "pm.max_children = 10") {
-		t.Errorf("the half-written growth was left in place:\n%s", body)
+	if string(body) != before {
+		t.Errorf("the file was modified by recovering a change that never landed:\n%s", body)
+	}
+	if _, found, _ := readTransaction(backupDir, dir); found {
+		t.Error("the record was left open, so the next start reconciles again")
+	}
+}
+
+// TestTheChangeSetIsIndivisible: every pool the plan touches reaches the host
+// together or not at all, because they are one file and one rename. The
+// allocator divides ONE budget, so a growth and the reduction that funds it are
+// two halves of the same decision.
+func TestTheChangeSetIsIndivisible(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	master := Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		NoMasterExpected: true,
+	}
+
+	crashAfterWriting(t, master, backupDir,
+		allocate.PoolPlan{Name: "busy", MaxChildren: 40},
+		allocate.PoolPlan{Name: "quiet", MaxChildren: 5})
+
+	body, err := os.ReadFile(DropInPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[busy]", "pm.max_children = 40", "[quiet]", "pm.max_children = 5"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the file does not carry %q; the change set is not indivisible:\n%s",
+				want, body)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conf int
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".conf") {
+			conf++
+		}
+	}
+	if conf != 1 {
+		t.Errorf("%d .conf files in the pool directory, want exactly one: more than one "+
+			"means a run can die between them", conf)
 	}
 }
 
@@ -955,7 +1006,7 @@ func TestAMalformedTransactionDoesNotSweepItsOwnBackups(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	live := DropInPath(dir, "www")
+	live := DropInPath(dir)
 	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -984,5 +1035,92 @@ func TestAMalformedTransactionDoesNotSweepItsOwnBackups(t *testing.T) {
 	if _, statErr := os.Stat(saved); statErr != nil {
 		t.Error("the backup was swept away on the strength of a record that could not " +
 			"be read; there is now no way back at all")
+	}
+}
+
+// TestAFullHostStopsRedistributing.
+//
+// Measured on a five-site VM under sustained load, with php-fpm capped at 3GiB.
+// Once the budget was fully committed, shop went 7 → 6 → 7 → 6: api wanted more,
+// the coupling cut shop below its own threshold to pay for it, and shop's own
+// demand then justified growing it straight back. Every cycle reloaded both
+// pools and changed nothing, because the shortfall is real and moving it around
+// does not make it smaller.
+//
+// Reductions a pool deserves on its own merits still apply — those clear the
+// threshold in decide and never reach the coupling. What must stop is buying a
+// neighbour's growth with a cut nobody could justify otherwise, on a host where
+// the operator has already been told to add memory or move sites.
+func TestAFullHostStopsRedistributing(t *testing.T) {
+	dir := t.TempDir()
+	const worker = 100 << 20
+
+	st := state.New()
+	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes:        5120 << 20,
+		CapacityExhausted: true, // every pool short, nothing left to give
+		Pools: []allocate.PoolPlan{
+			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
+			// A 25% cut: under the shrink threshold, so it only happens because
+			// the neighbour wants the memory.
+			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
+		},
+	}, newMaster(t, dir), st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	for _, o := range res.Outcomes {
+		switch o.Pool {
+		case "quiet":
+			if o.Action == ActionApplied {
+				t.Errorf("a pool was cut below its own threshold to fund a neighbour on "+
+					"a host that is already full; it will grow straight back and both "+
+					"pools pay a reload every interval: %s", o.Reason)
+			}
+		case "busy":
+			if o.Action == ActionApplied {
+				t.Errorf("a growth was applied with no memory to pay for it: %s", o.Reason)
+			}
+			if o.Action != ActionHeldBack {
+				t.Errorf("busy = %q, want %q so the operator can see why", o.Action, ActionHeldBack)
+			}
+		}
+	}
+}
+
+// TestATightButNotExhaustedHostStillRebalances: the fix must not stop the
+// rebalancing that is the whole reason for a shared allocator. When the plan
+// fits — the budget is tight but demand is satisfiable — a growth still pulls in
+// the reduction that funds it.
+func TestATightButNotExhaustedHostStillRebalances(t *testing.T) {
+	dir := t.TempDir()
+	const worker = 100 << 20
+
+	st := state.New()
+	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes:        5120 << 20,
+		CapacityExhausted: false,
+		Pools: []allocate.PoolPlan{
+			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
+			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
+		},
+	}, newMaster(t, dir), st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	applied := map[string]int{}
+	for _, o := range res.Changed() {
+		applied[o.Pool] = o.To
+	}
+	if applied["busy"] != 20 || applied["quiet"] != 30 {
+		t.Errorf("a satisfiable plan was not applied whole: %+v", res.Outcomes)
 	}
 }

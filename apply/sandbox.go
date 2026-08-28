@@ -25,6 +25,21 @@ import (
 // Validating a copy first means the live directory is only ever written with a
 // change set PHP-FPM has already accepted.
 func sandbox(master Master, changes []allocate.PoolPlan) (string, func(), error) {
+	return build(master, DropInPath(master.DropInDir), Render(changes))
+}
+
+// sandboxReplacing builds the same copy with one file replaced by given
+// contents, or removed when they are nil.
+//
+// Used to rehearse a ROLLBACK. A configuration can be invalid for reasons that
+// have nothing to do with this tool, and reverting its file then achieves
+// nothing except undoing a change that may already be running — so recovery
+// checks that undoing would actually help before doing it.
+func sandboxReplacing(master Master, path string, content []byte) (string, func(), error) {
+	return build(master, path, content)
+}
+
+func build(master Master, replace string, content []byte) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "fpm-tune-validate-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("cannot create a validation sandbox: %w", err)
@@ -48,17 +63,20 @@ func sandbox(master Master, changes []allocate.PoolPlan) (string, func(), error)
 		return "", nil, err
 	}
 
-	for _, pp := range changes {
-		if err := safePoolName(pp.Name); err != nil {
+	staged := filepath.Join(poolDir, filepath.Base(replace))
+	if content == nil {
+		// A rollback to "no file at all": the fragment is removed from the copy
+		// rather than written empty, because an empty [pool] section is still a
+		// pool definition.
+		if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
 			cleanup()
 
-			return "", nil, err
+			return "", nil, fmt.Errorf("cannot stage the change set for validation: %w", err)
 		}
-		if err := os.WriteFile(DropInPath(poolDir, pp.Name), Render(pp), 0o644); err != nil {
-			cleanup()
+	} else if err := os.WriteFile(staged, content, 0o644); err != nil {
+		cleanup()
 
-			return "", nil, fmt.Errorf("cannot stage %s for validation: %w", pp.Name, err)
-		}
+		return "", nil, fmt.Errorf("cannot stage the change set for validation: %w", err)
 	}
 
 	configPath := filepath.Join(dir, "php-fpm.conf")

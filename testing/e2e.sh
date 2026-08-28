@@ -161,7 +161,7 @@ ps -o command= -p "$PID_AFTER" | grep -q "master process" \
 "$FPM" -t --fpm-config "$ROOT/php-fpm.conf" 2>/dev/null \
   || fail "the configuration left on disk is rejected by php-fpm"
 
-ls "$POOLS"/zz-fpm-tune-*.conf >/dev/null 2>&1 \
+ls "$POOLS"/zz-fpm-tune.conf >/dev/null 2>&1 \
   || fail "apply reported success but wrote no fragments"
 
 # ---------------------------------------------------------------------------

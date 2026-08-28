@@ -40,11 +40,11 @@ func lookup(t *testing.T, name string) string {
 // definition. Writing anything else would silently replace settings the operator
 // owns — listen, user, php_admin_value — and that is not this tool's business.
 func TestRenderOverridesOnlyPMSettings(t *testing.T) {
-	got := string(Render(allocate.PoolPlan{
+	got := string(Render([]allocate.PoolPlan{{
 		Name: "shop", MaxChildren: 12,
 		StartServers: 3, MinSpare: 2, MaxSpare: 6,
 		Reason: "peak 9 workers busy; measured 40MiB/worker",
-	}))
+	}}))
 
 	for _, want := range []string{
 		"[shop]",
@@ -72,7 +72,7 @@ func TestRenderOverridesOnlyPMSettings(t *testing.T) {
 // settings are only valid for dynamic pools. PHP-FPM refuses a config that sets
 // them otherwise, which would turn a routine change into a failed reload.
 func TestRenderOmitsSpareSettingsForStaticPools(t *testing.T) {
-	got := string(Render(allocate.PoolPlan{Name: "worker", MaxChildren: 4}))
+	got := string(Render([]allocate.PoolPlan{{Name: "worker", MaxChildren: 4}}))
 
 	if strings.Contains(got, "spare") || strings.Contains(got, "start_servers") {
 		t.Errorf("a static pool got dynamic settings:\n%s", got)
@@ -139,7 +139,7 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 		PID:        os.Getpid(), // would be signalled if the guard failed
 	}
 
-	existing := DropInPath(dir, "shop")
+	existing := DropInPath(dir)
 	if err := os.WriteFile(existing, []byte("[shop]\npm.max_children = 5\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestRollbackRemovesAFragmentThatDidNotExist(t *testing.T) {
 		NoMasterExpected: true,
 	}
 
-	path := DropInPath(dir, "new-pool")
+	path := DropInPath(dir)
 
 	_, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "new-pool", MaxChildren: 8}},
@@ -261,7 +261,7 @@ func TestNothingWorthChangingDoesNotReload(t *testing.T) {
 // down is the point of a dry run.
 func TestDryRunValidatesButKeepsNothing(t *testing.T) {
 	dir := t.TempDir()
-	path := DropInPath(dir, "shop")
+	path := DropInPath(dir)
 
 	_, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
@@ -313,7 +313,7 @@ func TestNoRunningMasterWritesWithoutReloading(t *testing.T) {
 		t.Error("something was signalled with no master running")
 	}
 
-	content, err := os.ReadFile(DropInPath(dir, "shop"))
+	content, err := os.ReadFile(DropInPath(dir))
 	if err != nil {
 		t.Fatalf("nothing was written: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestBackupsAreKeptOutOfTheConfigDirectory(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	existing := DropInPath(dir, "shop")
+	existing := DropInPath(dir)
 	if err := os.WriteFile(existing, []byte("[shop]\npm.max_children = 5\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestUnidentifiedMasterIsRefusedNotProvisioned(t *testing.T) {
 
 	// Nothing may be left behind, and nothing may be recorded — a recorded
 	// no-op is what made this permanent.
-	if _, err := os.Stat(DropInPath(dir, "www")); !os.IsNotExist(err) {
+	if _, err := os.Stat(DropInPath(dir)); !os.IsNotExist(err) {
 		t.Error("configuration was written for a master that was never reloaded")
 	}
 	if ps := st.Pools["www"]; ps != nil && ps.LastAppliedMaxChildren != 0 {
@@ -483,7 +483,7 @@ func TestUnsafePoolNamesAreRefused(t *testing.T) {
 // fails to initialise does not come back.
 func TestRollbackFailureIsNotReportedAsSuccess(t *testing.T) {
 	dir := t.TempDir()
-	path := DropInPath(dir, "www")
+	path := DropInPath(dir)
 
 	if err := os.WriteFile(path, []byte("[www]\npm.max_children = 5\n"), 0o644); err != nil {
 		t.Fatal(err)

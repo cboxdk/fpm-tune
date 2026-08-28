@@ -15,30 +15,33 @@ import (
 )
 
 // ErrUnreconciled reports that a previous run left configuration behind that
-// PHP-FPM will not accept, and it could not be undone.
-var ErrUnreconciled = errors.New("a previous run left a rejected configuration in place")
+// could not be resolved.
+var ErrUnreconciled = errors.New("a previous run left a change this could not resolve")
 
-// Reconcile cleans up after a run that did not finish.
+// Reconcile finishes or undoes what a previous run did not complete.
 //
-// A transaction record is written before the first live write and removed once
-// the change has settled, so finding one at startup means a process died in
-// between: the OOM reaper, a reboot, ctrl-c during the reload. Until this
-// existed nothing ever looked, and the fragments stayed — possibly ones php-fpm
-// had already rejected, waiting for the next reload from any source to adopt
-// them and take the master down for good.
+// A record is written before the single live write and removed only once the
+// change has been proven to survive, so finding one at startup means a process
+// died in between: the OOM reaper, a reboot, ctrl-c during the reload.
 //
-// Two rules make it safe to run automatically.
+// Three rules make it safe to run automatically.
 //
-// It trusts the validator over the bookkeeping. If what is on disk now passes
-// `php-fpm -t` the change either stuck or was already undone, and the record is
-// stale; undoing a good configuration because a process died after writing it
-// would be its own outage.
+// It knows how far the run got, rather than inferring it. The record carries a
+// phase, because the one thing that matters — whether the running master ever
+// adopted the change — is not observable from the files afterwards. Validation
+// passing says the configuration is acceptable, not that anyone has read it.
 //
-// And it only touches files it can prove are its own, by comparing them against
-// the hash the dead run recorded. A configuration can fail to validate for
-// reasons that have nothing to do with the unfinished run — an operator editing
-// an unrelated pool at the wrong moment — and reverting their work to a state
-// this tool happens to hold a copy of is not a repair.
+// It only touches a file it can prove is its own, by comparing it against the
+// hash the dead run recorded. A configuration can fail to validate for reasons
+// that have nothing to do with the unfinished run — an operator editing an
+// unrelated pool during an incident, which is exactly when they would be — and
+// reverting their work to a state this tool happens to hold a copy of is not a
+// repair.
+//
+// And it never treats being interrupted as an answer. A cancelled validation or
+// settle leaves the record in place for the next start, because the alternatives
+// are undoing a change that was adopted, or deleting the only way back from one
+// that was not.
 func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
 	opts = opts.Defaults()
 	if log == nil {
@@ -47,145 +50,239 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 
 	txn, found, err := readTransaction(opts.BackupDir, master.DropInDir)
 	if err != nil {
-		// A record that cannot be used is not the same as no record, and must
-		// not be treated as one. It exists because a run died with files
-		// half-written; sweeping on the strength of it being unreadable would
-		// delete the backups that are the only route back, exactly when the
-		// state is worst.
+		// A record that cannot be used is not the same as no record. It exists
+		// because a run died with a change in flight; sweeping on the strength
+		// of it being unreadable would delete the copy that is the only route
+		// back, exactly when the state is worst.
 		return fmt.Errorf("%w: %w", ErrUnreconciled, err)
 	}
 	if !found {
-		// No record, so nothing was in flight. Any saved copies still lying
-		// around belong to a transaction that was closed after they were taken —
-		// the record is removed first precisely so this is the harmless order —
-		// and nothing will ever read them again.
+		// Nothing was in flight. Any saved copies still lying around belong to a
+		// transaction closed after they were taken — the record is removed first
+		// precisely so this is the harmless order — and nothing will read them.
 		sweepOrphanBackups(opts.BackupDir, master.DropInDir, log)
 
 		return nil
 	}
 
-	log.Warn("A previous run did not finish; checking what it left behind",
-		"files", len(txn.Files), "dir", opts.BackupDir)
+	// The record carries the binary and config, so recovery works even when no
+	// master can be discovered. That is not hypothetical: if a reload killed the
+	// master and this process then died, the next start finds nothing running —
+	// and without these the configuration that killed it would sit there
+	// unreconciled through every restart attempt.
+	master = master.completedFrom(txn)
 
-	// A record is written before the first live write, so a run can die partway
-	// through the loop. Half a plan often validates perfectly — the growth
-	// without the shrink that funds it validates and commits the host past its
-	// budget — so a change that never fully landed is undone rather than
-	// finished, whatever `php-fpm -t` makes of it.
-	complete := txn.materialised()
-	if !complete {
-		log.Warn("The previous run did not finish writing; undoing what it had written " +
-			"rather than adopting half a plan")
-	}
+	log.Warn("A previous run did not finish", "phase", txn.Phase, "file", txn.Path)
 
-	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); complete && err == nil {
-		// Valid, so the change is kept — but validation is not the commit point
-		// for a RUNNING master. The run may have died after writing the files
-		// and before signalling, in which case the master is still serving the
-		// old configuration while the files on disk say otherwise. Nothing would
-		// ever correct that: the next round reads the configuration from the
-		// files, concludes the pool is already where it wants it, and never
-		// reloads. So the transaction is finished rather than merely accepted.
-		if err := finishReload(ctx, master, opts, log); err != nil {
-			return err
-		}
-
+	if !txn.landed() {
+		// The rename never happened, so the file is untouched and there is
+		// nothing to undo. One atomic write is what makes this a clean answer;
+		// the per-pool layout had to guess which of N files were ours.
+		log.Info("The change never reached disk; nothing to undo")
 		discard(txn, opts.BackupDir, log)
 
 		return nil
 	}
 
-	if complete {
-		log.Error("The configuration left on disk is invalid; undoing what the run had written")
+	valid := phpfpm.Validate(ctx, master.Binary, master.ConfigPath)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// Interrupted mid-check. Undoing on the strength of a validation that
+		// was cancelled rather than failed would revert a change that may
+		// already be running.
+		return fmt.Errorf("%w: interrupted before it could be resolved: %w", ErrUnreconciled, ctxErr)
 	}
 
-	var failed, foreign []string
-	for _, file := range txn.Files {
-		live := hashOf(file.Path)
-
-		switch {
-		case live == "" && !file.Existed:
-			// Never created, or already removed. Nothing to undo.
-			continue
-
-		case live != file.Wrote:
-			// Not what the dead run wrote. Someone else owns this file now, and
-			// reverting it would be destroying their work rather than ours.
-			foreign = append(foreign, file.Path)
-
-			continue
-		}
-
-		if err := undo(file, opts.BackupDir); err != nil {
-			log.Error("Could not undo", "path", file.Path, "error", err)
-			failed = append(failed, file.Path)
-		}
+	if valid != nil {
+		return undoLeftover(ctx, txn, master, opts, valid, log)
 	}
 
-	if len(foreign) > 0 {
-		log.Warn("Left alone: changed since the unfinished run wrote them, so they are "+
-			"no longer ours to undo", "paths", foreign)
-	}
-	if len(failed) > 0 {
-		return fmt.Errorf("%w, and it could not be undone: %s",
-			ErrUnreconciled, strings.Join(failed, ", "))
-	}
-
-	// Validated again rather than assumed. What the run replaced is not proof of
-	// valid — it may have been correcting something already broken — and if
-	// files were left alone above, the thing that breaks the config may be one
-	// of those.
-	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
-		return fmt.Errorf("%w: undoing it was not enough and the configuration is still "+
-			"rejected: %w", ErrUnreconciled, err)
+	// Valid, so the change is kept — but validation is not the commit point for
+	// a RUNNING master. The run may have died before signalling, in which case
+	// the master still serves the old configuration while the file says
+	// otherwise, and nothing would ever correct it: the next round reads the
+	// file, concludes the pool is already where it wants it, and never reloads.
+	if err := finishReload(ctx, txn, master, opts, log); err != nil {
+		return err
 	}
 
 	discard(txn, opts.BackupDir, log)
-	log.Info("Undid the unfinished change; the configuration validates")
 
 	return nil
 }
 
+// completedFrom fills in what the caller could not discover.
+func (m Master) completedFrom(txn transaction) Master {
+	if m.Binary == "" {
+		m.Binary = txn.Binary
+	}
+	if m.ConfigPath == "" {
+		m.ConfigPath = txn.ConfigPath
+	}
+	if m.DropInDir == "" {
+		m.DropInDir = txn.DropInDir
+	}
+
+	return m
+}
+
+// undoLeftover takes back a change php-fpm will not accept.
+//
+// The rollback is rehearsed in a sandbox first. A configuration can be invalid
+// for reasons that have nothing to do with the unfinished run, and in that case
+// reverting this tool's file achieves nothing except undoing a change that may
+// already be running — so if the rollback would not actually make the
+// configuration valid, the live file is left alone and the record is kept.
+func undoLeftover(
+	ctx context.Context,
+	txn transaction,
+	master Master,
+	opts Options,
+	why error,
+	log *slog.Logger,
+) error {
+	log.Error("The configuration left on disk is rejected", "error", why)
+
+	previous, err := previousContent(txn, opts.BackupDir)
+	if err != nil {
+		return fmt.Errorf("%w: it is rejected and the previous configuration is gone: %w",
+			ErrUnreconciled, err)
+	}
+
+	if err := validateReplacement(ctx, master, txn.Path, previous); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%w: interrupted before it could be resolved: %w",
+				ErrUnreconciled, ctxErr)
+		}
+
+		// Undoing would not help, so something else is broken. Reverting anyway
+		// would destroy a change that may be running and still leave the host
+		// unable to reload.
+		return fmt.Errorf("%w: the configuration is rejected, and undoing this tool's "+
+			"change does not fix it — something else in the configuration is broken: %w",
+			ErrUnreconciled, why)
+	}
+
+	if err := applyPrevious(txn, previous); err != nil {
+		return fmt.Errorf("%w, and it could not be undone: %w", ErrUnreconciled, err)
+	}
+
+	// Checked in place as well as in rehearsal. The sandbox is a faithful copy
+	// but it is still a copy, and this is the one path where being wrong means
+	// leaving a host that cannot reload.
+	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
+		return fmt.Errorf("%w: the change was taken back out and the configuration is "+
+			"STILL rejected: %w", ErrUnreconciled, err)
+	}
+
+	log.Info("Undid the unfinished change; the configuration validates")
+	discard(txn, opts.BackupDir, log)
+
+	return nil
+}
+
+// previousContent is what the file held before the unfinished run, or nil when
+// there was no file.
+func previousContent(txn transaction, backupDir string) ([]byte, error) {
+	if !txn.Existed {
+		return nil, nil
+	}
+	if txn.Saved == "" {
+		return nil, errors.New("the record says a file was replaced but names no backup")
+	}
+
+	return os.ReadFile(filepath.Join(backupDir, txn.Saved))
+}
+
+// applyPrevious puts the file back the way the transaction found it.
+func applyPrevious(txn transaction, previous []byte) error {
+	if previous == nil {
+		// There was no file before, so undoing means removing ours rather than
+		// leaving an empty one behind.
+		if err := os.Remove(txn.Path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+
+		return nil
+	}
+
+	return writeAtomic(txn.Path, previous)
+}
+
+// validateReplacement checks what the configuration would be after a rollback,
+// without performing it.
+func validateReplacement(ctx context.Context, master Master, path string, content []byte) error {
+	configPath, cleanup, err := sandboxReplacing(master, path, content)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	return phpfpm.Validate(ctx, master.Binary, configPath)
+}
+
 // finishReload completes an unfinished apply by doing what it did not get to.
 //
-// Idempotent by nature: a master that already adopted these files re-reads the
-// same ones. The cost is one graceful reload at startup, and the alternative is
-// a host whose configuration files and running master disagree with nothing to
-// notice it.
-func finishReload(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
+// Idempotent: a master that already adopted the file re-reads the same one. The
+// cost is one graceful reload at startup, and the alternative is a host whose
+// configuration and running master disagree with nothing to notice.
+func finishReload(
+	ctx context.Context,
+	txn transaction,
+	master Master,
+	opts Options,
+	log *slog.Logger,
+) error {
 	if master.PID <= 0 {
 		log.Info("The configuration a previous run left is valid; no master is running to adopt it")
 
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		// Shutting down. Starting a reload here would signal a master on the way
+		// out, for a change nobody is waiting on.
+		return fmt.Errorf("%w: interrupted before it could be resolved: %w", ErrUnreconciled, err)
+	}
 
 	log.Warn("The configuration a previous run left is valid but may never have been "+
-		"adopted; reloading to be sure", "pid", master.PID)
+		"adopted; reloading to be sure", "pid", master.PID, "phase", txn.Phase)
 
-	if _, err := phpfpm.ReloadAndWait(ctx, phpfpm.ReloadTarget{
+	_, err := phpfpm.ReloadAndWait(ctx, phpfpm.ReloadTarget{
 		PID:        master.PID,
 		PIDFile:    master.PIDFile,
 		ConfigPath: master.ConfigPath,
-	}, opts.SettleTime, log); err != nil {
-		// A cancelled context is not a failed reload: the signal is delivered
-		// before the settle watch begins, so the master already has the change.
-		// Returning an error here kept the record open, and the next start
-		// reloaded a second time for a change that had already been adopted —
-		// once per restart, indefinitely.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			log.Warn("Interrupted while watching the completing reload settle; "+
-				"the signal was delivered and the change stands", "error", ctxErr)
+	}, opts.SettleTime, log)
+	if err == nil {
+		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
-			return nil
-		}
-
-		return fmt.Errorf("%w: the leftover configuration is valid but the master could "+
-			"not be reloaded to adopt it: %w", ErrUnreconciled, err)
+		return nil
 	}
 
-	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The signal went out and the settle window never finished. Delivery is
+		// not survival, so this is neither success nor failure — the record
+		// stays, and the next start settles it.
+		return fmt.Errorf("%w: the completing reload was interrupted before the master "+
+			"was seen to survive it: %w", ErrUnreconciled, ctxErr)
+	}
 
-	return nil
+	// The completing reload killed the master. Doing nothing would have left the
+	// old one alive, so this is recovery having made things worse — and the
+	// configuration that did it must not be left in place.
+	log.Error("The completing reload did not survive; taking the change back out",
+		"pid", master.PID, "error", err)
+
+	previous, perr := previousContent(txn, opts.BackupDir)
+	if perr != nil {
+		return fmt.Errorf("%w: the completing reload killed the master and the previous "+
+			"configuration is gone: %w", ErrUnreconciled, perr)
+	}
+	if perr := applyPrevious(txn, previous); perr != nil {
+		return fmt.Errorf("%w: the completing reload killed the master and the change "+
+			"could not be taken back out: %w", ErrUnreconciled, perr)
+	}
+
+	return fmt.Errorf("%w: the completing reload killed the master; the previous "+
+		"configuration has been restored: %w", ErrUnreconciled, err)
 }
 
 // sweepOrphanBackups removes saved copies with no transaction naming them.
@@ -208,7 +305,7 @@ func sweepOrphanBackups(backupDir, dropInDir string, log *slog.Logger) {
 	}
 }
 
-// backupTarget maps a saved fragment back to the file it came from, and reports
+// backupTarget maps a saved copy back to the file it came from, and reports
 // whether it belongs to this master at all.
 func backupTarget(dropInDir, saved string) (string, bool) {
 	name := filepath.Base(saved)
@@ -225,41 +322,14 @@ func backupTarget(dropInDir, saved string) (string, bool) {
 	return filepath.Join(dropInDir, strings.TrimSuffix(rest, ".bak")), true
 }
 
-// undo puts one file back the way the transaction found it.
-func undo(file txnFile, backupDir string) error {
-	if !file.Existed {
-		// There was no fragment before, so undoing means removing ours rather
-		// than leaving an empty one behind — an empty [pool] section is still a
-		// pool definition.
-		if err := os.Remove(file.Path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-
-		return nil
-	}
-
-	if file.Saved == "" {
-		return errors.New("the transaction says a file was replaced but names no backup")
-	}
-
-	content, err := os.ReadFile(filepath.Join(backupDir, file.Saved))
-	if err != nil {
-		return err
-	}
-
-	return writeAtomic(file.Path, content)
-}
-
-// discard removes a finished transaction and the copies it took.
+// discard closes a finished transaction: the record first, then the copy.
 func discard(txn transaction, backupDir string, log *slog.Logger) {
-	for _, file := range txn.Files {
-		if file.Saved == "" {
-			continue
-		}
-		if err := os.Remove(filepath.Join(backupDir, file.Saved)); err != nil && !os.IsNotExist(err) {
-			log.Debug("Could not remove a backup", "name", file.Saved, "error", err)
-		}
-	}
-
 	clearTransaction(backupDir, txn.DropInDir)
+
+	if txn.Saved == "" {
+		return
+	}
+	if err := os.Remove(filepath.Join(backupDir, txn.Saved)); err != nil && !os.IsNotExist(err) {
+		log.Debug("Could not remove a backup", "name", txn.Saved, "error", err)
+	}
 }

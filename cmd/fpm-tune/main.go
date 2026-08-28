@@ -122,13 +122,14 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 // gather does everything both commands need: read the host, scrape the pools,
 // fold the observation into the store, and build the allocation.
 func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, *state.State, error) {
-	limits := budget.Detect()
+	// Parsed before anything expensive, so a typo in a flag fails immediately
+	// rather than after a scrape.
+	var overrideBytes int64
 	if *c.memory != "" {
-		bytes, err := parseBytes(*c.memory)
-		if err != nil {
+		var err error
+		if overrideBytes, err = parseBytes(*c.memory); err != nil {
 			return plan.Result{}, nil, fmt.Errorf("--memory: %w", err)
 		}
-		limits = limits.WithOverride(bytes)
 	}
 
 	var reserveBytes int64
@@ -156,6 +157,15 @@ func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, 
 	}
 
 	views := observe.Sample(ctx, targets, log)
+
+	// The MASTER's limit, not this process's, which is why it waits for the
+	// scrape. On a VM the cap lives on php-fpm's own systemd slice and the root
+	// cgroup has none, so reading it here sized a 3GiB service against a 20GiB
+	// machine.
+	limits := budget.DetectFor(serve.MasterPIDOf(views))
+	if overrideBytes > 0 {
+		limits = limits.WithOverride(overrideBytes)
+	}
 
 	stateOpts := state.Options{
 		ConfidenceSamples: *c.confSamples,
@@ -211,13 +221,26 @@ func runPlan(args []string) error {
 	// started before a `serve --apply` round would save afterwards and erase the
 	// LastAppliedAt that the reload damping depends on, so the next round would
 	// reload a pool it had just reloaded.
-	if !*c.noLearn {
+	learn := !*c.noLearn
+	if learn {
 		release, err := lock.Acquire(lock.DefaultPath(*c.statePath))
-		if err != nil {
+		switch {
+		case err == nil:
+			defer release()
+		case errors.Is(err, lock.ErrHeld):
+			// A daemon is running. `plan` is read-only apart from recording what
+			// it learned, so it reports without recording rather than refusing —
+			// an operator asking what the tool thinks, on a host where the tool
+			// is running, should get an answer.
+			fmt.Fprintln(os.Stderr,
+				"fpm-tune: another fpm-tune is running, so this will report without "+
+					"recording what it observes")
+			learn = false
+		default:
 			return err
 		}
-		defer release()
 	}
+	c.noLearn = &[]bool{!learn}[0]
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
