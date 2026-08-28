@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/state"
@@ -509,5 +510,74 @@ func TestCounterSignalActuallyFires(t *testing.T) {
 	if hitCeiling(views[0], st.Pools["web"]) {
 		t.Error("a pool that has not hit its ceiling since the last round was " +
 			"reported as saturated")
+	}
+}
+
+// TestAnUnreachablePoolKeepsItsMemory.
+//
+// The failure this whole tool exists to prevent, reached from the one direction
+// nobody was watching. A site configured for twenty workers restarts and its
+// socket refuses for a few seconds. The scrape fails, and the view built from
+// that failure used to carry nothing at all — so the allocator reserved nothing
+// for it, handed the memory to its neighbours, and reloaded them with larger
+// ceilings. The moment the pool came back and started forking, the host was
+// committed well past its budget.
+//
+// The reservation logic was there and correct; it was being fed zero.
+func TestAnUnreachablePoolKeepsItsMemory(t *testing.T) {
+	const worker = 100 * mb
+
+	// "down" is configured for 20 workers and cannot be reached. "up" is busy
+	// and would happily take everything going.
+	views := []observe.PoolView{
+		{
+			Name: "down", ProcessManager: "dynamic",
+			CurrentMaxChildren: 20, MaxChildrenKnown: true,
+			Err: errors.New("connection refused"),
+		},
+		{
+			Name: "up", ProcessManager: "dynamic",
+			CurrentMaxChildren: 10, MaxChildrenKnown: true,
+			ObservedPeak: 10, QueueDepth: 5, MaxChildrenReached: 40,
+			Workers: []state.WorkerSample{
+				{RSSBytes: worker, Requests: 500},
+				{RSSBytes: worker, Requests: 500},
+			},
+		},
+	}
+
+	st := state.New()
+	LearnFrom(st, views, time.Now(), state.Options{})
+
+	result, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 4 * gb, CPUs: 8},
+		Views:  views,
+		State:  st,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var down, up allocate.PoolPlan
+	for _, pp := range result.Plan.Pools {
+		switch pp.Name {
+		case "down":
+			down = pp
+		case "up":
+			up = pp
+		}
+	}
+
+	if down.MaxChildren < 20 {
+		t.Errorf("the unreachable pool was allocated %d workers against the 20 it is "+
+			"configured for; its memory has been given away", down.MaxChildren)
+	}
+	if !down.Unknown {
+		t.Error("the unreachable pool was not marked unwritable; a pool that could not " +
+			"be read must never be resized")
+	}
+	if up.Bytes+down.Bytes > result.Plan.TotalBytes-result.Plan.ReserveBytes {
+		t.Errorf("the plan commits %d bytes of a %d byte budget",
+			up.Bytes+down.Bytes, result.Plan.TotalBytes-result.Plan.ReserveBytes)
 	}
 }

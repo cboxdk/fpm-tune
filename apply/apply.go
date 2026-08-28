@@ -310,6 +310,9 @@ func Apply(
 		// master never saw any of this.
 		result.RollbackFailed = restore(backups, log)
 		result.RolledBack = len(result.RollbackFailed) == 0
+		if result.RolledBack {
+			clearTransaction(opts.BackupDir, master.DropInDir)
+		}
 
 		if !result.RolledBack {
 			return result, fmt.Errorf("%w: %w; AND the rejected configuration could not be "+
@@ -325,6 +328,7 @@ func Apply(
 		log.Info("Wrote pool configuration; no running master to reload", "pools", len(changes))
 		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 		cleanup(backups, log)
+		clearTransaction(opts.BackupDir, master.DropInDir)
 		record(st, changes, now)
 
 		return result, nil
@@ -352,6 +356,7 @@ func Apply(
 			result.Reloaded = true
 			phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 			cleanup(backups, log)
+			clearTransaction(opts.BackupDir, master.DropInDir)
 			record(st, changes, now)
 
 			return result, nil
@@ -375,6 +380,9 @@ func Apply(
 		}
 		result.RollbackFailed = restore(backups, log)
 		result.RolledBack = len(result.RollbackFailed) == 0
+		if result.RolledBack {
+			clearTransaction(opts.BackupDir, master.DropInDir)
+		}
 
 		// Best effort: the master is already gone, so this may do nothing. It
 		// costs one signal and is the difference between a host that recovers
@@ -401,6 +409,7 @@ func Apply(
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
 	cleanup(backups, log)
+	clearTransaction(opts.BackupDir, master.DropInDir)
 	record(st, changes, now)
 
 	return result, nil
@@ -668,6 +677,10 @@ type backup struct {
 	content []byte
 	existed bool
 	saved   string
+
+	// rendered is what this run is about to write, kept so the transaction can
+	// record its hash before anything reaches the live directory.
+	rendered []byte
 }
 
 // writeDropIns saves the current fragments and writes the new ones.
@@ -676,32 +689,60 @@ func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options, log 
 		return nil, fmt.Errorf("cannot create backup directory: %w", err)
 	}
 
+	// Everything is prepared and recorded BEFORE the first live write. A run
+	// that dies partway through then leaves a record of what it intended, which
+	// is the only thing that makes the leftovers recoverable — a fragment that
+	// did not exist before has no backup, so without this there was nothing at
+	// all to say it was ours.
 	backups := make([]backup, 0, len(changes))
+	txn := transaction{DropInDir: master.DropInDir}
+
 	for _, pp := range changes {
 		if err := safePoolName(pp.Name); err != nil {
-			restore(backups, log)
-
 			return nil, err
 		}
 
 		path := DropInPath(master.DropInDir, pp.Name)
+		rendered := Render(pp)
 
-		b := backup{path: path}
+		b := backup{path: path, rendered: rendered}
 		if content, err := os.ReadFile(path); err == nil {
 			b.content, b.existed = content, true
 			b.saved = filepath.Join(opts.BackupDir, backupName(master.DropInDir, path))
-			if err := os.WriteFile(b.saved, content, 0o644); err != nil {
-				restore(backups, log)
-
-				return nil, fmt.Errorf("cannot back up %s: %w", path, err)
-			}
 		}
+
 		backups = append(backups, b)
+		txn.Files = append(txn.Files, txnFile{
+			Path:    path,
+			Existed: b.existed,
+			Saved:   filepath.Base(b.saved),
+			Wrote:   hashBytes(rendered),
+		})
+	}
 
-		if err := writeAtomic(path, Render(pp)); err != nil {
+	for i := range backups {
+		if !backups[i].existed {
+			continue
+		}
+		if err := writeAtomic(backups[i].saved, backups[i].content); err != nil {
+			restore(backups[:i], log)
+
+			return nil, fmt.Errorf("cannot back up %s: %w", backups[i].path, err)
+		}
+	}
+
+	if err := writeTransaction(opts.BackupDir, txn); err != nil {
+		restore(backups, log)
+
+		return nil, err
+	}
+
+	for i := range backups {
+		if err := writeAtomic(backups[i].path, backups[i].rendered); err != nil {
 			restore(backups, log)
+			clearTransaction(opts.BackupDir, master.DropInDir)
 
-			return nil, fmt.Errorf("cannot write %s: %w", path, err)
+			return nil, fmt.Errorf("cannot write %s: %w", backups[i].path, err)
 		}
 	}
 

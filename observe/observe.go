@@ -107,7 +107,20 @@ func Sample(ctx context.Context, targets []phpfpm.Target, log *slog.Logger) []Po
 		}
 
 		if outcome.Err != nil {
-			views = append(views, PoolView{Name: outcome.Name, Target: target, Err: outcome.Err})
+			// Carrying what discovery already knew. A pool that could not be
+			// scraped still occupies whatever it is configured for, and a view
+			// that reports nothing makes the allocator reserve nothing — so a
+			// site restarting for five seconds has its memory handed to its
+			// neighbours, who are then reloaded with larger ceilings, and the
+			// host is overcommitted the moment it comes back.
+			views = append(views, PoolView{
+				Name:               outcome.Name,
+				Target:             target,
+				CurrentMaxChildren: target.MaxChildren,
+				MaxChildrenKnown:   target.MaxChildren > 0,
+				ProcessManager:     target.ProcessManager,
+				Err:                outcome.Err,
+			})
 
 			continue
 		}

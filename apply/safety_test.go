@@ -242,78 +242,193 @@ func TestDecideComparesAgainstTheRunningSystem(t *testing.T) {
 	}
 }
 
-// TestReconcileRestoresWhatACrashLeftBehind.
+// crashAfterWriting does what a run does right up to the point it dies: takes
+// the backups, records the transaction, writes the live fragments. It then
+// returns without validating, reloading or cleaning up — which is exactly the
+// state an OOM kill or a reboot leaves behind.
+func crashAfterWriting(t *testing.T, master Master, backupDir string, changes ...allocate.PoolPlan) {
+	t.Helper()
+
+	if _, err := writeDropIns(master, changes, Options{BackupDir: backupDir}.Defaults(), nil); err != nil {
+		t.Fatalf("setting up the crashed state: %v", err)
+	}
+}
+
+// TestReconcileUndoesWhatACrashLeftBehind.
 //
-// The backup directory is written before the fragments and emptied after the
-// change sticks, so anything in it at startup means a process died in between.
-// Until Reconcile existed nothing ever read those files: they accumulated, and
-// the fragment they were a backup OF stayed live — possibly one php-fpm had
-// already rejected, waiting for the next reload from any source to adopt it.
-func TestReconcileRestoresWhatACrashLeftBehind(t *testing.T) {
+// A transaction record is written before the first live write and removed once
+// the change settles, so finding one at startup means a process died in
+// between. Until this existed nothing ever looked: the fragments stayed —
+// possibly ones php-fpm had already rejected — waiting for the next reload from
+// any source to adopt them and take the master down for good.
+func TestReconcileUndoesWhatACrashLeftBehind(t *testing.T) {
 	dir := t.TempDir()
-	backupDir := filepath.Join(dir, "backup")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	live := DropInPath(dir, "www")
+	original := "[www]\npm.max_children = 10\n"
+	if err := os.WriteFile(live, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	live := DropInPath(dir, "www")
-	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 999\n"), 0o644); err != nil {
-		t.Fatal(err)
+	configPath := masterConfigAt(t, dir)
+	master := Master{
+		// Rejects the real tree every time, so the configuration the crashed run
+		// left is invalid — the case where the backups are the only way back.
+		Binary: rejectsOnly(t, configPath), ConfigPath: configPath, DropInDir: dir,
 	}
-	saved := filepath.Join(backupDir, backupName(dir, live))
-	if err := os.WriteFile(saved, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
+
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 999})
+
+	err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	if !errors.Is(err, ErrUnreconciled) {
+		t.Fatalf("err = %v, want ErrUnreconciled: the restore is also rejected here, "+
+			"and that must be reported rather than assumed to have worked", err)
+	}
+
+	got, readErr := os.ReadFile(live)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != original {
+		t.Errorf("the fragment a dead run left behind was not put back:\n%s", got)
+	}
+}
+
+// TestReconcileRemovesAFragmentThatDidNotExistBefore is the case the backup
+// files alone could never cover.
+//
+// A fragment that did not exist has nothing to back up, so a run that died after
+// creating one left it behind with no trace that anyone had been there. Nothing
+// could remove it, because nothing knew it was ours.
+func TestReconcileRemovesAFragmentThatDidNotExistBefore(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	configPath := masterConfigAt(t, dir)
+	rejecting := Master{Binary: rejectsOnly(t, configPath), ConfigPath: configPath, DropInDir: dir}
+
+	crashAfterWriting(t, rejecting, backupDir, allocate.PoolPlan{Name: "brand-new", MaxChildren: 8})
+
+	created := DropInPath(dir, "brand-new")
+	if _, err := os.Stat(created); err != nil {
+		t.Fatalf("setting up: the fragment was not created: %v", err)
+	}
+
+	_ = Reconcile(context.Background(), rejecting, Options{BackupDir: backupDir}, nil)
+
+	if _, err := os.Stat(created); !os.IsNotExist(err) {
+		t.Error("a fragment created by a run that died was left behind; nothing else " +
+			"will ever remove it, and the next reload adopts it")
+	}
+}
+
+// TestReconcileLeavesAFileSomeoneElseChanged.
+//
+// A configuration can fail to validate for reasons that have nothing to do with
+// the unfinished run — an operator editing an unrelated pool at the wrong
+// moment. Reverting their work to a state this tool happens to hold a copy of is
+// not a repair, and a backup on its own is not evidence that restoring it is
+// right. The hash the dead run recorded is.
+func TestReconcileLeavesAFileSomeoneElseChanged(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	live := DropInPath(dir, "www")
+	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	configPath := masterConfigAt(t, dir)
 	master := Master{Binary: rejectsOnly(t, configPath), ConfigPath: configPath, DropInDir: dir}
 
-	// rejectsOnly rejects this config every time, so the restore happens and is
-	// then found to be rejected too — which must be reported, not swallowed.
-	err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
-	if !errors.Is(err, ErrUnreconciled) {
-		t.Fatalf("err = %v, want ErrUnreconciled", err)
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+
+	// The operator has since edited it themselves.
+	theirs := "[www]\n; hand-tuned during the incident\npm.max_children = 25\n"
+	if err := os.WriteFile(live, []byte(theirs), 0o644); err != nil {
+		t.Fatal(err)
 	}
+
+	_ = Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
 
 	got, err := os.ReadFile(live)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "pm.max_children = 10") {
-		t.Errorf("the fragment a dead run left behind was not put back:\n%s", got)
+	if string(got) != theirs {
+		t.Errorf("an operator's own edit was reverted to a copy this tool happened to "+
+			"hold:\n%s", got)
 	}
 }
 
-// TestReconcileDiscardsStaleBackupsWhenTheConfigIsFine: the common case. The run
-// died after the change stuck, so the backups are stale — restoring them would
-// undo a good change.
-func TestReconcileDiscardsStaleBackupsWhenTheConfigIsFine(t *testing.T) {
+// TestReconcileLeavesAValidConfigurationAlone: the common case. The run died
+// after the change stuck, so undoing it would be its own outage.
+func TestReconcileLeavesAValidConfigurationAlone(t *testing.T) {
 	dir := t.TempDir()
-	backupDir := filepath.Join(dir, "backup")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	backupDir := filepath.Join(t.TempDir(), "backup")
 
 	live := DropInPath(dir, "www")
-	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 40\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	saved := filepath.Join(backupDir, backupName(dir, live))
-	if err := os.WriteFile(saved, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
+	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	master := Master{Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir}
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+
 	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
 	got, _ := os.ReadFile(live)
 	if !strings.Contains(string(got), "pm.max_children = 40") {
-		t.Errorf("a valid configuration was reverted to a stale backup:\n%s", got)
+		t.Errorf("a valid configuration was reverted:\n%s", got)
 	}
-	if _, err := os.Stat(saved); !os.IsNotExist(err) {
-		t.Error("the stale backup was left behind, so the next start reconciles again")
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("%d file(s) left in the backup directory, so the next start "+
+			"reconciles all over again", len(entries))
+	}
+}
+
+// TestReconcileIgnoresAnotherMastersTransaction.
+//
+// MasterOnHost refuses a host with more than one master and tells the operator
+// to run once per master with the drop-in directory set — but nothing stops both
+// runs sharing the default backup directory. Acting on the other master's record
+// would mean restoring configuration into a pool directory it was never taken
+// from: invented out of another server's history, presented as a rollback.
+func TestReconcileIgnoresAnotherMastersTransaction(t *testing.T) {
+	ours := t.TempDir()
+	theirs := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	theirConfig := masterConfigAt(t, theirs)
+	crashAfterWriting(t,
+		Master{Binary: trueBin(t), ConfigPath: theirConfig, DropInDir: theirs},
+		backupDir, allocate.PoolPlan{Name: "elsewhere", MaxChildren: 99})
+
+	ourConfig := masterConfigAt(t, ours)
+	master := Master{
+		// Rejects everything, so if Reconcile took those files for its own it
+		// would go on to act on them.
+		Binary: rejectsOnly(t, ourConfig), ConfigPath: ourConfig, DropInDir: ours,
+	}
+
+	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
+		t.Fatalf("Reconcile acted on another master's transaction: %v", err)
+	}
+	if _, err := os.Stat(DropInPath(ours, "elsewhere")); !os.IsNotExist(err) {
+		t.Error("a fragment belonging to another master was written into this one's " +
+			"pool directory")
+	}
+	if _, err := os.Stat(DropInPath(theirs, "elsewhere")); err != nil {
+		t.Error("the other master's own fragment was removed by a run that does not " +
+			"manage it")
 	}
 }
 
@@ -436,42 +551,6 @@ func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 	}
 	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the change was not recorded, so the next round has no baseline: %+v", ps)
-	}
-}
-
-// TestReconcileIgnoresAnotherMastersBackups.
-//
-// MasterFrom refuses a host with more than one master and tells the operator to
-// run once per master with the drop-in directory set — but nothing stops both
-// runs sharing the default backup directory. Reconcile would then find the other
-// master's saved fragments, take them for its own, and write them into a pool
-// directory they were never taken from: configuration invented out of another
-// server's history, restored as though it were a rollback.
-func TestReconcileIgnoresAnotherMastersBackups(t *testing.T) {
-	ours := t.TempDir()
-	theirs := t.TempDir()
-	backupDir := t.TempDir()
-
-	// A fragment saved by the OTHER master, for a pool this one does not have.
-	if err := os.WriteFile(
-		filepath.Join(backupDir, backupName(theirs, DropInPath(theirs, "elsewhere"))),
-		[]byte("[elsewhere]\npm.max_children = 99\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	configPath := masterConfigAt(t, ours)
-	master := Master{
-		// Rejects everything, so if Reconcile decided those backups were its own
-		// it would go on to restore them.
-		Binary: rejectsOnly(t, configPath), ConfigPath: configPath, DropInDir: ours,
-	}
-
-	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
-		t.Fatalf("Reconcile acted on another master's backups: %v", err)
-	}
-
-	if _, err := os.Stat(DropInPath(ours, "elsewhere")); !os.IsNotExist(err) {
-		t.Error("a fragment belonging to another master was restored into this one's pool directory")
 	}
 }
 

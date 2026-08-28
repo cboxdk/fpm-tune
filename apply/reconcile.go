@@ -2,8 +2,6 @@ package apply
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,127 +18,130 @@ var ErrUnreconciled = errors.New("a previous run left a rejected configuration i
 
 // Reconcile cleans up after a run that did not finish.
 //
-// The backup directory is written before the pool fragments and emptied after
-// the change sticks, so anything found in it at startup means a previous process
-// died in between: killed by the OOM reaper, the host rebooted, someone pressed
-// ctrl-c during the reload. Until this existed nothing ever read those files
-// back. They accumulated silently, and the fragment they were a backup OF stayed
-// in the pool directory — possibly one PHP-FPM had already rejected, waiting to
-// be adopted by the next reload from any source.
+// A transaction record is written before the first live write and removed once
+// the change has settled, so finding one at startup means a process died in
+// between: the OOM reaper, a reboot, ctrl-c during the reload. Until this
+// existed nothing ever looked, and the fragments stayed — possibly ones php-fpm
+// had already rejected, waiting for the next reload from any source to adopt
+// them and take the master down for good.
 //
-// The rule is to trust the validator, not the bookkeeping. If what is on disk
-// now passes `php-fpm -t`, the change either stuck or was already undone, and
-// the backups are stale; if it does not pass, they are the only route back.
+// Two rules make it safe to run automatically.
+//
+// It trusts the validator over the bookkeeping. If what is on disk now passes
+// `php-fpm -t` the change either stuck or was already undone, and the record is
+// stale; undoing a good configuration because a process died after writing it
+// would be its own outage.
+//
+// And it only touches files it can prove are its own, by comparing them against
+// the hash the dead run recorded. A configuration can fail to validate for
+// reasons that have nothing to do with the unfinished run — an operator editing
+// an unrelated pool at the wrong moment — and reverting their work to a state
+// this tool happens to hold a copy of is not a repair.
 func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
 	opts = opts.Defaults()
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	saved, err := staleBackups(opts.BackupDir, master.DropInDir)
-	if err != nil || len(saved) == 0 {
-		return err
+	txn, found := readTransaction(opts.BackupDir, master.DropInDir)
+	if !found {
+		return nil
 	}
 
 	log.Warn("A previous run did not finish; checking what it left behind",
-		"backups", len(saved), "dir", opts.BackupDir)
+		"files", len(txn.Files), "dir", opts.BackupDir)
 
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err == nil {
-		log.Info("The configuration on disk is valid; discarding the stale backups")
-		for _, s := range saved {
-			if rmErr := os.Remove(s); rmErr != nil && !os.IsNotExist(rmErr) {
-				log.Warn("Could not remove a stale backup", "path", s, "error", rmErr)
-			}
-		}
+		log.Info("The configuration on disk is valid; the unfinished change stands")
+		discard(txn, opts.BackupDir, log)
 
 		return nil
 	}
 
-	log.Error("The configuration left on disk is invalid; restoring the previous one")
+	log.Error("The configuration left on disk is invalid; undoing what the run had written")
 
-	var failed []string
-	for _, s := range saved {
-		target, ok := backupTarget(master.DropInDir, s)
-		if !ok {
+	var failed, foreign []string
+	for _, file := range txn.Files {
+		live := hashOf(file.Path)
+
+		switch {
+		case live == "" && !file.Existed:
+			// Never created, or already removed. Nothing to undo.
+			continue
+
+		case live != file.Wrote:
+			// Not what the dead run wrote. Someone else owns this file now, and
+			// reverting it would be destroying their work rather than ours.
+			foreign = append(foreign, file.Path)
+
 			continue
 		}
 
-		content, readErr := os.ReadFile(s)
-		if readErr != nil {
-			log.Error("Could not read a backup", "path", s, "error", readErr)
-			failed = append(failed, target)
-
-			continue
+		if err := undo(file, opts.BackupDir); err != nil {
+			log.Error("Could not undo", "path", file.Path, "error", err)
+			failed = append(failed, file.Path)
 		}
-		if writeErr := writeAtomic(target, content); writeErr != nil {
-			log.Error("Could not restore", "path", target, "error", writeErr)
-			failed = append(failed, target)
-
-			continue
-		}
-		_ = os.Remove(s)
 	}
 
+	if len(foreign) > 0 {
+		log.Warn("Left alone: changed since the unfinished run wrote them, so they are "+
+			"no longer ours to undo", "paths", foreign)
+	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%w, and it could not be undone: %s",
 			ErrUnreconciled, strings.Join(failed, ", "))
 	}
 
-	// Validated again rather than assumed: the backups are what was there before
-	// the failed run, but "before" is not proof of "valid" — the run may have
-	// been correcting something already broken.
+	// Validated again rather than assumed. What the run replaced is not proof of
+	// valid — it may have been correcting something already broken — and if
+	// files were left alone above, the thing that breaks the config may be one
+	// of those.
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
-		return fmt.Errorf("%w: the previous configuration was restored and is ALSO rejected: %w",
-			ErrUnreconciled, err)
+		return fmt.Errorf("%w: undoing it was not enough and the configuration is still "+
+			"rejected: %w", ErrUnreconciled, err)
 	}
 
-	log.Info("Restored the previous configuration; it validates")
+	discard(txn, opts.BackupDir, log)
+	log.Info("Undid the unfinished change; the configuration validates")
 
 	return nil
 }
 
-// backupTarget maps a saved fragment back to the file it came from, and reports
-// whether it belongs to this master at all.
-func backupTarget(dropInDir, saved string) (string, bool) {
-	name := filepath.Base(saved)
+// undo puts one file back the way the transaction found it.
+func undo(file txnFile, backupDir string) error {
+	if !file.Existed {
+		// There was no fragment before, so undoing means removing ours rather
+		// than leaving an empty one behind — an empty [pool] section is still a
+		// pool definition.
+		if err := os.Remove(file.Path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 
-	prefix, rest, found := strings.Cut(name, "-")
-	if !found {
-		return "", false
-	}
-	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
-	if prefix != hex.EncodeToString(sum[:4]) {
-		return "", false
+		return nil
 	}
 
-	return filepath.Join(dropInDir, strings.TrimSuffix(rest, ".bak")), true
+	if file.Saved == "" {
+		return errors.New("the transaction says a file was replaced but names no backup")
+	}
+
+	content, err := os.ReadFile(filepath.Join(backupDir, file.Saved))
+	if err != nil {
+		return err
+	}
+
+	return writeAtomic(file.Path, content)
 }
 
-// staleBackups lists this master's saved fragments left by an unfinished run.
-func staleBackups(dir, dropInDir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("cannot read the backup directory: %w", err)
-	}
-
-	var saved []string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".bak") {
+// discard removes a finished transaction and the copies it took.
+func discard(txn transaction, backupDir string, log *slog.Logger) {
+	for _, file := range txn.Files {
+		if file.Saved == "" {
 			continue
 		}
-		full := filepath.Join(dir, e.Name())
-		// Another master's saved fragments live here too when the default
-		// backup directory is shared. Restoring those into this master's pool
-		// directory would be inventing configuration.
-		if _, ok := backupTarget(dropInDir, full); !ok {
-			continue
+		if err := os.Remove(filepath.Join(backupDir, file.Saved)); err != nil && !os.IsNotExist(err) {
+			log.Debug("Could not remove a backup", "name", file.Saved, "error", err)
 		}
-		saved = append(saved, full)
 	}
 
-	return saved, nil
+	clearTransaction(backupDir, txn.DropInDir)
 }
