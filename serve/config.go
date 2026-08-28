@@ -30,7 +30,7 @@ func IncludeDirOf(configPath string) string {
 //
 // All of them, and whole. The basename half matters: a master including
 // [a-y]*.conf, or naming its pool files one by one, does not pick up
-// zz-fpm-tune-www.conf — and writing a fragment nobody reads is the quietest
+// zz-fpm-tune.conf — and writing a fragment nobody reads is the quietest
 // possible failure, because `php-fpm -t` passes, the reload succeeds and the
 // change records itself as applied.
 //

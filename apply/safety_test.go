@@ -648,7 +648,7 @@ func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 //
 // The quietest possible failure. A master that includes [a-y]*.conf — or names
 // its pool files one by one, which plenty of hand-built configurations do —
-// never reads zz-fpm-tune-www.conf. Everything then succeeds: `php-fpm -t`
+// never reads zz-fpm-tune.conf. Everything then succeeds: `php-fpm -t`
 // passes, the reload goes through, the pools are recorded as applied, the
 // operator is told the host was retuned. And the running configuration is
 // exactly what it was before, forever, with the tool reporting success on every

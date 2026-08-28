@@ -259,8 +259,8 @@ func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	c := registerCommon(fs)
 	var (
-		dropInDir   = fs.String("drop-in-dir", "", "where pool fragments are written (default: alongside the discovered pool configs)")
-		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where the previous fragments are kept while a change is in flight")
+		dropInDir   = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
+		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where the previous configuration is kept while a change is in flight")
 		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
 		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
 		dryRun      = fs.Bool("dry-run", false, "render and validate, but write nothing and reload nothing")
@@ -469,8 +469,8 @@ func runServe(args []string) error {
 		doApply     = fs.Bool("apply", false,
 			"act on the plan. Without it the loop observes, learns and publishes metrics "+
 				"without touching any configuration, which is a reasonable way to run permanently")
-		dropInDir   = fs.String("drop-in-dir", "", "where pool fragments are written (default: the master config's include directory)")
-		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where previous fragments are kept while a change is in flight")
+		dropInDir   = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
+		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where the previous configuration is kept while a change is in flight")
 		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
 		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
 		saveEvery   = fs.Duration("save-every", 5*time.Minute, "how often learned baselines reach disk")

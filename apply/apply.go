@@ -67,7 +67,7 @@ type Master struct {
 	// passes, the reload succeeds, the change is recorded as applied, and the
 	// running configuration is exactly what it was. A master including
 	// [a-y]*.conf, or naming its pool files individually, does not pick up
-	// zz-fpm-tune-www.conf.
+	// zz-fpm-tune.conf.
 	IncludePatterns []string
 
 	// PIDFile is the master's pid file, when it has one.
