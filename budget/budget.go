@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,10 +23,14 @@ type Source string
 
 const (
 	SourceCgroupV2 Source = "cgroup v2"
-	SourceCgroupV1 Source = "cgroup v1"
-	SourceMemInfo  Source = "/proc/meminfo"
-	SourceSysctl   Source = "sysctl"
-	SourceOverride Source = "override"
+
+	// SourceCgroupProcess is the limit found on the managed process's OWN
+	// cgroup, which on a VM is the only place it lives.
+	SourceCgroupProcess Source = "php-fpm's cgroup"
+	SourceCgroupV1      Source = "cgroup v1"
+	SourceMemInfo       Source = "/proc/meminfo"
+	SourceSysctl        Source = "sysctl"
+	SourceOverride      Source = "override"
 )
 
 // Limits is what the host makes available.
@@ -57,6 +62,13 @@ type sysPaths struct {
 	memInfo        string
 }
 
+// cgroupRoot and procRoot are separated out so the per-process lookup can be
+// pointed at fixtures.
+var (
+	cgroupRoot = "/sys/fs/cgroup"
+	procRoot   = "/proc"
+)
+
 var defaultPaths = sysPaths{
 	cgroupV2Memory: "/sys/fs/cgroup/memory.max",
 	cgroupV2CPU:    "/sys/fs/cgroup/cpu.max",
@@ -77,6 +89,97 @@ const implausibleLimit = int64(1) << 50
 // Detect reads the host's limits.
 func Detect() Limits {
 	return detectWith(defaultPaths)
+}
+
+// DetectFor reads the limits that apply to a PARTICULAR process, which on a VM
+// is not the same question.
+//
+// Detect reads /sys/fs/cgroup/memory.max — an absolute path, which is the ROOT
+// of the hierarchy. Inside a container that is exactly right: the container's
+// own cgroup is what gets mounted there, so the root IS the container's limit.
+// On a VM it is the machine, and the machine is never limited.
+//
+// So a php-fpm under a systemd slice with MemoryMax=3G was sized against the
+// host's 20GiB. Measured on a five-pool Ubuntu VM: fpm-tune reported "14.7GiB
+// available to workers" while php-fpm's own cgroup would OOM-kill its workers at
+// 3GiB — driving straight into the ceiling this tool exists to avoid, and
+// looking right the whole way, because the number it printed was the machine's
+// real memory.
+//
+// Docker could not surface this. In a container both readings agree, which is
+// why the container tests passed throughout.
+//
+// The limit that applies is the smallest along the process's own path, since a
+// cap on any ancestor binds everything below it.
+func DetectFor(pid int) Limits {
+	limits := detectWith(defaultPaths)
+	if pid <= 0 {
+		return limits
+	}
+
+	bytes, ok := cgroupLimitOf(pid)
+	if !ok || bytes <= 0 || bytes >= limits.MemoryBytes {
+		return limits
+	}
+
+	limits.MemoryBytes = bytes
+	limits.Containerized = true
+	limits.Source = SourceCgroupProcess
+
+	return limits
+}
+
+// cgroupLimitOf walks the cgroups a process belongs to and returns the tightest
+// memory limit found.
+func cgroupLimitOf(pid int) (int64, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/cgroup", procRoot, pid))
+	if err != nil {
+		return 0, false
+	}
+
+	best := int64(0)
+	for _, line := range strings.Split(string(data), "\n") {
+		// v2: "0::/system.slice/php-fpm.service"
+		// v1: "N:memory:/system.slice/php-fpm.service"
+		fields := strings.SplitN(strings.TrimSpace(line), ":", 3)
+		if len(fields) != 3 || fields[2] == "" {
+			continue
+		}
+
+		var base, file string
+		switch {
+		case fields[0] == "0" && fields[1] == "":
+			base, file = cgroupRoot, "memory.max"
+		case strings.Contains(fields[1], "memory"):
+			base, file = cgroupRoot+"/memory", "memory.limit_in_bytes"
+		default:
+			continue
+		}
+
+		// Every ancestor, not just the leaf: a cap on a parent slice binds
+		// everything under it, and the effective limit is the smallest.
+		for path := fields[2]; ; path = filepath.Dir(path) {
+			if v, ok := plausible(readTrimmed(filepath.Join(base, path, file))); ok {
+				if best == 0 || v < best {
+					best = v
+				}
+			}
+			if path == "/" || path == "." {
+				break
+			}
+		}
+	}
+
+	return best, best > 0
+}
+
+func readTrimmed(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(data))
 }
 
 func detectWith(p sysPaths) Limits {
@@ -122,8 +225,14 @@ func (l Limits) WithOverride(memoryBytes int64) Limits {
 
 // Describe renders the limits for operator-facing output.
 func (l Limits) Describe() string {
+	// "container" is wrong on a VM, where the same limit comes from a systemd
+	// slice — and an operator reading "container memory 3.0GiB" on a bare VM has
+	// good reason to distrust the rest of the output.
 	where := "host"
-	if l.Containerized {
+	switch {
+	case l.Source == SourceCgroupProcess:
+		where = "php-fpm's"
+	case l.Containerized:
 		where = "container"
 	}
 

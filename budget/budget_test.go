@@ -3,6 +3,7 @@ package budget
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -240,4 +241,124 @@ func write(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestDetectForReadsTheManagedProcessCgroup.
+//
+// Detect reads /sys/fs/cgroup/memory.max — an absolute path, which is the ROOT
+// of the hierarchy. Inside a container that is exactly right, because the
+// container's own cgroup is what gets mounted there. On a VM it is the machine,
+// and the machine is never limited.
+//
+// Measured on a five-pool Ubuntu VM with php-fpm under MemoryMax=3G: fpm-tune
+// reported "14.7GiB available to workers" while php-fpm's own cgroup would
+// OOM-kill its workers at 3GiB. It would have grown the pools straight into the
+// ceiling it exists to avoid, and looked right the whole way, because the number
+// it printed was the machine's real memory. No container test could surface it:
+// in a container both readings agree.
+func TestDetectForReadsTheManagedProcessCgroup(t *testing.T) {
+	root := t.TempDir()
+
+	// /proc/<pid>/cgroup, as systemd leaves it.
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php8.5-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The limit on the service, "max" everywhere above it — the real shape.
+	cg := filepath.Join(root, "cgroup")
+	for path, value := range map[string]string{
+		"system.slice/php8.5-fpm.service": "3221225472",
+		"system.slice":                    "max",
+		"":                                "max",
+	} {
+		dir := filepath.Join(cg, path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(value+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restore := swapRoots(cg, filepath.Join(root, "proc"))
+	defer restore()
+
+	limits := DetectFor(4242)
+
+	if limits.MemoryBytes != 3221225472 {
+		t.Errorf("MemoryBytes = %s, want the 3GiB the service is actually capped at",
+			HumanBytes(limits.MemoryBytes))
+	}
+	if limits.Source != SourceCgroupProcess {
+		t.Errorf("Source = %q, want %q so an operator can see which number to change",
+			limits.Source, SourceCgroupProcess)
+	}
+	if strings.Contains(limits.Describe(), "container") {
+		t.Errorf("described as a container on a VM: %q", limits.Describe())
+	}
+}
+
+// TestDetectForTakesTheTightestLimitInThePath: a cap on a parent slice binds
+// everything under it, so the effective limit is the smallest along the path —
+// not the one nearest the process.
+func TestDetectForTakesTheTightestLimitInThePath(t *testing.T) {
+	root := t.TempDir()
+
+	proc := filepath.Join(root, "proc", "77")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/sites.slice/php.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := filepath.Join(root, "cgroup")
+	for path, value := range map[string]string{
+		"sites.slice/php.service": "8589934592", // 8GiB on the service
+		"sites.slice":             "2147483648", // 2GiB on the slice above it
+		"":                        "max",
+	} {
+		dir := filepath.Join(cg, path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(value+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restore := swapRoots(cg, filepath.Join(root, "proc"))
+	defer restore()
+
+	if got := DetectFor(77).MemoryBytes; got != 2147483648 {
+		t.Errorf("MemoryBytes = %s, want the 2GiB parent cap: sizing to the service's "+
+			"own 8GiB would be sizing past a limit that binds it", HumanBytes(got))
+	}
+}
+
+// TestDetectForFallsBackWhenThereIsNoLimit: a bare VM with no slice cap must
+// still report the machine's memory rather than nothing.
+func TestDetectForFallsBackWhenThereIsNoLimit(t *testing.T) {
+	plain := Detect()
+	if plain.MemoryBytes <= 0 {
+		t.Skip("no memory reading available on this host")
+	}
+
+	if got := DetectFor(0); got.MemoryBytes != plain.MemoryBytes {
+		t.Errorf("DetectFor(0) = %s, want the same as Detect() = %s",
+			HumanBytes(got.MemoryBytes), HumanBytes(plain.MemoryBytes))
+	}
+}
+
+func swapRoots(cg, proc string) func() {
+	oldCg, oldProc := cgroupRoot, procRoot
+	cgroupRoot, procRoot = cg, proc
+
+	return func() { cgroupRoot, procRoot = oldCg, oldProc }
 }
