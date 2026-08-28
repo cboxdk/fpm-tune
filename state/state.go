@@ -68,6 +68,12 @@ type PoolState struct {
 	FirstSeen   time.Time `json:"first_seen"`
 	LastUpdated time.Time `json:"last_updated"`
 
+	// LastMaxChildrenReached is PHP-FPM's max_children counter as of the last
+	// scrape. It is a running total since the master started, so only the delta
+	// says whether a pool is hitting its ceiling NOW — a pool that ran out once
+	// last Tuesday should not still be growing because of it.
+	LastMaxChildrenReached int64 `json:"last_max_children_reached,omitempty"`
+
 	// LastAppliedMaxChildren and LastAppliedAt support hysteresis: a change is
 	// only worth a reload if it is big enough and the last one was long enough
 	// ago.
