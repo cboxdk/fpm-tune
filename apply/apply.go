@@ -57,6 +57,13 @@ type Master struct {
 	// rather than a master this caller failed to identify.
 	NoMasterExpected bool
 
+	// PIDFile is the master's pid file, when it has one.
+	//
+	// Used only to recognise the master after a reload: a daemonized php-fpm
+	// re-execs into a NEW pid and rewrites this file, and without it a perfectly
+	// successful reload looks like a master that died.
+	PIDFile string
+
 	// DropInDir is where per-pool fragments are written.
 	DropInDir string
 }
@@ -293,7 +300,16 @@ func Apply(
 		return result, nil
 	}
 
-	if err := phpfpm.ReloadAndWait(ctx, master.PID, opts.SettleTime, log); err != nil {
+	// PIDFile and ConfigPath let a reload be confirmed when the master comes
+	// back under a NEW pid, which is what a daemonized reload does — php-fpm's
+	// own default. Watching only the original pid reported those as a dead
+	// master and rolled good changes back.
+	newPID, err := phpfpm.ReloadAndWait(ctx, phpfpm.ReloadTarget{
+		PID:        master.PID,
+		PIDFile:    master.PIDFile,
+		ConfigPath: master.ConfigPath,
+	}, opts.SettleTime, log)
+	if err != nil {
 		// A cancelled context is not a dead master. The settle watch takes the
 		// context, so a SIGTERM to fpm-tune during the watch surfaced here as
 		// "the master did not survive" — and the handler rolled the (valid,
@@ -344,6 +360,9 @@ func Apply(
 	}
 
 	result.Reloaded = true
+	if newPID != master.PID {
+		log.Info("The master reloaded into a new pid", "was", master.PID, "now", newPID)
+	}
 
 	// The parsed configuration is cached, so without this the next scrape reads
 	// the settings from before this change and reports a pool as configured for

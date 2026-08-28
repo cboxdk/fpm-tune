@@ -46,7 +46,12 @@ func New() *Collectors {
 		workersRecommended: gaugeVec(reg, "fpm_tune_pool_workers_recommended",
 			"pm.max_children fpm-tune would set. Differs from configured when a change is pending or held back by hysteresis.", "pool"),
 		workerRSS: gaugeVec(reg, "fpm_tune_pool_worker_rss_bytes",
-			"Learned per-worker memory. quantile=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen.", "pool", "quantile"),
+			// Labelled "estimate" rather than "quantile". Prometheus reserves
+			// quantile for summary metrics, where it must be a number: PromQL's
+			// histogram_quantile and most dashboard tooling treat it specially,
+			// and "typical_peak" is not a quantile in any case — it is an
+			// asymmetric moving estimate.
+			"Learned per-worker memory. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen.", "pool", "estimate"),
 		confidence: gaugeVec(reg, "fpm_tune_pool_baseline_confidence",
 			"How far the learned baseline is trusted, 0 to 1. Below 1 the pool is sized from an estimate and will not be cut.", "pool"),
 		demandUnmet: gaugeVec(reg, "fpm_tune_pool_demand_unmet",

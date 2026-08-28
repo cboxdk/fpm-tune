@@ -89,8 +89,9 @@ func TestBaselineIsPublishedWithItsConfidence(t *testing.T) {
 	c.Update(result(poolPlan("shop", 12, false)), st, state.Options{}, 1)
 
 	for _, want := range []string{
-		`fpm_tune_pool_worker_rss_bytes{pool="shop",quantile="typical_peak"}`,
-		`fpm_tune_pool_worker_rss_bytes{pool="shop",quantile="high_water"}`,
+		// Labels come out alphabetically, so estimate precedes pool.
+		`fpm_tune_pool_worker_rss_bytes{estimate="typical_peak",pool="shop"}`,
+		`fpm_tune_pool_worker_rss_bytes{estimate="high_water",pool="shop"}`,
 		`fpm_tune_pool_baseline_confidence{pool="shop"}`,
 		`fpm_tune_pool_measured{pool="shop"}`,
 	} {

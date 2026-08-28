@@ -410,6 +410,7 @@ func MasterFrom(result plan.Result, dropInDir string) (apply.Master, error) {
 	}
 
 	master.PID = masterPID(result, t.config)
+	master.PIDFile = PIDFileOf(t.config)
 
 	return master, nil
 }

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,6 +30,14 @@ var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		// Asking for help is not a failure. flag.ContinueOnError returns
+		// ErrHelp for -h, which travelled all the way up and made
+		// `fpm-tune plan --help` exit 1 — enough to fail a shell script that
+		// checks its tools respond, and a confusing first impression.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+
 		fmt.Fprintf(os.Stderr, "fpm-tune: %v\n", err)
 		os.Exit(1)
 	}

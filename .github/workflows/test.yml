@@ -93,6 +93,42 @@ jobs:
       - name: Run govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  # The unit tests stand php-fpm in with `true` and `false`, which tests the
+  # decision logic and nothing about the part that can take a host down. This
+  # job runs the real binary: a real master, a real `php-fpm -t`, a real
+  # SIGUSR2, and a real check that the master came back. Every property it
+  # asserts has been observed failing.
+  integration:
+    name: End-to-end against a real PHP-FPM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install PHP-FPM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends php-fpm
+          sudo systemctl stop php*-fpm || true
+          php-fpm8.3 -v || php-fpm -v
+
+      # With php-fpm present, the tests that skip without it now run.
+      - name: Run tests with php-fpm available
+        run: go test -race ./...
+
+      - name: Build
+        run: go build -o build/fpm-tune ./cmd/fpm-tune
+
+      - name: End-to-end
+        run: sudo testing/e2e.sh "$PWD/build/fpm-tune"
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
