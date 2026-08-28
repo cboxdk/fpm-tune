@@ -167,5 +167,27 @@ BEFORE="$(cat "$POOLS/zz-fpm-tune.conf")"
   || fail "the tool rewrote its own configuration for a breakage elsewhere"
 rm -f "$POOLS/zz-broken.conf"
 
+# ---------------------------------------------------------------------------
+echo "--- the state file is lost"
+#
+# What this proves: losing the learned state does not break the host, lose this
+# tool's file, or leave a configuration php-fpm rejects.
+#
+# What it does NOT prove, deliberately: that the individual overrides survive.
+# That fault only shows when SOME pools change and others do not, and a harness
+# with no load cannot arrange that split reliably — every pool moves together
+# here, so ownership never has to be consulted. It is covered exactly, with a
+# mutation check, by TestOwnershipSurvivesLosingTheStateFile.
+[ -f "$POOLS/zz-fpm-tune.conf" ] || fail "nothing is overridden, so this proves nothing"
+
+rm -f "$STATE/state.json"
+
+"$BIN" apply "${SCOPE[@]}" > "$ROOT/a7" 2>&1 || fail "apply after losing state: $(cat "$ROOT/a7")"
+
+[ -f "$POOLS/zz-fpm-tune.conf" ] || fail "losing the state file took this tool's file with it"
+"$FPM" -t --fpm-config "$ROOT/php-fpm.conf" 2>/dev/null \
+  || fail "the configuration is rejected after losing state"
+kill -0 "$(cat "$ROOT/fpm.pid")" || fail "the master did not survive losing the state file"
+
 echo
 echo "chaos: all scenarios survived, against php-fpm $("$FPM" -v | head -1)"
