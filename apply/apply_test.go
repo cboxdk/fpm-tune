@@ -485,7 +485,10 @@ func TestRollbackFailureIsNotReportedAsSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := DropInPath(dir)
 
-	if err := os.WriteFile(path, []byte("[www]\npm.max_children = 5\n"), 0o644); err != nil {
+	// Written as this tool writes it: the fixture stands for a previous run's
+	// output, and a file without the generated header is deliberately refused.
+	if err := os.WriteFile(path,
+		Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 5}}), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

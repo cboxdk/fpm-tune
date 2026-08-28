@@ -213,6 +213,14 @@ func (r Result) Changed() []Outcome {
 // Nothing was reloaded, and the previous drop-ins have been restored.
 var ErrValidationFailed = errors.New("php-fpm rejected the rendered configuration")
 
+// ErrForeignDropIn reports a file under this tool's name that it did not write.
+//
+// Refusing is the point. "zz-" is where an operator puts their own last-order
+// overrides, so a collision is a plausible accident rather than an attack — and
+// replacing their configuration without a word would be a far worse outcome than
+// declining to act.
+var ErrForeignDropIn = errors.New("the drop-in path is occupied by a file this tool did not write")
+
 // ErrNotIncluded reports that the fragments would be written somewhere the
 // master does not read.
 var ErrNotIncluded = errors.New("php-fpm does not include the files this would write")
@@ -314,7 +322,10 @@ func Apply(
 	// The file holds every pool this tool overrides, not just the ones changing
 	// now: it is replaced whole, so writing only the changes would drop the
 	// others' overrides.
-	pools := overrideSet(master, plan, changes, st)
+	pools, err := overrideSet(master, plan, changes, st)
+	if err != nil {
+		return result, err
+	}
 	rendered := Render(pools)
 
 	b, err := writeDropIn(master, pools, opts, log)
@@ -1176,13 +1187,16 @@ func overrideSet(
 	plan allocate.Plan,
 	changes []allocate.PoolPlan,
 	st *state.State,
-) []allocate.PoolPlan {
+) ([]allocate.PoolPlan, error) {
 	changing := make(map[string]allocate.PoolPlan, len(changes))
 	for _, pp := range changes {
 		changing[pp.Name] = pp
 	}
 
-	owned := parseOurs(DropInPath(master.DropInDir))
+	owned, err := parseOurs(DropInPath(master.DropInDir))
+	if err != nil {
+		return nil, err
+	}
 
 	out := make([]allocate.PoolPlan, 0, len(plan.Pools))
 	for _, pp := range plan.Pools {
@@ -1217,7 +1231,7 @@ func overrideSet(
 		}
 	}
 
-	return out
+	return out, nil
 }
 
 // parseOurs reads back the file this tool wrote.
@@ -1225,10 +1239,27 @@ func overrideSet(
 // Only the keys it writes, and only from a file it recognises as its own: the
 // values are fed straight back into the next version of the file, so anything
 // unrecognised is safer dropped than guessed at.
-func parseOurs(path string) map[string]allocate.PoolPlan {
+func parseOurs(path string) (map[string]allocate.PoolPlan, error) {
 	body, err := os.ReadFile(path)
-	if err != nil || !isOurs(body) {
-		return nil
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Nothing overridden yet. The ordinary first run.
+			return nil, nil
+		}
+
+		// The file is THERE and cannot be read. Carrying on would rewrite it
+		// without the sections it holds, and every pool held below its own
+		// configuration would jump back on the next reload — the same silent
+		// release as losing the state file, reached from the other direction.
+		return nil, fmt.Errorf("cannot read %s to see what is already overridden: %w", path, err)
+	}
+	if !isOurs(body) {
+		// Someone else's file under this name. Not ours to read back, and
+		// certainly not ours to replace — silently overwriting an operator's own
+		// configuration is a worse outcome than doing nothing and saying so.
+		return nil, fmt.Errorf("%w: %s exists and was not written by this tool. "+
+			"Move it aside, or point --drop-in-dir somewhere else, and this will write "+
+			"its own", ErrForeignDropIn, path)
 	}
 
 	owned := map[string]allocate.PoolPlan{}
@@ -1283,7 +1314,7 @@ func parseOurs(path string) map[string]allocate.PoolPlan {
 		}
 	}
 
-	return owned
+	return owned, nil
 }
 
 // generatedMarker identifies a file this tool wrote.

@@ -1141,8 +1141,10 @@ func TestARemovedPoolsOverrideIsTakenOutImmediately(t *testing.T) {
 	dir := t.TempDir()
 
 	// The file this tool wrote when "news" still existed.
-	if err := os.WriteFile(DropInPath(dir),
-		[]byte("[shop]\npm.max_children = 10\n\n[news]\npm.max_children = 8\n"), 0o644); err != nil {
+	if err := os.WriteFile(DropInPath(dir), Render([]allocate.PoolPlan{
+		{Name: "shop", MaxChildren: 10},
+		{Name: "news", MaxChildren: 8},
+	}), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1378,5 +1380,80 @@ func TestOwnershipSurvivesLosingTheStateFile(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "pm.max_children = 20") {
 		t.Errorf("the pool that changed was not written:\n%s", body)
+	}
+}
+
+// TestItRefusesToOverwriteAFileItDidNotWrite.
+//
+// "zz-" is where an operator puts their own last-order overrides, so a collision
+// on this filename is a plausible accident rather than an attack. Replacing
+// their configuration without a word would be a far worse outcome than declining
+// to act — and the message has to say what to do about it, because otherwise the
+// tool simply appears not to work.
+func TestItRefusesToOverwriteAFileItDidNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := DropInPath(dir)
+
+	theirs := "; hand-written, last in the include order on purpose\n[shop]\npm.max_children = 40\n"
+	if err := os.WriteFile(path, []byte(theirs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 8 << 30,
+		Pools: []allocate.PoolPlan{
+			{Name: "shop", MaxChildren: 12, Current: 4, WorkerBytes: 50 << 20},
+		},
+	}, newMaster(t, dir), state.New(), Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+
+	if !errors.Is(err, ErrForeignDropIn) {
+		t.Fatalf("err = %v, want ErrForeignDropIn", err)
+	}
+	if !strings.Contains(err.Error(), "--drop-in-dir") {
+		t.Errorf("the error does not say what to do about it: %v", err)
+	}
+
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("an operator's own file was removed: %v", readErr)
+	}
+	if string(got) != theirs {
+		t.Errorf("an operator's own file was overwritten:\n%s", got)
+	}
+}
+
+// TestItRefusesRatherThanGuessWhenItCannotReadItsOwnFile.
+//
+// The file is the record of what is overridden. Carrying on without being able
+// to read it would rewrite it without the sections it holds, and every pool held
+// below its own configuration would jump back on the next reload — the same
+// silent release as losing the state file, reached from the other direction.
+func TestItRefusesRatherThanGuessWhenItCannotReadItsOwnFile(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can read anything, so the unreadable case cannot be staged")
+	}
+
+	dir := t.TempDir()
+	path := DropInPath(dir)
+
+	if err := os.WriteFile(path, Render([]allocate.PoolPlan{
+		{Name: "held-low", MaxChildren: 6},
+	}), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 8 << 30,
+		Pools: []allocate.PoolPlan{
+			{Name: "other", MaxChildren: 20, Current: 8, WorkerBytes: 50 << 20},
+		},
+	}, newMaster(t, dir), state.New(), Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+
+	if err == nil {
+		t.Fatal("the file could not be read and the tool rewrote it anyway; every pool " +
+			"it was holding is released on the next reload")
+	}
+	if !strings.Contains(err.Error(), "cannot read") {
+		t.Errorf("err = %v, want it to name the unreadable file", err)
 	}
 }
