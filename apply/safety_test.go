@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -471,22 +473,38 @@ func TestSandboxDoesNotPullInTheRealPoolDirectory(t *testing.T) {
 
 // fakeMaster starts a process that a reload will accept and survive.
 //
-// phpfpm.VerifyMaster reads the process title immediately before signalling —
-// so a test master has to look like one. The no-op string at the front puts
-// php-fpm's title into the shell's command line, which is what the check reads.
+// phpfpm.VerifyMaster requires discovery-grade identity before it will signal
+// anything: the process name has to match php-fpm's, its executable has to pass
+// the same ownership checks discovery applies, and the config path in its title
+// has to be the one we mean. A shell with the right words in its command line is
+// no longer enough — deliberately, because a spoofed master is accepted as a
+// successor, and a local user could otherwise make a failed reload look survived
+// so that nothing rolls back.
 //
-// Faking the check out instead would leave the only thing standing between this
-// package and SIGUSR2 to an arbitrary process untested.
+// So the stub is this test binary, copied under the name php-fpm and re-executed
+// as a helper. Faking the check out would leave the only thing standing between
+// this package and SIGUSR2 to the wrong process unexercised.
 func fakeMaster(t *testing.T, configPath string) int {
 	t.Helper()
 
-	// The title carries the CONFIG PATH as well as the master signature, because
-	// the reload is scoped to a specific master: on a host running several, a
-	// pid recycled to a different one would otherwise be signalled as though it
-	// were ours.
-	ready := filepath.Join(t.TempDir(), "ready")
-	cmd := exec.Command("/bin/sh", "-c",
-		`: "php-fpm: master process (`+configPath+`)"; trap ':' USR2; touch `+ready+"; sleep 30 & wait")
+	binDir := t.TempDir()
+	binary := filepath.Join(binDir, "php-fpm")
+
+	self, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Skipf("cannot read the test binary to build a stub master: %v", err)
+	}
+	if err := os.WriteFile(binary, self, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := filepath.Join(binDir, "ready")
+
+	// The title goes in as an argument so it reaches the command line, which is
+	// where the identity check reads it.
+	cmd := exec.Command(binary, "-test.run=TestStubMasterHelper",
+		"php-fpm: master process ("+configPath+")")
+	cmd.Env = append(os.Environ(), "FPM_TUNE_STUB=1", "FPM_TUNE_STUB_READY="+ready)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -495,18 +513,44 @@ func fakeMaster(t *testing.T, configPath string) int {
 		_, _ = cmd.Process.Wait()
 	})
 
-	// Waited for AFTER the trap is installed. The process exists the instant it
-	// starts, and the default action for USR2 is to terminate — so signalling
+	// Waited for AFTER the handler is installed. The process exists the instant
+	// it starts and the default action for USR2 is to terminate, so signalling
 	// too early kills it and looks like a master that did not survive.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if _, err := os.Stat(ready); err == nil {
 			return cmd.Process.Pid
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the stub master never signalled that its trap was installed")
+			t.Fatal("the stub master never signalled that its handler was installed")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestStubMasterHelper is the stub master, running inside a copy of this test
+// binary. A no-op unless the environment says otherwise.
+func TestStubMasterHelper(t *testing.T) {
+	if os.Getenv("FPM_TUNE_STUB") != "1" {
+		t.Skip("helper process only")
+	}
+
+	got := make(chan os.Signal, 1)
+	signal.Notify(got, syscall.SIGUSR2)
+
+	if ready := os.Getenv("FPM_TUNE_STUB_READY"); ready != "" {
+		if err := os.WriteFile(ready, []byte("ok"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Survives the reload, as a healthy master does.
+	for {
+		select {
+		case <-got:
+		case <-time.After(30 * time.Second):
+			return
+		}
 	}
 }
 
