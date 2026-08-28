@@ -367,3 +367,72 @@ func TestBootstrappingPoolMayStillGrow(t *testing.T) {
 		t.Errorf("a queueing pool stayed at %d on its first run", got)
 	}
 }
+
+// TestColdPoolIsSizedFromMemoryNotTheFloor covers the cold start a container has
+// on every boot.
+//
+// The allocator sizes from observed demand, which is right once there is any. A
+// pool that has never been seen has neither a peak nor a configured size, so it
+// would take the default floor and leave the budget unused — two workers on a
+// host with three spare gigabytes. That is not a conservative answer, it is a
+// wrong one, and it is precisely the case cbox-init lives in.
+func TestColdPoolIsSizedFromMemoryNotTheFloor(t *testing.T) {
+	res := build(t, state.New(), observe.PoolView{
+		Name: "www", ProcessManager: "dynamic",
+		// Nothing known: fresh container, no traffic, no readable config.
+		CurrentMaxChildren: 0, ObservedPeak: 0,
+	})
+
+	got := res.Plan.Pools[0].MaxChildren
+	if got <= 2 {
+		t.Errorf("a cold pool got %d workers and left %s unused; memory was the only "+
+			"evidence available and it was ignored",
+			got, budget.HumanBytes(res.Plan.FreeBytes))
+	}
+
+	// And it must still fit.
+	if res.Plan.AllocatedBytes+res.Reserve > res.Plan.TotalBytes {
+		t.Error("the cold-start estimate exceeded the budget")
+	}
+}
+
+// TestColdPoolsShareTheBudget rather than the first one taking everything.
+func TestColdPoolsShareTheBudget(t *testing.T) {
+	res := build(t, state.New(),
+		observe.PoolView{Name: "a", ProcessManager: "dynamic"},
+		observe.PoolView{Name: "b", ProcessManager: "dynamic"},
+		observe.PoolView{Name: "c", ProcessManager: "dynamic"},
+	)
+
+	counts := map[string]int{}
+	for _, p := range res.Plan.Pools {
+		counts[p.Name] = p.MaxChildren
+	}
+
+	for name, n := range counts {
+		if n <= 2 {
+			t.Errorf("%s got %d workers", name, n)
+		}
+	}
+	// Roughly equal: none should have taken more than half the total.
+	total := counts["a"] + counts["b"] + counts["c"]
+	for name, n := range counts {
+		if n > total/2 {
+			t.Errorf("%s took %d of %d workers; cold pools should share", name, n, total)
+		}
+	}
+}
+
+// TestAKnownPoolIsNotSeeded: the seed is for pools with no evidence at all. A
+// pool with a configured size already has evidence, and overriding it would undo
+// the no-cut-while-bootstrapping rule from the other direction.
+func TestAKnownPoolIsNotSeeded(t *testing.T) {
+	res := build(t, state.New(), observe.PoolView{
+		Name: "known", ProcessManager: "dynamic",
+		CurrentMaxChildren: 8, ObservedPeak: 3,
+	})
+
+	if got := res.Plan.Pools[0].MaxChildren; got > 12 {
+		t.Errorf("a pool configured for 8 workers was seeded up to %d", got)
+	}
+}

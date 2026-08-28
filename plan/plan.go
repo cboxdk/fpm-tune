@@ -113,6 +113,8 @@ func Build(in Input) (Result, error) {
 		pools = append(pools, pool)
 	}
 
+	seedColdPools(pools, in.Limits.MemoryBytes-reserve)
+
 	sort.Strings(result.Bootstrapped)
 	sort.Strings(result.Unreachable)
 
@@ -228,6 +230,38 @@ func hitCeiling(view observe.PoolView, ps *state.PoolState) bool {
 	}
 
 	return view.MaxChildrenReached > ps.LastMaxChildrenReached
+}
+
+// seedColdPools gives a pool with no evidence at all something to want.
+//
+// The allocator sizes from observed demand, which is the right question once
+// there is any — but a pool that has never been seen has neither a peak nor a
+// configured size, so it would be handed the default floor and the budget would
+// sit unused. Two workers on a host with three spare gigabytes is not a
+// conservative answer, it is a wrong one: this is exactly the cold start a
+// container has on every boot.
+//
+// What such a pool can afford is the honest estimate, and an equal share among
+// the pools in the same position is the honest division. Anything they do not
+// use comes back on the next round, once there is something real to go on.
+func seedColdPools(pools []allocate.Pool, allocatable int64) {
+	var cold []int
+	for i, p := range pools {
+		if p.ObservedPeak == 0 && p.CurrentMaxChildren == 0 && p.Floor == 0 {
+			cold = append(cold, i)
+		}
+	}
+	if len(cold) == 0 || allocatable <= 0 {
+		return
+	}
+
+	share := allocatable / int64(len(cold))
+	for _, i := range cold {
+		affordable := int(share / pools[i].WorkerBytes)
+		if affordable > pools[i].ObservedPeak {
+			pools[i].ObservedPeak = affordable
+		}
+	}
 }
 
 // reserveFor decides how much of the host is held back from workers.
