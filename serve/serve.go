@@ -206,6 +206,10 @@ func (l *Loop) round(ctx context.Context) {
 		return
 	}
 
+	// After the plan: the counters are what the NEXT round compares against, and
+	// storing them earlier made the comparison one against itself.
+	plan.RecordCounters(l.state, views)
+
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
 
 	if result.Plan.CapacityExhausted {

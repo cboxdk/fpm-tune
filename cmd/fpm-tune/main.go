@@ -162,6 +162,11 @@ func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, 
 		StateOptions: stateOpts,
 	})
 
+	// After the plan, for the same reason as in serve: these counters are the
+	// next run's baseline, and storing them before Build compared a reading
+	// against itself.
+	plan.RecordCounters(st, views)
+
 	// Save what was learned even when the allocation itself failed. The
 	// observation was still valid, and an oversubscribed host is exactly where
 	// accumulating real numbers matters most.

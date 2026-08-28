@@ -280,8 +280,9 @@ func reserveFor(limits budget.Limits, profile Profile, override int64) (int64, s
 		budget.HumanBytes(limits.MemoryBytes), budget.HumanBytes(profile.ReserveFloorBytes))
 }
 
-// LearnFrom folds a round of observations into the store and records the
-// ceiling counters the next run compares against.
+// LearnFrom folds a round of observations into the store.
+//
+// It deliberately does NOT record the ceiling counters — see RecordCounters.
 func LearnFrom(st *state.State, views []observe.PoolView, at time.Time, opts state.Options) {
 	for _, view := range views {
 		if view.Err != nil {
@@ -291,7 +292,23 @@ func LearnFrom(st *state.State, views []observe.PoolView, at time.Time, opts sta
 		obs := view.Observation()
 		obs.At = at
 		st.Learn(obs, opts)
+	}
+}
 
+// RecordCounters stores the ceiling counters for the NEXT round to compare
+// against. It must be called AFTER Build.
+//
+// Splitting this out of LearnFrom is the whole point. Both ran before the plan
+// was built, so LastMaxChildrenReached was overwritten with the current reading
+// and hitCeiling then compared that reading against itself: the delta was always
+// zero and the counter signal never fired once, in any round, since it was
+// written. Saturation detection rested entirely on the listen queue without
+// anyone noticing there was supposed to be a second signal.
+func RecordCounters(st *state.State, views []observe.PoolView) {
+	for _, view := range views {
+		if view.Err != nil {
+			continue
+		}
 		if ps := st.Pools[view.Name]; ps != nil {
 			ps.LastMaxChildrenReached = view.MaxChildrenReached
 		}

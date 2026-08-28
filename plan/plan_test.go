@@ -219,13 +219,15 @@ func TestReserveScalesWithTheHost(t *testing.T) {
 func TestLearnFromSkipsUnreachablePools(t *testing.T) {
 	st := state.New()
 
-	LearnFrom(st, []observe.PoolView{
+	views := []observe.PoolView{
 		{Name: "down", Err: errors.New("refused")},
 		{Name: "up", Workers: []state.WorkerSample{
 			{RSSBytes: 90 * mb, Requests: 400},
 			{RSSBytes: 95 * mb, Requests: 400},
 		}, MaxChildrenReached: 12},
-	}, time.Now(), state.Options{})
+	}
+	LearnFrom(st, views, time.Now(), state.Options{})
+	RecordCounters(st, views)
 
 	if _, exists := st.Pools["down"]; exists {
 		t.Error("an unreachable pool was recorded as a sample")
@@ -237,6 +239,9 @@ func TestLearnFromSkipsUnreachablePools(t *testing.T) {
 	if up.LastMaxChildrenReached != 12 {
 		t.Errorf("LastMaxChildrenReached = %d, want 12: the next run has nothing to compare against",
 			up.LastMaxChildrenReached)
+	}
+	if _, exists := st.Pools["down"]; exists {
+		t.Error("an unreachable pool had its counter recorded")
 	}
 }
 
@@ -462,5 +467,47 @@ func TestAPoolWithNoHistoryKeepsWhatItHas(t *testing.T) {
 	})
 	if got := saturated.Plan.Pools[0].MaxChildren; got <= 5 {
 		t.Errorf("a saturated pool stayed at %d on its first round", got)
+	}
+}
+
+// TestCounterSignalActuallyFires is a signal that had never worked.
+//
+// LearnFrom stored LastMaxChildrenReached and Build then compared the current
+// reading against it — but both ran in the same round, LearnFrom first, so the
+// stored value WAS the current reading and the delta was always zero. The
+// counter half of saturation detection never fired once since it was written,
+// and nothing noticed because the listen queue covered for it.
+func TestCounterSignalActuallyFires(t *testing.T) {
+	st := state.New()
+	views := []observe.PoolView{{
+		Name: "web", ProcessManager: "dynamic",
+		CurrentMaxChildren: 4, MaxChildrenKnown: true,
+		ObservedPeak: 4, QueueDepth: 0, // the queue is empty: the counter is the only signal
+		MaxChildrenReached: 10,
+		Workers: []state.WorkerSample{
+			{RSSBytes: 50 << 20, Requests: 400},
+			{RSSBytes: 50 << 20, Requests: 400},
+		},
+	}}
+
+	// Round one, in the order the loop actually runs them.
+	LearnFrom(st, views, time.Now(), state.Options{})
+	RecordCounters(st, views)
+
+	// Round two: the pool ran out of workers seven more times since.
+	views[0].MaxChildrenReached = 17
+	LearnFrom(st, views, time.Now().Add(time.Minute), state.Options{})
+
+	if !hitCeiling(views[0], st.Pools["web"]) {
+		t.Error("a pool that hit its ceiling seven more times was not detected; " +
+			"the counter was compared against itself")
+	}
+
+	RecordCounters(st, views)
+
+	// Round three: quiet since.
+	if hitCeiling(views[0], st.Pools["web"]) {
+		t.Error("a pool that has not hit its ceiling since the last round was " +
+			"reported as saturated")
 	}
 }

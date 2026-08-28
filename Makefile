@@ -32,11 +32,24 @@ vulncheck: ## govulncheck
 tidy: ## go mod tidy
 	go mod tidy
 
-tidy-check: ## Fail if go.mod/go.sum are not tidy
-	@go mod tidy
-	@git diff --exit-code go.mod go.sum > /dev/null 2>&1 || \
-		(echo "❌ go.mod or go.sum is not tidy — run make tidy and commit the result" && exit 1)
-	@echo "✅ go.mod tidy"
+# Compared against a snapshot rather than against git: `git diff` cannot tell an
+# untidy go.mod from a tidy one the developer has legitimately edited and not yet
+# committed, so it failed the gate on every in-progress dependency change. The
+# snapshot answers the actual question — would `go mod tidy` change anything —
+# and the working tree is put back either way.
+tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
+	@tmp=$$(mktemp -d); \
+	cp go.mod go.sum "$$tmp/"; \
+	go mod tidy; \
+	rc=0; \
+	{ cmp -s go.mod "$$tmp/go.mod" && cmp -s go.sum "$$tmp/go.sum"; } || rc=1; \
+	cp "$$tmp/go.mod" "$$tmp/go.sum" .; \
+	rm -rf "$$tmp"; \
+	if [ $$rc -ne 0 ]; then \
+		echo "❌ go mod tidy would change go.mod/go.sum — run make tidy and commit the result"; \
+		exit 1; \
+	fi; \
+	echo "✅ go.mod tidy"
 
 check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs
 	@echo "✅ All checks passed"
