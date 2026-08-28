@@ -72,7 +72,25 @@ type Options struct {
 
 	// MinChange is the smallest relative change worth a reload, as a fraction.
 	// Moving a pool from 20 workers to 21 is not worth interrupting it for.
+	//
+	// It governs GROWTH. Shrinking is damped harder — see ShrinkMinChange.
 	MinChange float64
+
+	// ShrinkMinChange and ShrinkMinInterval damp shrinking harder than growing.
+	//
+	// The asymmetry is deliberate and it is what stops the tool oscillating. A
+	// symmetric threshold lets a pool cross it in both directions on adjacent
+	// rounds: demand rises, the pool grows, the peak decays, the pool shrinks
+	// back, demand rises again — a host reloading every pool every few minutes,
+	// each reload individually justified. Making the down leg need a larger
+	// change held for longer breaks the cycle, and it breaks it in the safe
+	// direction: the cost of growing a little too eagerly is some unused memory,
+	// and the cost of shrinking too eagerly is requests queueing behind workers
+	// that no longer exist.
+	//
+	// Zero means twice MinChange and four times MinInterval.
+	ShrinkMinChange   float64
+	ShrinkMinInterval time.Duration
 
 	// SettleTime is how long the master is watched after a reload before the
 	// change is called successful.
@@ -93,6 +111,12 @@ func (o Options) Defaults() Options {
 	}
 	if o.MinChange <= 0 {
 		o.MinChange = 0.15
+	}
+	if o.ShrinkMinChange <= 0 {
+		o.ShrinkMinChange = o.MinChange * 2
+	}
+	if o.ShrinkMinInterval <= 0 {
+		o.ShrinkMinInterval = o.MinInterval * 4
 	}
 	if o.SettleTime <= 0 {
 		o.SettleTime = 2 * time.Second
@@ -206,13 +230,23 @@ func Apply(
 		return result.Outcomes[i].Pool < result.Outcomes[j].Pool
 	})
 
+	changes = requireShrinksWithGrowth(plan, changes, &result)
+
 	if len(changes) == 0 {
 		return result, nil
 	}
+
+	// Validated in a sandbox BEFORE anything is written live. The old order
+	// wrote the real fragments first and put them back if `-t` failed, which
+	// left unvalidated configuration in the directory PHP-FPM globs for as long
+	// as the fork took — adopted by anything that reloaded in that window, and
+	// left behind entirely if the process died there.
+	if err := validateSandboxed(ctx, master, changes); err != nil {
+		return result, err
+	}
+
 	if opts.DryRun {
-		// Still validate: rehearsing the part that can take the host down is the
-		// point of a dry run, and it costs one fork.
-		return result, validateRendered(ctx, master, changes, opts, log)
+		return result, nil
 	}
 
 	backups, err := writeDropIns(master, changes, opts, log)
@@ -220,6 +254,10 @@ func Apply(
 		return result, err
 	}
 
+	// Validated again, now against the real tree. The sandbox is a faithful copy
+	// but it is still a copy: a permission this process does not have, a path
+	// that only resolves in place. Cheap insurance on the one path that can take
+	// the host down.
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
 		// Nothing has been signalled yet, so restoring here means the running
 		// master never saw any of this.
@@ -256,8 +294,39 @@ func Apply(
 	}
 
 	if err := phpfpm.ReloadAndWait(ctx, master.PID, opts.SettleTime, log); err != nil {
-		log.Error("Master did not survive the reload; restoring the previous configuration",
-			"pid", master.PID, "error", err)
+		// A cancelled context is not a dead master. The settle watch takes the
+		// context, so a SIGTERM to fpm-tune during the watch surfaced here as
+		// "the master did not survive" — and the handler rolled the (valid,
+		// already-adopted) configuration back and reloaded a second time, on the
+		// way out, on a master that was perfectly healthy. Shutting the daemon
+		// down must not reconfigure the host.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			log.Warn("Interrupted while watching the master settle; the change stands",
+				"pid", master.PID, "error", ctxErr)
+			result.Reloaded = true
+			phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+			cleanup(backups, log)
+			record(st, changes, now)
+
+			return result, nil
+		}
+
+		// Distinguished from a master that died, because the operator's next
+		// move differs entirely. A reload that was never delivered means the
+		// process we were about to signal is not the master — a stale pid, or a
+		// number the kernel has since reused — and nothing happened to php-fpm
+		// at all.
+		neverSignalled := errors.Is(err, phpfpm.ErrNotAMaster)
+
+		reason := ErrMasterDidNotSurvive
+		if neverSignalled {
+			reason = ErrMasterUnknown
+			log.Error("The pid we were about to reload is not a php-fpm master; nothing was signalled",
+				"pid", master.PID, "error", err)
+		} else {
+			log.Error("Master did not survive the reload; restoring the previous configuration",
+				"pid", master.PID, "error", err)
+		}
 		result.RollbackFailed = restore(backups, log)
 		result.RolledBack = len(result.RollbackFailed) == 0
 
@@ -265,11 +334,13 @@ func Apply(
 		// costs one signal and is the difference between a host that recovers
 		// when the master is restarted and one that comes back to the config
 		// that broke it.
-		if rerr := phpfpm.Reload(master.PID); rerr != nil {
-			log.Debug("Could not reload after restoring", "error", rerr)
+		if !neverSignalled {
+			if rerr := phpfpm.Reload(master.PID); rerr != nil {
+				log.Debug("Could not reload after restoring", "error", rerr)
+			}
 		}
 
-		return result, fmt.Errorf("%w: %w", ErrMasterDidNotSurvive, err)
+		return result, fmt.Errorf("%w: %w", reason, err)
 	}
 
 	result.Reloaded = true
@@ -305,8 +376,14 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 		ps = st.Pools[pp.Name]
 	}
 
-	current := 0
-	if ps != nil {
+	// The OBSERVED ceiling, not the one this tool remembers setting. They differ
+	// whenever anything else has touched the pool — a hand edit, a deploy that
+	// replaced the fragment, someone deleting the drop-in to undo a change — and
+	// in every one of those cases the memory is the wrong answer: the tool
+	// concluded the pool was already where it had put it and did nothing, so an
+	// undone change stayed undone and a hand edit was never reconciled.
+	current := pp.Current
+	if current <= 0 && ps != nil {
 		current = ps.LastAppliedMaxChildren
 	}
 	out.From = current
@@ -317,19 +394,26 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 		return out, false
 	}
 
-	// A pool never configured by this tool has no baseline to compare against,
-	// so the first write always goes through.
-	if current == 0 {
+	// A pool with no readable current value and no history has nothing to
+	// compare against, so the first write goes through.
+	if current <= 0 {
 		out.Action = ActionApplied
 		out.Reason = "first configuration"
 
 		return out, true
 	}
 
-	if ps != nil && !ps.LastAppliedAt.IsZero() && now.Sub(ps.LastAppliedAt) < opts.MinInterval {
+	shrinking := pp.MaxChildren < current
+
+	minChange, minInterval, direction := opts.MinChange, opts.MinInterval, "growth"
+	if shrinking {
+		minChange, minInterval, direction = opts.ShrinkMinChange, opts.ShrinkMinInterval, "shrink"
+	}
+
+	if ps != nil && !ps.LastAppliedAt.IsZero() && now.Sub(ps.LastAppliedAt) < minInterval {
 		out.Action = ActionTooSoon
-		out.Reason = fmt.Sprintf("last changed %s ago, waiting %s between reloads",
-			now.Sub(ps.LastAppliedAt).Round(time.Second), opts.MinInterval)
+		out.Reason = fmt.Sprintf("last changed %s ago, waiting %s between %s reloads",
+			now.Sub(ps.LastAppliedAt).Round(time.Second), minInterval, direction)
 
 		return out, false
 	}
@@ -338,10 +422,10 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 	if delta < 0 {
 		delta = -delta
 	}
-	if delta < opts.MinChange {
+	if delta < minChange {
 		out.Action = ActionTooSmall
-		out.Reason = fmt.Sprintf("%d to %d is a %.0f%% change, below the %.0f%% threshold",
-			current, pp.MaxChildren, delta*100, opts.MinChange*100)
+		out.Reason = fmt.Sprintf("%d to %d is a %.0f%% change, below the %.0f%% %s threshold",
+			current, pp.MaxChildren, delta*100, minChange*100, direction)
 
 		return out, false
 	}
@@ -350,6 +434,56 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 	out.Reason = fmt.Sprintf("%d to %d", current, pp.MaxChildren)
 
 	return out, true
+}
+
+// requireShrinksWithGrowth forces through the reductions that a growth depends
+// on.
+//
+// The plan is balanced: the allocator divides ONE budget, so a pool being cut
+// and a pool being grown in the same plan are two halves of the same decision.
+// Filtering them independently breaks that. The growth clears the threshold, the
+// matching cut is a few percent and does not, and what reaches the host is the
+// half that spends memory without the half that frees it — a plan that fit the
+// budget applied as one that does not.
+//
+// Reproduced at three pools on 8GiB: the balanced plan fit with 300MiB to spare,
+// and the damped subset committed 9.1GiB.
+func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, result *Result) []allocate.PoolPlan {
+	growing := false
+	for _, pp := range changes {
+		if pp.Current > 0 && pp.MaxChildren > pp.Current {
+			growing = true
+
+			break
+		}
+	}
+	if !growing {
+		return changes
+	}
+
+	included := make(map[string]bool, len(changes))
+	for _, pp := range changes {
+		included[pp.Name] = true
+	}
+
+	for _, pp := range plan.Pools {
+		if pp.Unknown || included[pp.Name] || pp.Current <= 0 || pp.MaxChildren >= pp.Current {
+			continue
+		}
+
+		changes = append(changes, pp)
+		for i := range result.Outcomes {
+			if result.Outcomes[i].Pool != pp.Name {
+				continue
+			}
+			result.Outcomes[i].Action = ActionApplied
+			result.Outcomes[i].Reason = fmt.Sprintf(
+				"%d to %d, applied below the threshold because another pool is growing into this memory",
+				pp.Current, pp.MaxChildren)
+		}
+	}
+
+	return changes
 }
 
 // backup is one drop-in's previous state.
@@ -486,15 +620,16 @@ func cleanup(backups []backup, log *slog.Logger) {
 	}
 }
 
-// validateRendered checks a change set without keeping it.
-func validateRendered(ctx context.Context, master Master, changes []allocate.PoolPlan, opts Options, log *slog.Logger) error {
-	backups, err := writeDropIns(master, changes, opts, log)
+// validateSandboxed checks a change set against a copy of the pool directory,
+// so nothing unvalidated is ever placed where PHP-FPM would read it.
+func validateSandboxed(ctx context.Context, master Master, changes []allocate.PoolPlan) error {
+	configPath, cleanup, err := sandbox(master, changes)
 	if err != nil {
 		return err
 	}
-	defer restore(backups, log)
+	defer cleanup()
 
-	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
+	if err := phpfpm.Validate(ctx, master.Binary, configPath); err != nil {
 		return fmt.Errorf("%w: %w", ErrValidationFailed, err)
 	}
 

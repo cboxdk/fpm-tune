@@ -17,6 +17,7 @@ import (
 
 	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/fpm-tune/lock"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
 	"github.com/cboxdk/fpm-tune/serve"
@@ -228,6 +229,15 @@ func runApply(args []string) error {
 
 	log := newLogger(*c.verbose)
 
+	// Held for the whole command. Without it an interactive apply and a running
+	// `serve --apply` write the same fragments, and each takes the other's
+	// half-applied state as "the previous configuration" to roll back to.
+	release, err := lock.Acquire(lock.DefaultPath(*c.statePath))
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	// Applying involves a reload and a settle window, so it gets more room than
@@ -245,12 +255,21 @@ func runApply(args []string) error {
 		return err
 	}
 
-	applied, applyErr := apply.Apply(ctx, result.Plan, master, st, apply.Options{
+	opts := apply.Options{
 		MinInterval: *minInterval,
 		MinChange:   *minChange,
 		BackupDir:   *backupDir,
 		DryRun:      *dryRun,
-	}, log)
+	}
+
+	// Before anything else: a previous run may have died between writing the
+	// fragments and validating them, leaving configuration on disk that PHP-FPM
+	// would refuse and that nothing was ever going to clean up.
+	if err := apply.Reconcile(ctx, master, opts, log); err != nil {
+		return err
+	}
+
+	applied, applyErr := apply.Apply(ctx, result.Plan, master, st, opts, log)
 
 	// Report what happened before returning any error: an operator whose reload
 	// failed needs to know which pools were involved.

@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/fpm-tune/lock"
 	"github.com/cboxdk/fpm-tune/metrics"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
@@ -89,7 +91,9 @@ type Loop struct {
 	metrics *metrics.Collectors
 	state   *state.State
 
-	lastSaved time.Time
+	lastSaved  time.Time
+	release    lock.Release
+	reconciled bool
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -99,8 +103,19 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
+	// Taken before the state is read. Two processes both load the state, both
+	// learn into their own copy and both write it whole, so the one that saves
+	// second silently discards everything the other observed — and they write the
+	// same pool fragments, each backing up the other's half-applied state.
+	release, err := lock.Acquire(lock.DefaultPath(cfg.StatePath))
+	if err != nil {
+		return nil, err
+	}
+
 	st, err := state.Load(cfg.StatePath)
 	if err != nil {
+		release()
+
 		return nil, err
 	}
 
@@ -109,7 +124,16 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 		log:     log,
 		metrics: metrics.New(),
 		state:   st,
+		release: release,
 	}, nil
+}
+
+// Close releases the lock. Safe to call more than once.
+func (l *Loop) Close() {
+	if l.release != nil {
+		l.release()
+		l.release = nil
+	}
 }
 
 // Run drives the loop until the context is cancelled.
@@ -118,9 +142,19 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 // hour of observation because it was asked to stop would make every restart a
 // return to bootstrap, which is the behaviour persisting it exists to avoid.
 func (l *Loop) Run(ctx context.Context) error {
+	defer l.Close()
+
 	var srv *http.Server
 	if l.cfg.MetricsAddr != "" {
-		srv = l.startMetrics()
+		var err error
+		if srv, err = l.startMetrics(); err != nil {
+			// Refusing to start rather than logging and carrying on. A tuner that
+			// reconfigures a host every interval with no way to observe what it
+			// decided is worse than one that did not start: the usual cause is a
+			// second copy already bound to the port, which is also the situation
+			// where two of them writing the same pool files does real damage.
+			return err
+		}
 	}
 
 	l.log.Info("fpm-tune running",
@@ -235,6 +269,19 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
 
+	// Once, on the first round that gets far enough to have a master: a previous
+	// process may have died between writing the fragments and validating them.
+	// Deferred to here rather than done in New because it needs the master, and
+	// the master is only known once discovery has run.
+	if !l.reconciled {
+		if err := apply.Reconcile(ctx, master, opts, l.log); err != nil {
+			l.log.Error("Could not reconcile what a previous run left behind; not applying", "error", err)
+
+			return
+		}
+		l.reconciled = true
+	}
+
 	applied, err := apply.Apply(ctx, result.Plan, master, l.state, opts, l.log)
 	if err != nil {
 		l.log.Error("Apply failed", "error", err, "rolled_back", applied.RolledBack)
@@ -267,7 +314,7 @@ func (l *Loop) save(now time.Time, force bool) {
 	l.lastSaved = now
 }
 
-func (l *Loop) startMetrics() *http.Server {
+func (l *Loop) startMetrics() (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(l.metrics.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -275,19 +322,25 @@ func (l *Loop) startMetrics() *http.Server {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
+	// Bound here rather than inside the goroutine so that a port already in use
+	// is an error the caller sees, not a line in a log nobody reads.
+	ln, err := net.Listen("tcp", l.cfg.MetricsAddr)
+	if err != nil {
+		return nil, fmt.Errorf("cannot serve metrics on %s: %w", l.cfg.MetricsAddr, err)
+	}
+
 	srv := &http.Server{
-		Addr:              l.cfg.MetricsAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			l.log.Error("Metrics server stopped", "addr", l.cfg.MetricsAddr, "error", err)
 		}
 	}()
 
-	return srv
+	return srv, nil
 }
 
 func (l *Loop) shutdown(srv *http.Server) {

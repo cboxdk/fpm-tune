@@ -165,6 +165,16 @@ type PoolPlan struct {
 	Name        string
 	MaxChildren int
 
+	// Current is the pool's configured pm.max_children as it was OBSERVED, so
+	// that the decision to write is made against the running system rather than
+	// against a memory of what this tool last did.
+	//
+	// The two diverge, and when they do the memory is the wrong one: an operator
+	// who edits the pool by hand, a deploy that replaces the fragment, a drop-in
+	// removed to undo a change. Comparing against state made every one of those
+	// invisible — the tool believed the pool was already where it had put it.
+	Current int
+
 	// Dynamic-pm settings. Zero for static and ondemand pools.
 	StartServers int
 	MinSpare     int
@@ -295,6 +305,7 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 		pp := PoolPlan{
 			Name:        p.Name,
 			MaxChildren: granted[i],
+			Current:     p.CurrentMaxChildren,
 			Bytes:       int64(granted[i]) * p.WorkerBytes,
 			Want:        wants[i],
 			DemandUnmet: granted[i] < wants[i],

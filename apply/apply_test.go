@@ -134,7 +134,7 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 	dir := t.TempDir()
 	master := Master{
 		Binary:     falseBin(t), // stands in for php-fpm rejecting the config
-		ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+		ConfigPath: masterConfigAt(t, dir),
 		DropInDir:  dir,
 		PID:        os.Getpid(), // would be signalled if the guard failed
 	}
@@ -157,17 +157,33 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 	if res.Reloaded {
 		t.Error("the master was reloaded with a configuration php-fpm had rejected")
 	}
-	if !res.RolledBack {
-		t.Error("the change was not rolled back")
+
+	// Nothing to roll back, because nothing was written. Validation happens
+	// against a sandbox copy first, so a rejected change set never reaches the
+	// directory PHP-FPM globs — not even for the length of one fork, which is
+	// what the old order left open for anything else to reload into.
+	if res.RolledBack {
+		t.Error("a rollback happened, so the rejected fragment had been written live")
 	}
 
-	// The previous fragment must be exactly as it was.
+	// The previous fragment must be untouched, byte for byte.
 	got, err := os.ReadFile(existing)
 	if err != nil {
 		t.Fatalf("the previous fragment is gone: %v", err)
 	}
-	if !strings.Contains(string(got), "pm.max_children = 5") {
-		t.Errorf("the previous fragment was not restored:\n%s", got)
+	if string(got) != "[shop]\npm.max_children = 5\n" {
+		t.Errorf("the live fragment was modified by a rejected change:\n%s", got)
+	}
+
+	// And nothing else was left in the pool directory either.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(existing) && e.Name() != "backup" {
+			t.Errorf("a rejected change left %q behind in the pool directory", e.Name())
+		}
 	}
 }
 
@@ -178,7 +194,7 @@ func TestRollbackRemovesAFragmentThatDidNotExist(t *testing.T) {
 	dir := t.TempDir()
 	master := Master{
 		Binary:     falseBin(t),
-		ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+		ConfigPath: masterConfigAt(t, dir),
 		DropInDir:  dir,
 	}
 
@@ -242,7 +258,7 @@ func TestDryRunValidatesButKeepsNothing(t *testing.T) {
 	_, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 		PID: os.Getpid(),
 	}, state.New(), Options{DryRun: true, BackupDir: filepath.Join(dir, "backup")}, nil)
 
@@ -261,7 +277,7 @@ func TestDryRunStillReportsARejectedConfig(t *testing.T) {
 	_, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: falseBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		Binary: falseBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 	}, state.New(), Options{DryRun: true, BackupDir: filepath.Join(dir, "backup")}, nil)
 
 	if !errors.Is(err, ErrValidationFailed) {
@@ -278,7 +294,7 @@ func TestNoRunningMasterWritesWithoutReloading(t *testing.T) {
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 		PID: 0, NoMasterExpected: true,
 	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 
@@ -322,7 +338,7 @@ func TestBackupsAreKeptOutOfTheConfigDirectory(t *testing.T) {
 	_, _ = Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 50}},
 	}, Master{
-		Binary: falseBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		Binary: falseBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 	}, st, Options{BackupDir: backupDir}, nil)
 
 	entries, err := os.ReadDir(dir)
@@ -345,7 +361,7 @@ func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 		NoMasterExpected: true,
 	}, st, Options{BackupDir: backupDir}, nil)
 
@@ -381,7 +397,7 @@ func TestUnidentifiedMasterIsRefusedNotProvisioned(t *testing.T) {
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 40}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 		// A master IS running; we simply could not find it.
 		PID: 0, NoMasterExpected: false,
 	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
@@ -422,7 +438,7 @@ func TestUnsafePoolNamesAreRefused(t *testing.T) {
 		_, err := Apply(context.Background(), allocate.Plan{
 			Pools: []allocate.PoolPlan{{Name: name, MaxChildren: 8}},
 		}, Master{
-			Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+			Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir),
 			DropInDir: dir, NoMasterExpected: true,
 		}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 
@@ -435,7 +451,7 @@ func TestUnsafePoolNamesAreRefused(t *testing.T) {
 	if _, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "www-data_8.2", MaxChildren: 8}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir),
 		DropInDir: dir, NoMasterExpected: true,
 	}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil); err != nil {
 		t.Errorf("an ordinary pool name was refused: %v", err)
@@ -461,10 +477,14 @@ func TestRollbackFailureIsNotReportedAsSuccess(t *testing.T) {
 	st := state.New()
 	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
 
+	configPath := masterConfigAt(t, dir)
+
 	res, err := Apply(context.Background(), allocate.Plan{
-		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 50}},
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 50, Current: 5}},
 	}, Master{
-		Binary: falseBin(t), ConfigPath: filepath.Join(dir, "php-fpm.conf"),
+		// Accepts the sandbox and rejects the real tree, so the fragments are
+		// written and then have to be taken back.
+		Binary: rejectsOnly(t, configPath), ConfigPath: configPath,
 		DropInDir: dir, PID: os.Getpid(),
 	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 
@@ -484,4 +504,40 @@ func TestRollbackFailureIsNotReportedAsSuccess(t *testing.T) {
 	if !strings.Contains(string(got), "pm.max_children = 5") {
 		t.Errorf("the previous fragment was not restored:\n%s", got)
 	}
+}
+
+// masterConfigAt writes a master config that includes dir, the way a real one
+// does. The sandbox reads it to build its copy, so a test that points at a path
+// with no file behind it is not exercising the real path.
+func masterConfigAt(t *testing.T, dir string) string {
+	t.Helper()
+
+	// Written OUTSIDE the pool directory, as on a real host: /etc/php-fpm.conf
+	// includes /etc/php-fpm.d/*.conf. A master config sitting inside the
+	// directory it globs would include itself.
+	path := filepath.Join(t.TempDir(), "php-fpm.conf")
+	body := "[global]\ninclude = " + filepath.Join(dir, "*.conf") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+// rejectsOnly is a php-fpm stand-in that accepts every config EXCEPT one.
+//
+// Needed because validation now happens twice against two different paths: once
+// against a sandbox copy, and once against the real tree after the fragments are
+// written. A stub that rejects everything never gets past the sandbox, so it can
+// no longer reach — or test — the rollback path.
+func rejectsOnly(t *testing.T, configPath string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "php-fpm-stub")
+	script := "#!/bin/sh\nfor a in \"$@\"; do\n  [ \"$a\" = \"" + configPath + "\" ] && exit 78\ndone\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
 }
