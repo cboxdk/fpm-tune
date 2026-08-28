@@ -97,6 +97,7 @@ type Loop struct {
 	release    lock.Release
 	resource   lock.Release
 	reconciled bool
+	exhausted  bool
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -267,9 +268,20 @@ func (l *Loop) round(ctx context.Context) {
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
 
-	if result.Plan.CapacityExhausted {
-		l.log.Warn("Capacity exhausted: a pool is short of workers and the budget is fully committed",
-			"free_bytes", result.Plan.FreeBytes)
+	// Logged on the TRANSITION, not every round. A full host stays full, and
+	// repeating the same warning every fifteen seconds is how an operator learns
+	// to stop reading the log — 26 identical lines in six minutes, measured. The
+	// condition is on the metrics endpoint continuously, which is where a
+	// persistent state belongs; the log carries the change.
+	if result.Plan.CapacityExhausted != l.exhausted {
+		l.exhausted = result.Plan.CapacityExhausted
+		if l.exhausted {
+			l.log.Warn("Capacity exhausted: a pool is short of workers and the budget is "+
+				"fully committed. No configuration change will help — this host needs more "+
+				"memory, or fewer sites.", "free_bytes", result.Plan.FreeBytes)
+		} else {
+			l.log.Info("No longer at capacity: there is budget to give a pool that needs it")
+		}
 	}
 
 	if l.cfg.Apply && l.reconciled {
