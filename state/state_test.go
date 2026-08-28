@@ -388,3 +388,99 @@ func busyObs(pool string, at time.Time) Observation {
 		},
 	}
 }
+
+// TestPeakSurvivesAReload is the ratchet this exists to stop.
+//
+// PHP-FPM resets pm.max_active_processes on reload, and this tool reloads. Sizing
+// straight off that counter is a downward spiral: a cut triggers a reload, the
+// reload clears the evidence, the next observation looks quieter still, and the
+// pool is cut again. Observed on a live host as 20 -> 6 -> 2 over three rounds
+// while the pool was under load.
+func TestPeakSurvivesAReload(t *testing.T) {
+	ps := &PoolState{Pool: "shop"}
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	if got := ps.ObservePeak(12, now, opts); got != 12 {
+		t.Fatalf("first observation gave %d, want 12", got)
+	}
+
+	// A reload happens; PHP-FPM now reports almost nothing.
+	if got := ps.ObservePeak(1, now.Add(time.Minute), opts); got != 12 {
+		t.Errorf("after a reload the peak collapsed to %d; the pool would be cut "+
+			"on evidence the reload destroyed", got)
+	}
+	// And again, which is where the spiral used to accelerate.
+	if got := ps.ObservePeak(1, now.Add(2*time.Minute), opts); got != 12 {
+		t.Errorf("the peak eroded to %d on a second quiet scrape", got)
+	}
+}
+
+// TestPeakRisesImmediately: a pool that suddenly needs more must not wait out a
+// decay window to be believed.
+func TestPeakRisesImmediately(t *testing.T) {
+	ps := &PoolState{Pool: "shop"}
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	ps.ObservePeak(4, now, opts)
+	if got := ps.ObservePeak(30, now.Add(time.Second), opts); got != 30 {
+		t.Errorf("a jump to 30 concurrent workers was recorded as %d", got)
+	}
+}
+
+// TestStalePeakDecays: without any decay a single spike would pin a pool's size
+// forever, and a site that has genuinely quietened down could never give its
+// headroom back to a neighbour.
+func TestStalePeakDecays(t *testing.T) {
+	ps := &PoolState{Pool: "shop"}
+	opts := Options{PeakWindow: time.Hour}.Defaults()
+	base := time.Now()
+
+	ps.ObservePeak(40, base, opts)
+
+	// Inside the window, nothing moves.
+	if got := ps.ObservePeak(2, base.Add(30*time.Minute), opts); got != 40 {
+		t.Errorf("the peak decayed inside its window: %d", got)
+	}
+
+	// Past it, it comes down — but gradually, not in one step.
+	first := ps.ObservePeak(2, base.Add(2*time.Hour), opts)
+	if first >= 40 {
+		t.Errorf("a stale peak did not decay: %d", first)
+	}
+	if first <= 2 {
+		t.Errorf("a stale peak collapsed straight to the current value (%d); "+
+			"one quiet scrape should not undo a day of evidence", first)
+	}
+
+	// Repeated quiet observations eventually reach the current level.
+	got := first
+	for i := 0; i < 20; i++ {
+		got = ps.ObservePeak(2, base.Add(time.Duration(3+i)*time.Hour), opts)
+	}
+	if got != 2 {
+		t.Errorf("the peak settled at %d after twenty quiet hours, want 2", got)
+	}
+}
+
+// TestPeakIsPersisted, or a restart puts the pool straight back into the ratchet.
+func TestPeakIsPersisted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	before := New()
+	before.Learn(busyObs("shop", time.Now()), Options{})
+	before.Pools["shop"].ObservePeak(18, time.Now(), Options{})
+
+	if err := before.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Pools["shop"].PeakWorkers; got != 18 {
+		t.Errorf("PeakWorkers = %d after a restart, want 18", got)
+	}
+}

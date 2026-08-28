@@ -68,6 +68,18 @@ type PoolState struct {
 	FirstSeen   time.Time `json:"first_seen"`
 	LastUpdated time.Time `json:"last_updated"`
 
+	// PeakWorkers is the most workers this pool has had busy at once, as
+	// remembered by us rather than by PHP-FPM.
+	//
+	// It has to be ours, because a reload resets pm.max_active_processes — and
+	// this tool reloads. Sizing straight off PHP-FPM's counter therefore
+	// ratchets downward: a cut triggers a reload, the reload clears the
+	// evidence, the next observation looks quieter still, and the pool is cut
+	// again. Observed directly on a live host as 20 -> 6 -> 2 over three rounds
+	// while the pool was under load.
+	PeakWorkers int       `json:"peak_workers,omitempty"`
+	PeakAt      time.Time `json:"peak_at,omitempty"`
+
 	// LastMaxChildrenReached is PHP-FPM's max_children counter as of the last
 	// scrape. It is a running total since the master started, so only the delta
 	// says whether a pool is hitting its ceiling NOW — a pool that ran out once
@@ -110,6 +122,16 @@ type Options struct {
 	// is trusted enough to size a pool DOWN.
 	ConfidenceSamples int
 	ConfidenceSpan    time.Duration
+
+	// PeakWindow is how long a remembered concurrency peak stands before it is
+	// allowed to fall toward what is currently observed.
+	//
+	// Long enough to span a daily cycle, because the number that matters is what
+	// the pool needs at its busiest hour, not at three in the morning. Without
+	// any decay a single spike would pin a pool's size forever; with too little,
+	// the peak is forgotten between busy periods and the pool is cut just before
+	// it needs the workers.
+	PeakWindow time.Duration
 }
 
 // Defaults fills in any unset option.
@@ -128,6 +150,9 @@ func (o Options) Defaults() Options {
 	}
 	if o.ConfidenceSpan <= 0 {
 		o.ConfidenceSpan = 30 * time.Minute
+	}
+	if o.PeakWindow <= 0 {
+		o.PeakWindow = 24 * time.Hour
 	}
 
 	return o
@@ -273,6 +298,40 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	}
 
 	return true
+}
+
+// ObservePeak records the concurrency high-water mark this tool has seen.
+//
+// Returns the peak to size against. A new high replaces the old one outright; a
+// lower observation is ignored until the remembered peak is older than
+// PeakWindow, after which it decays toward what is actually being seen so a pool
+// that has genuinely quietened down can eventually give its headroom back.
+func (ps *PoolState) ObservePeak(current int, at time.Time, opts Options) int {
+	opts = opts.Defaults()
+
+	if current > ps.PeakWorkers {
+		ps.PeakWorkers = current
+		ps.PeakAt = at
+
+		return ps.PeakWorkers
+	}
+
+	if ps.PeakAt.IsZero() {
+		ps.PeakAt = at
+	}
+
+	if at.Sub(ps.PeakAt) > opts.PeakWindow {
+		// Halve the distance to what is being seen now, rather than dropping
+		// straight to it: one quiet scrape after a stale peak should not undo a
+		// day of evidence in a single step.
+		ps.PeakWorkers -= (ps.PeakWorkers - current + 1) / 2
+		if ps.PeakWorkers < current {
+			ps.PeakWorkers = current
+		}
+		ps.PeakAt = at
+	}
+
+	return ps.PeakWorkers
 }
 
 // Confidence is how far a pool's baseline can be trusted, from 0 to 1.

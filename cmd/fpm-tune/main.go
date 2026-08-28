@@ -11,17 +11,14 @@ import (
 	"syscall"
 	"time"
 
-	"path/filepath"
-	"sort"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
+	"github.com/cboxdk/fpm-tune/serve"
 	"github.com/cboxdk/fpm-tune/state"
-	"github.com/cboxdk/phpfpm"
 )
 
 // version is set at build time.
@@ -46,6 +43,8 @@ func run(args []string) error {
 		return runPlan(args[1:])
 	case "apply":
 		return runApply(args[1:])
+	case "serve":
+		return runServe(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 
@@ -66,6 +65,7 @@ func usage() {
 
   fpm-tune plan     show what would change, and why. Writes nothing.
   fpm-tune apply    write the pool settings and reload PHP-FPM.
+  fpm-tune serve    keep watching and adjusting, with metrics on /metrics.
   fpm-tune version
 
 `, version)
@@ -229,7 +229,7 @@ func runApply(args []string) error {
 		return err
 	}
 
-	master, err := masterFor(result, *dropInDir)
+	master, err := serve.MasterFrom(result, *dropInDir)
 	if err != nil {
 		return err
 	}
@@ -258,115 +258,6 @@ func runApply(args []string) error {
 	}
 
 	return nil
-}
-
-// masterFor works out which PHP-FPM to reconfigure.
-//
-// Every pool discovered on a host normally belongs to one master, and they share
-// a single reload. Two masters would need two reloads and two validations, which
-// is a real configuration but not one this command handles yet — so it says so
-// rather than reconfiguring one and silently ignoring the other.
-func masterFor(result plan.Result, dropInDir string) (apply.Master, error) {
-	binaries := map[string]phpfpmTarget{}
-	for _, v := range result.Views {
-		if v.Target.Binary == "" || v.Target.ConfigPath == "" {
-			continue
-		}
-		binaries[v.Target.Binary+"::"+v.Target.ConfigPath] = phpfpmTarget{
-			binary: v.Target.Binary, config: v.Target.ConfigPath,
-		}
-	}
-
-	switch len(binaries) {
-	case 0:
-		return apply.Master{}, fmt.Errorf("could not determine the php-fpm binary and config to validate against")
-	case 1:
-	default:
-		var names []string
-		for _, t := range binaries {
-			names = append(names, t.config)
-		}
-		sort.Strings(names)
-
-		return apply.Master{}, fmt.Errorf(
-			"this host runs %d PHP-FPM masters (%s); apply reconfigures one at a time, "+
-				"so run it once per master with --drop-in-dir set accordingly",
-			len(binaries), strings.Join(names, ", "))
-	}
-
-	var target phpfpmTarget
-	for _, t := range binaries {
-		target = t
-	}
-
-	master := apply.Master{
-		Binary:     target.binary,
-		ConfigPath: target.config,
-		DropInDir:  dropInDir,
-	}
-	if master.DropInDir == "" {
-		// The pool fragments live beside the master config's include directory.
-		// Defaulting to the config's own directory is wrong on Debian, where the
-		// master is /etc/php/8.2/fpm/php-fpm.conf and pools are in pool.d — so
-		// require it rather than guessing.
-		master.DropInDir = defaultDropInDir(target.config)
-	}
-	if master.DropInDir == "" {
-		return master, fmt.Errorf("could not locate the pool configuration directory; pass --drop-in-dir")
-	}
-
-	if pid, err := phpfpm.MasterPID(pidFileFor(target.config)); err == nil {
-		master.PID = pid
-	}
-
-	return master, nil
-}
-
-type phpfpmTarget struct{ binary, config string }
-
-// defaultDropInDir finds the directory the master config includes pools from.
-func defaultDropInDir(configPath string) string {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return ""
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "include") {
-			continue
-		}
-		_, value, found := strings.Cut(line, "=")
-		if !found {
-			continue
-		}
-		pattern := strings.TrimSpace(value)
-		if dir := filepath.Dir(pattern); dir != "." && dir != "/" {
-			return dir
-		}
-	}
-
-	return ""
-}
-
-// pidFileFor reads the master's pid file location from its config.
-func pidFileFor(configPath string) string {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return ""
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "pid") {
-			continue
-		}
-		if _, value, found := strings.Cut(line, "="); found {
-			return strings.TrimSpace(value)
-		}
-	}
-
-	return ""
 }
 
 func renderApplied(res apply.Result, dryRun bool) {
@@ -436,4 +327,73 @@ func parseBytes(raw string) (int64, error) {
 	}
 
 	return n * mult, nil
+}
+
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	c := registerCommon(fs)
+	var (
+		interval    = fs.Duration("interval", 30*time.Second, "how often to sample the pools")
+		metricsAddr = fs.String("metrics", ":9110", "address for /metrics (empty disables it)")
+		doApply     = fs.Bool("apply", false,
+			"act on the plan. Without it the loop observes, learns and publishes metrics "+
+				"without touching any configuration, which is a reasonable way to run permanently")
+		dropInDir   = fs.String("drop-in-dir", "", "where pool fragments are written (default: the master config's include directory)")
+		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where previous fragments are kept while a change is in flight")
+		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
+		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
+		saveEvery   = fs.Duration("save-every", 5*time.Minute, "how often learned baselines reach disk")
+	)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "fpm-tune serve — keep watching and adjusting\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	log := newLogger(*c.verbose)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	var memoryOverride, reserveBytes int64
+	if *c.memory != "" {
+		var err error
+		if memoryOverride, err = parseBytes(*c.memory); err != nil {
+			return fmt.Errorf("--memory: %w", err)
+		}
+	}
+	if *c.reserve != "" {
+		var err error
+		if reserveBytes, err = parseBytes(*c.reserve); err != nil {
+			return fmt.Errorf("--reserve: %w", err)
+		}
+	}
+
+	loop, err := serve.New(serve.Config{
+		Interval:       *interval,
+		StatePath:      *c.statePath,
+		SaveEvery:      *saveEvery,
+		Apply:          *doApply,
+		MetricsAddr:    *metricsAddr,
+		DropInDir:      *dropInDir,
+		BackupDir:      *backupDir,
+		MemoryOverride: memoryOverride,
+		ReserveBytes:   reserveBytes,
+		ScrapeTimeout:  *c.timeout,
+		ApplyOptions: apply.Options{
+			MinInterval: *minInterval,
+			MinChange:   *minChange,
+		},
+		StateOptions: state.Options{
+			ConfidenceSamples: *c.confSamples,
+			ConfidenceSpan:    *c.confSpan,
+		},
+	}, log)
+	if err != nil {
+		return err
+	}
+
+	return loop.Run(ctx)
 }

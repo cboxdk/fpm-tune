@@ -184,21 +184,50 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 
 	pool.HitMaxChildren = hitCeiling(view, ps)
 
+	// PHP-FPM resets max_active_processes on reload, and this tool reloads — so
+	// the peak has to be remembered here rather than read fresh each time. See
+	// PoolState.ObservePeak.
+	if ps != nil {
+		pool.ObservedPeak = ps.ObservePeak(view.ObservedPeak, time.Now(), opts)
+	}
+
 	return pool, !pool.Measured
 }
 
 // hitCeiling reports whether the pool has run out of workers.
 //
-// On a one-shot run the counter is all there is: non-zero means it has happened
-// at some point since PHP-FPM started. With state to compare against, the delta
-// is used instead — a pool that hit its ceiling once last Tuesday is not the same
-// as one hitting it now, and only the second should be growing.
+// This is the signal that lets a pool recover from having been cut too far. Once
+// max_children is lowered, the pool can no longer demonstrate that it wanted more
+// — its observed concurrency is capped by the very number in question — so
+// saturation is the only evidence left that the cut was wrong.
+//
+// max_children_reached is a running total that PHP-FPM RESETS on reload, and this
+// tool reloads. A plain delta therefore goes blind at exactly the wrong moment:
+// straight after a cut, the counter restarts at zero, `now > previous` is false,
+// and the pool that is now queueing looks content. A counter that went backwards
+// means it was reset, so anything non-zero since is saturation.
+//
+// The listen queue is checked in every case: it is an instantaneous depth rather
+// than a counter, so it survives the reset that hides everything else.
 func hitCeiling(view observe.PoolView, ps *state.PoolState) bool {
-	if ps != nil && ps.LastMaxChildrenReached > 0 {
-		return view.MaxChildrenReached > ps.LastMaxChildrenReached
+	if view.QueueDepth > 0 {
+		return true
+	}
+	if view.MaxChildrenReached == 0 {
+		return false
 	}
 
-	return view.MaxChildrenReached > 0 || view.QueueDepth > 0
+	if ps == nil || ps.LastMaxChildrenReached == 0 {
+		return true
+	}
+
+	if view.MaxChildrenReached < ps.LastMaxChildrenReached {
+		// The counter went backwards: the master was reloaded. Everything it
+		// has counted since is new.
+		return true
+	}
+
+	return view.MaxChildrenReached > ps.LastMaxChildrenReached
 }
 
 // reserveFor decides how much of the host is held back from workers.

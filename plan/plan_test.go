@@ -130,6 +130,18 @@ func TestHitCeilingUsesTheDelta(t *testing.T) {
 		"hit again since":          {7, 9, 0, true},
 		"unchanged since":          {7, 7, 0, false},
 		"old history only":         {40, 40, 0, false},
+
+		// The counter went backwards, which only happens when the master was
+		// reloaded — and this tool is what reloads it. A plain delta goes blind
+		// here: straight after a cut the counter restarts at zero, so a pool that
+		// is now queueing looks content and can never recover the workers it
+		// needs.
+		"counter reset, saturated since": {40, 3, 0, true},
+		"counter reset, quiet since":     {40, 0, 0, false},
+
+		// The listen queue is an instantaneous depth, not a counter, so it
+		// survives the reset that hides everything else.
+		"counter reset but queue backing": {40, 0, 5, true},
 	}
 
 	for name, tt := range tests {
