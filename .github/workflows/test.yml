@@ -126,8 +126,12 @@ jobs:
       - name: Build
         run: go build -o build/fpm-tune ./cmd/fpm-tune
 
+      # Deliberately NOT under sudo. Nothing here needs root — the pools, the
+      # state and the backups all live in a temp directory — and running as an
+      # ordinary user is the stronger test: discovery, validation and the reload
+      # all have to work without privileges they should not be assuming.
       - name: End-to-end
-        run: sudo testing/e2e.sh "$PWD/build/fpm-tune"
+        run: testing/e2e.sh "$PWD/build/fpm-tune"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

@@ -51,8 +51,17 @@ i=0
 for pool in www shop; do
   port=$((BASE + i))
   i=$((i + 1))
+  # php-fpm refuses to start as root without an explicit user per pool, and
+  # refuses to SET one when it is not root. Neither case is this tool's
+  # business, but the fixture has to satisfy whichever applies.
+  as_user=""
+  if [ "$(id -u)" = "0" ]; then
+    as_user="user = www-data"$'\n'"group = www-data"
+  fi
+
   cat > "$POOLS/$pool.conf" <<EOF
 [$pool]
+$as_user
 listen = 127.0.0.1:$port
 pm = dynamic
 pm.max_children = 12
