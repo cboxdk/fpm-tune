@@ -1,4 +1,4 @@
-.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy
+.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -32,5 +32,11 @@ vulncheck: ## govulncheck
 tidy: ## go mod tidy
 	go mod tidy
 
-check: fmt-check vet lint test vulncheck ## Everything CI runs
+tidy-check: ## Fail if go.mod/go.sum are not tidy
+	@go mod tidy
+	@git diff --exit-code go.mod go.sum > /dev/null 2>&1 || \
+		(echo "❌ go.mod or go.sum is not tidy — run make tidy and commit the result" && exit 1)
+	@echo "✅ go.mod tidy"
+
+check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs
 	@echo "✅ All checks passed"

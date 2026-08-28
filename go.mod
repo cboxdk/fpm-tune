@@ -3,13 +3,13 @@ module github.com/cboxdk/fpm-tune
 go 1.25.0
 
 require (
+	github.com/cboxdk/fcgx v1.1.0
 	github.com/cboxdk/phpfpm v0.3.0
 	github.com/prometheus/client_golang v1.24.1
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cboxdk/fcgx v1.1.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
