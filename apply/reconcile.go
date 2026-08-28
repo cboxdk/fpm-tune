@@ -2,6 +2,8 @@ package apply
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,7 +37,7 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	saved, err := staleBackups(opts.BackupDir)
+	saved, err := staleBackups(opts.BackupDir, master.DropInDir)
 	if err != nil || len(saved) == 0 {
 		return err
 	}
@@ -58,7 +60,10 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 
 	var failed []string
 	for _, s := range saved {
-		target := filepath.Join(master.DropInDir, strings.TrimSuffix(filepath.Base(s), ".bak"))
+		target, ok := backupTarget(master.DropInDir, s)
+		if !ok {
+			continue
+		}
 
 		content, readErr := os.ReadFile(s)
 		if readErr != nil {
@@ -94,8 +99,25 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 	return nil
 }
 
-// staleBackups lists the saved fragments left by an unfinished run.
-func staleBackups(dir string) ([]string, error) {
+// backupTarget maps a saved fragment back to the file it came from, and reports
+// whether it belongs to this master at all.
+func backupTarget(dropInDir, saved string) (string, bool) {
+	name := filepath.Base(saved)
+
+	prefix, rest, found := strings.Cut(name, "-")
+	if !found {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
+	if prefix != hex.EncodeToString(sum[:4]) {
+		return "", false
+	}
+
+	return filepath.Join(dropInDir, strings.TrimSuffix(rest, ".bak")), true
+}
+
+// staleBackups lists this master's saved fragments left by an unfinished run.
+func staleBackups(dir, dropInDir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -110,7 +132,14 @@ func staleBackups(dir string) ([]string, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".bak") {
 			continue
 		}
-		saved = append(saved, filepath.Join(dir, e.Name()))
+		full := filepath.Join(dir, e.Name())
+		// Another master's saved fragments live here too when the default
+		// backup directory is shared. Restoring those into this master's pool
+		// directory would be inventing configuration.
+		if _, ok := backupTarget(dropInDir, full); !ok {
+			continue
+		}
+		saved = append(saved, full)
 	}
 
 	return saved, nil

@@ -183,6 +183,10 @@ type PoolPlan struct {
 	// Bytes is what this allocation costs: MaxChildren × WorkerBytes.
 	Bytes int64
 
+	// WorkerBytes is what one worker of this pool was costed at, carried through
+	// so a caller applying part of a plan can work out what that part commits.
+	WorkerBytes int64
+
 	// Want is what the pool would have been given with unlimited budget. When it
 	// exceeds MaxChildren, the pool is being held back.
 	Want int
@@ -307,6 +311,7 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			MaxChildren: granted[i],
 			Current:     p.CurrentMaxChildren,
 			Bytes:       int64(granted[i]) * p.WorkerBytes,
+			WorkerBytes: p.WorkerBytes,
 			Want:        wants[i],
 			DemandUnmet: granted[i] < wants[i],
 			Measured:    p.Measured,

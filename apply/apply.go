@@ -10,6 +10,8 @@ package apply
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -455,28 +457,24 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 	return out, true
 }
 
-// requireShrinksWithGrowth forces through the reductions that a growth depends
-// on.
+// requireShrinksWithGrowth pulls in the reductions a growth cannot fit without.
 //
-// The plan is balanced: the allocator divides ONE budget, so a pool being cut
-// and a pool being grown in the same plan are two halves of the same decision.
-// Filtering them independently breaks that. The growth clears the threshold, the
+// The allocator divides ONE budget, so a pool being cut and a pool being grown
+// in the same plan are two halves of the same decision. Filtering them
+// independently breaks that: the growth clears the hysteresis threshold, the
 // matching cut is a few percent and does not, and what reaches the host is the
 // half that spends memory without the half that frees it — a plan that fit the
-// budget applied as one that does not.
+// budget applied as one that does not. Reproduced at three pools on 8GiB: the
+// balanced plan fit with 300MiB to spare and the damped subset committed 9.1GiB.
 //
-// Reproduced at three pools on 8GiB: the balanced plan fit with 300MiB to spare,
-// and the damped subset committed 9.1GiB.
+// It pulls in only as much as the arithmetic demands, largest saving first.
+// Forcing every reduction through whenever anything grew would be simpler and
+// would undo the anti-flap damping next door: on a host with several pools
+// there is nearly always something growing, so every shrink would fire the
+// moment it was proposed, which is the oscillation that damping exists to stop.
 func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, result *Result) []allocate.PoolPlan {
-	growing := false
-	for _, pp := range changes {
-		if pp.Current > 0 && pp.MaxChildren > pp.Current {
-			growing = true
-
-			break
-		}
-	}
-	if !growing {
+	limit := plan.TotalBytes - plan.ReserveBytes
+	if limit <= 0 {
 		return changes
 	}
 
@@ -485,20 +483,50 @@ func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, r
 		included[pp.Name] = true
 	}
 
+	// What the host would actually be running: the changes that survived
+	// damping, and everything else left where it is.
+	var committed int64
+	for _, pp := range plan.Pools {
+		n := pp.Current
+		if included[pp.Name] || n <= 0 {
+			n = pp.MaxChildren
+		}
+		committed += int64(n) * pp.WorkerBytes
+	}
+	if committed <= limit {
+		return changes
+	}
+
+	type reduction struct {
+		pool  allocate.PoolPlan
+		frees int64
+	}
+
+	var available []reduction
 	for _, pp := range plan.Pools {
 		if pp.Unknown || included[pp.Name] || pp.Current <= 0 || pp.MaxChildren >= pp.Current {
 			continue
 		}
+		available = append(available, reduction{pp, int64(pp.Current-pp.MaxChildren) * pp.WorkerBytes})
+	}
+	sort.Slice(available, func(i, j int) bool { return available[i].frees > available[j].frees })
 
-		changes = append(changes, pp)
+	for _, r := range available {
+		if committed <= limit {
+			break
+		}
+
+		changes = append(changes, r.pool)
+		committed -= r.frees
+
 		for i := range result.Outcomes {
-			if result.Outcomes[i].Pool != pp.Name {
+			if result.Outcomes[i].Pool != r.pool.Name {
 				continue
 			}
 			result.Outcomes[i].Action = ActionApplied
 			result.Outcomes[i].Reason = fmt.Sprintf(
 				"%d to %d, applied below the threshold because another pool is growing into this memory",
-				pp.Current, pp.MaxChildren)
+				r.pool.Current, r.pool.MaxChildren)
 		}
 	}
 
@@ -535,7 +563,7 @@ func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options, log 
 		b := backup{path: path}
 		if content, err := os.ReadFile(path); err == nil {
 			b.content, b.existed = content, true
-			b.saved = filepath.Join(opts.BackupDir, filepath.Base(path)+".bak")
+			b.saved = filepath.Join(opts.BackupDir, backupName(master.DropInDir, path))
 			if err := os.WriteFile(b.saved, content, 0o644); err != nil {
 				restore(backups, log)
 
@@ -625,6 +653,22 @@ func writeAtomic(path string, content []byte) error {
 	}
 
 	return os.Rename(tmpName, path)
+}
+
+// backupName scopes a saved fragment to the master it came from.
+//
+// MasterFrom refuses a host with more than one master and tells the operator to
+// run once per master with the drop-in directory set — but nothing stops both
+// runs sharing the default backup directory. Reconcile would then find the other
+// master's saved fragments, decide they belonged to this one, and write them
+// into a pool directory they were never taken from.
+//
+// The prefix is the drop-in directory the file came out of, so each master only
+// ever reconciles its own.
+func backupName(dropInDir, path string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
+
+	return hex.EncodeToString(sum[:4]) + "-" + filepath.Base(path) + ".bak"
 }
 
 // cleanup removes the saved copies once a change has stuck.

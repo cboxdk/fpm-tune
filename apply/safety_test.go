@@ -90,13 +90,19 @@ func TestShrinksGoWithTheGrowthTheyPayFor(t *testing.T) {
 	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
 	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
 
+	const worker = 100 << 20 // 100MiB
+
+	// The plan fits: 20 + 30 workers at 100MiB is 5000MiB against a 5120MiB
+	// budget. The damped subset does not: 20 + 40 is 6000MiB, because the growth
+	// cleared the threshold and the cut did not.
 	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 5120 << 20,
 		Pools: []allocate.PoolPlan{
 			// Doubling: well over the threshold on its own.
-			{Name: "busy", MaxChildren: 20, Current: 10},
+			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
 			// The 10 workers that pays for, as a 25% cut of a much larger pool —
 			// under the 30% shrink threshold, and skipped before this existed.
-			{Name: "quiet", MaxChildren: 30, Current: 40},
+			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
 		},
 	}, Master{
 		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
@@ -126,6 +132,49 @@ func TestShrinksGoWithTheGrowthTheyPayFor(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "pm.max_children = 30") {
 		t.Errorf("the cut was reported as applied but not written:\n%s", body)
+	}
+}
+
+// TestAShrinkTheBudgetDoesNotNeedIsStillDamped is the other half of the
+// coupling, and the reason it is arithmetic rather than a rule.
+//
+// Forcing every reduction through whenever anything grew would be simpler and
+// would quietly undo the damping next door: on a host with several pools there
+// is nearly always something growing, so every shrink would fire the moment it
+// was proposed — the exact oscillation the thresholds exist to stop.
+func TestAShrinkTheBudgetDoesNotNeedIsStillDamped(t *testing.T) {
+	dir := t.TempDir()
+
+	st := state.New()
+	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+
+	const worker = 100 << 20
+
+	// Same plan, but on a host with room to spare: 20 + 40 workers is 6000MiB
+	// against 32GiB, so nothing has to give.
+	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 32 << 30,
+		Pools: []allocate.PoolPlan{
+			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
+			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
+		},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		PID: fakeMaster(t),
+	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	for _, o := range res.Outcomes {
+		if o.Pool == "quiet" && o.Action == ActionApplied {
+			t.Errorf("a 25%% shrink the budget did not need was applied anyway (%s); "+
+				"any growth anywhere would then unlock every shrink on the host", o.Reason)
+		}
+		if o.Pool == "busy" && o.Action != ActionApplied {
+			t.Errorf("the growth was not applied: %s (%s)", o.Action, o.Reason)
+		}
 	}
 }
 
@@ -211,7 +260,7 @@ func TestReconcileRestoresWhatACrashLeftBehind(t *testing.T) {
 	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 999\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	saved := filepath.Join(backupDir, filepath.Base(live)+".bak")
+	saved := filepath.Join(backupDir, backupName(dir, live))
 	if err := os.WriteFile(saved, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +298,7 @@ func TestReconcileDiscardsStaleBackupsWhenTheConfigIsFine(t *testing.T) {
 	if err := os.WriteFile(live, []byte("[www]\npm.max_children = 40\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	saved := filepath.Join(backupDir, filepath.Base(live)+".bak")
+	saved := filepath.Join(backupDir, backupName(dir, live))
 	if err := os.WriteFile(saved, []byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -387,5 +436,41 @@ func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 	}
 	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the change was not recorded, so the next round has no baseline: %+v", ps)
+	}
+}
+
+// TestReconcileIgnoresAnotherMastersBackups.
+//
+// MasterFrom refuses a host with more than one master and tells the operator to
+// run once per master with the drop-in directory set — but nothing stops both
+// runs sharing the default backup directory. Reconcile would then find the other
+// master's saved fragments, take them for its own, and write them into a pool
+// directory they were never taken from: configuration invented out of another
+// server's history, restored as though it were a rollback.
+func TestReconcileIgnoresAnotherMastersBackups(t *testing.T) {
+	ours := t.TempDir()
+	theirs := t.TempDir()
+	backupDir := t.TempDir()
+
+	// A fragment saved by the OTHER master, for a pool this one does not have.
+	if err := os.WriteFile(
+		filepath.Join(backupDir, backupName(theirs, DropInPath(theirs, "elsewhere"))),
+		[]byte("[elsewhere]\npm.max_children = 99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := masterConfigAt(t, ours)
+	master := Master{
+		// Rejects everything, so if Reconcile decided those backups were its own
+		// it would go on to restore them.
+		Binary: rejectsOnly(t, configPath), ConfigPath: configPath, DropInDir: ours,
+	}
+
+	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
+		t.Fatalf("Reconcile acted on another master's backups: %v", err)
+	}
+
+	if _, err := os.Stat(DropInPath(ours, "elsewhere")); !os.IsNotExist(err) {
+		t.Error("a fragment belonging to another master was restored into this one's pool directory")
 	}
 }

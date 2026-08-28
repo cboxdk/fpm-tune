@@ -77,7 +77,12 @@ func sandbox(master Master, changes []allocate.PoolPlan) (string, func(), error)
 	return configPath, cleanup, nil
 }
 
-// copyConfDir copies the .conf files from src into dst.
+// copyConfDir copies the pool directory into the sandbox.
+//
+// Every regular file, not just *.conf: the include glob is the master's to
+// choose, and a fragment left out of the copy is one php-fpm merges in
+// production but not in the rehearsal — which is the one thing a sandbox must
+// not get wrong. Copying a file php-fpm ignores costs nothing.
 func copyConfDir(src, dst, masterConfig string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -92,7 +97,7 @@ func copyConfDir(src, dst, masterConfig string) error {
 
 	masterConfig = filepath.Clean(masterConfig)
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") {
+		if !e.Type().IsRegular() {
 			continue
 		}
 		// A master config that lives inside the directory it globs would be
