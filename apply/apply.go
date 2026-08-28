@@ -207,6 +207,7 @@ func Apply(
 	if master.PID <= 0 {
 		// Provisioning: the files are in place for whenever PHP-FPM starts.
 		log.Info("Wrote pool configuration; no running master to reload", "pools", len(changes))
+		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 		cleanup(backups, log)
 		record(st, changes, now)
 
@@ -231,6 +232,13 @@ func Apply(
 	}
 
 	result.Reloaded = true
+
+	// The parsed configuration is cached, so without this the next scrape reads
+	// the settings from before this change and reports a pool as configured for
+	// what it used to be. Observed as a pool showing 4 workers hours after it had
+	// been set to 12.
+	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+
 	cleanup(backups, log)
 	record(st, changes, now)
 

@@ -3,7 +3,7 @@ module github.com/cboxdk/fpm-tune
 go 1.25.0
 
 require (
-	github.com/cboxdk/phpfpm v0.2.0
+	github.com/cboxdk/phpfpm v0.3.0
 	github.com/prometheus/client_golang v1.24.1
 )
 
