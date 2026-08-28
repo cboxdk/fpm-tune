@@ -303,3 +303,55 @@ func busy(pool string, rss int64, at time.Time) state.Observation {
 		},
 	}
 }
+
+// TestBootstrappingPoolIsNeverCut is the asymmetry that makes a first run safe.
+//
+// max_active_processes is a high-water mark since the master started, so a pool
+// observed for thirty seconds looks idle whatever it does at nine in the
+// morning. A tool that cuts a site from twenty workers to two on that evidence
+// causes exactly the outage it was installed to prevent — so while a pool is
+// bootstrapping it may grow, but it may not shrink.
+func TestBootstrappingPoolIsNeverCut(t *testing.T) {
+	// Looks idle: peaked at 2 while configured for 30.
+	view := observe.PoolView{
+		Name: "quiet-looking", ProcessManager: "dynamic",
+		CurrentMaxChildren: 30, ObservedPeak: 2,
+	}
+
+	t.Run("bootstrapping holds the line", func(t *testing.T) {
+		res := build(t, state.New(), view)
+
+		if got := res.Plan.Pools[0].MaxChildren; got < 30 {
+			t.Errorf("an unmeasured pool was cut from 30 to %d on thirty seconds of evidence", got)
+		}
+	})
+
+	t.Run("trusted may cut", func(t *testing.T) {
+		st := state.New()
+		base := time.Now()
+		for i := 0; i < 25; i++ {
+			st.Learn(busy("quiet-looking", 40*mb, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+		}
+
+		res := build(t, st, view)
+
+		if got := res.Plan.Pools[0].MaxChildren; got >= 30 {
+			t.Errorf("a pool measured for 50 minutes as needing 2 workers kept %d; "+
+				"its headroom can never move to a neighbour", got)
+		}
+	})
+}
+
+// TestBootstrappingPoolMayStillGrow: holding the floor must not also cap it. A
+// new pool that is queueing needs help on the first run, not after an hour.
+func TestBootstrappingPoolMayStillGrow(t *testing.T) {
+	res := build(t, state.New(), observe.PoolView{
+		Name: "struggling", ProcessManager: "dynamic",
+		CurrentMaxChildren: 4, ObservedPeak: 4,
+		QueueDepth: 25, MaxChildrenReached: 60,
+	})
+
+	if got := res.Plan.Pools[0].MaxChildren; got <= 4 {
+		t.Errorf("a queueing pool stayed at %d on its first run", got)
+	}
+}

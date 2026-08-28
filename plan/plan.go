@@ -153,9 +153,21 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 		ps = st.Pools[view.Name]
 	}
 
-	if ps != nil && ps.Trusted(opts) && ps.TypicalPeakBytes > 0 {
+	trusted := ps != nil && ps.Trusted(opts) && ps.TypicalPeakBytes > 0
+	if trusted {
 		pool.WorkerBytes = ps.TypicalPeakBytes
 		pool.Measured = true
+	} else if pool.CurrentMaxChildren > 0 {
+		// While a pool is still bootstrapping it may GROW but must not be cut.
+		//
+		// The trust gate covers the per-worker cost, but the demand signal needs
+		// it just as much: max_active_processes is a high-water mark since the
+		// master started, so a pool observed for thirty seconds looks idle
+		// whatever it does at nine in the morning. Cutting a site from twenty
+		// workers to two on that evidence is precisely the outage this tool is
+		// installed to prevent. Holding the floor at the current setting means
+		// the first run can only ever help.
+		pool.Floor = pool.CurrentMaxChildren
 	}
 
 	// A pool that could not be reached keeps what it has. Its peak is unknown,
