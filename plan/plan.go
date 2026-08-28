@@ -155,9 +155,9 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 		ps = st.Pools[view.Name]
 	}
 
-	trusted := ps != nil && ps.Trusted(opts) && ps.TypicalPeakBytes > 0
+	trusted := ps != nil && ps.Trusted(opts) && ps.SizingBytes() > 0
 	if trusted {
-		pool.WorkerBytes = ps.TypicalPeakBytes
+		pool.WorkerBytes = ps.SizingBytes()
 		pool.Measured = true
 	} else if pool.CurrentMaxChildren > 0 {
 		// While a pool is still bootstrapping it may GROW but must not be cut.

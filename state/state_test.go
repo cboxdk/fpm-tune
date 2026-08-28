@@ -104,9 +104,15 @@ func TestSizesOnThePeakNotTheMean(t *testing.T) {
 	}
 }
 
-// TestBaselineIsSmoothedNotSnapped: one unusual request must not permanently
-// resize a pool, and one quiet minute must not shrink it either.
-func TestBaselineIsSmoothedNotSnapped(t *testing.T) {
+// TestEstimateRisesFastAndFallsSlow is the asymmetry, and it is a safety
+// property rather than a tuning preference.
+//
+// A worker costing more than expected puts the whole budget at risk, so it is
+// believed within a scrape or two. A worker costing less is only an opportunity,
+// so it is taken up gradually — the estimate follows the day rather than being
+// pinned to its worst hour, but it never drops to one quiet reading in a single
+// step and then meets the morning under-provisioned.
+func TestEstimateRisesFastAndFallsSlow(t *testing.T) {
 	s := New()
 	opts := Options{}
 	now := time.Now()
@@ -118,28 +124,63 @@ func TestBaselineIsSmoothedNotSnapped(t *testing.T) {
 		}}
 	}
 
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 40; i++ {
 		s.Learn(steady(50*mb, now.Add(time.Duration(i)*time.Minute)), opts)
 	}
 	settled := s.Pools["app"].TypicalPeakBytes
 	if settled < 49*mb || settled > 51*mb {
-		t.Fatalf("baseline settled at %dMB after 30 steady samples of 50MB", settled/mb)
+		t.Fatalf("baseline settled at %dMB after 40 steady samples of 50MB", settled/mb)
 	}
 
-	// One spike.
-	s.Learn(steady(400*mb, now.Add(31*time.Minute)), opts)
-	after := s.Pools["app"].TypicalPeakBytes
+	// Workers get bigger: a deploy, or the day starting. This must be believed
+	// quickly, because the budget is already committed on the old number.
+	afterOne := 0
+	for i := 0; i < 3; i++ {
+		s.Learn(steady(150*mb, now.Add(time.Duration(41+i)*time.Minute)), opts)
+		if i == 0 {
+			afterOne = int(s.Pools["app"].TypicalPeakBytes / mb)
+		}
+	}
+	risen := s.Pools["app"].TypicalPeakBytes
 
-	if after > 120*mb {
-		t.Errorf("one 400MB spike moved the baseline to %dMB; a single slow request should not resize a pool",
-			after/mb)
+	if afterOne <= 60 {
+		t.Errorf("after one 150MB observation the estimate was still %dMB; "+
+			"the budget is committed on the old number while workers are already bigger", afterOne)
 	}
-	if after <= settled {
-		t.Errorf("a 400MB spike did not move the baseline at all (%dMB)", after/mb)
+	if risen < 120*mb {
+		t.Errorf("three 150MB observations only reached %dMB", risen/mb)
 	}
-	// The spike is not forgotten, it is just not the sizing number.
-	if s.Pools["app"].HighWaterBytes != 400*mb {
-		t.Errorf("high water = %dMB, want 400MB", s.Pools["app"].HighWaterBytes/mb)
+	// Fast, but still smoothed — a single reading does not become the estimate.
+	if afterOne >= 150 {
+		t.Errorf("one observation became the estimate outright (%dMB)", afterOne)
+	}
+
+	// Workers get smaller again. This must be taken up, or the pool is pinned to
+	// its worst hour and the quiet part of the day is wasted — but gradually.
+	afterFirstQuiet := int64(0)
+	for i := 0; i < 3; i++ {
+		s.Learn(steady(50*mb, now.Add(time.Duration(50+i)*time.Minute)), opts)
+		if i == 0 {
+			afterFirstQuiet = s.Pools["app"].TypicalPeakBytes
+		}
+	}
+
+	if afterFirstQuiet < 130*mb {
+		t.Errorf("one quiet reading dropped the estimate to %dMB; the next busy "+
+			"minute would find the pool over-provisioned with workers", afterFirstQuiet/mb)
+	}
+
+	for i := 0; i < 120; i++ {
+		s.Learn(steady(50*mb, now.Add(time.Duration(60+i)*time.Minute)), opts)
+	}
+	if released := s.Pools["app"].TypicalPeakBytes; released > 60*mb {
+		t.Errorf("the estimate stayed at %dMB after two hours of 50MB workers; "+
+			"the pool is pinned to its worst hour and the quiet day is wasted", released/mb)
+	}
+
+	// The spike is remembered, it is just not what the pool is sized on.
+	if s.Pools["app"].HighWaterBytes != 150*mb {
+		t.Errorf("high water = %dMB, want 150MB", s.Pools["app"].HighWaterBytes/mb)
 	}
 }
 

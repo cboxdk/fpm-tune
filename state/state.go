@@ -44,19 +44,23 @@ type Observation struct {
 type PoolState struct {
 	Pool string `json:"pool"`
 
-	// TypicalPeakBytes is the sizing number: an exponentially weighted average
-	// of the largest mature worker seen in each scrape.
+	// TypicalPeakBytes is the sizing number: a weighted average of the largest
+	// mature worker seen in each scrape, which rises quickly and falls slowly.
 	//
 	// Not a mean of all workers, which systematically under-provisions — the
 	// tail is what OOMs, and half the workers in any scrape are freshly
 	// recycled. Not the all-time maximum either, which never comes down after
-	// one unusual request. The typical worst worker is the number that has to
-	// fit.
+	// one unusual request and would hold a pool small forever.
+	//
+	// It tracks the day rather than being pinned to its worst hour: a pool whose
+	// workers are genuinely cheaper at three in the morning should be allowed to
+	// run more of them. What it will not do is believe that in a single step.
+	// See Options.AlphaUp and AlphaDown.
 	TypicalPeakBytes int64 `json:"typical_peak_bytes"`
 
 	// HighWaterBytes is the largest worker ever seen. Reported rather than used
-	// for sizing: it is the evidence behind a warning that a pool occasionally
-	// costs far more than it usually does.
+	// for sizing: it never comes down, so one pathological request would pin the
+	// pool's size forever.
 	HighWaterBytes int64 `json:"high_water_bytes"`
 
 	// Samples counts every scrape; BusySamples counts only those that taught us
@@ -115,8 +119,17 @@ type Options struct {
 	// One mature worker is an anecdote.
 	MinMatureWorkers int
 
-	// Alpha is the exponential weight for new observations. Lower is steadier.
-	Alpha float64
+	// AlphaUp and AlphaDown are the exponential weights for observations that
+	// are larger and smaller than the current estimate.
+	//
+	// They differ on purpose, and the asymmetry is the safety property. A worker
+	// costing more than expected puts the whole budget at risk, so it is
+	// believed within a scrape or two. A worker costing less is only an
+	// opportunity, so it is taken up gradually — the estimate tracks the day
+	// rather than being pinned to its worst hour, but it never drops to a quiet
+	// reading in one step and then meets the morning under-provisioned.
+	AlphaUp   float64
+	AlphaDown float64
 
 	// ConfidenceSamples and ConfidenceSpan are what a baseline needs before it
 	// is trusted enough to size a pool DOWN.
@@ -142,8 +155,11 @@ func (o Options) Defaults() Options {
 	if o.MinMatureWorkers <= 0 {
 		o.MinMatureWorkers = 2
 	}
-	if o.Alpha <= 0 || o.Alpha > 1 {
-		o.Alpha = 0.15
+	if o.AlphaUp <= 0 || o.AlphaUp > 1 {
+		o.AlphaUp = 0.5
+	}
+	if o.AlphaDown <= 0 || o.AlphaDown > 1 {
+		o.AlphaDown = 0.05
 	}
 	if o.ConfidenceSamples <= 0 {
 		o.ConfidenceSamples = 20
@@ -294,7 +310,11 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if ps.TypicalPeakBytes == 0 {
 		ps.TypicalPeakBytes = peak
 	} else {
-		ps.TypicalPeakBytes = int64(opts.Alpha*float64(peak) + (1-opts.Alpha)*float64(ps.TypicalPeakBytes))
+		alpha := opts.AlphaDown
+		if peak > ps.TypicalPeakBytes {
+			alpha = opts.AlphaUp
+		}
+		ps.TypicalPeakBytes = int64(alpha*float64(peak) + (1-alpha)*float64(ps.TypicalPeakBytes))
 	}
 
 	return true
@@ -332,6 +352,21 @@ func (ps *PoolState) ObservePeak(current int, at time.Time, opts Options) int {
 	}
 
 	return ps.PeakWorkers
+}
+
+// SizingBytes is the per-worker cost a pool should be sized against.
+//
+// The tracked estimate, which follows the workload up quickly and down slowly.
+// Falls back to the high-water mark only when nothing has been tracked yet.
+func (ps *PoolState) SizingBytes() int64 {
+	if ps == nil {
+		return 0
+	}
+	if ps.TypicalPeakBytes > 0 {
+		return ps.TypicalPeakBytes
+	}
+
+	return ps.HighWaterBytes
 }
 
 // Confidence is how far a pool's baseline can be trusted, from 0 to 1.
