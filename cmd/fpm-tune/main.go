@@ -284,6 +284,16 @@ func runApply(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// A second lock, on the pool directory itself. The state lock above does not
+	// cover it: two runs given different --state paths take different state
+	// locks and then write the same fragments and the same backups.
+	releaseResource, err := lock.Acquire(lock.ResourcePath(opts.BackupDir, master.DropInDir))
+	if err != nil {
+		return err
+	}
+	defer releaseResource()
+
 	if err := apply.Reconcile(ctx, master, opts, log); err != nil {
 		return err
 	}

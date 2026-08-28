@@ -192,9 +192,14 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 // a pool definition.
 func TestRollbackRemovesAFragmentThatDidNotExist(t *testing.T) {
 	dir := t.TempDir()
+	// Accepts the sandbox and rejects the real tree, so the fragment IS written
+	// and then has to be taken back. With a stub that rejects everything the
+	// sandbox stops it first, and the test proves "never written" — true, and
+	// not what its name claims.
+	configPath := masterConfigAt(t, dir)
 	master := Master{
-		Binary:     falseBin(t),
-		ConfigPath: masterConfigAt(t, dir),
+		Binary:     rejectsOnly(t, configPath),
+		ConfigPath: configPath,
 		DropInDir:  dir,
 		// Provisioning: php-fpm is not up yet, which is exactly when a pool has
 		// no fragment to begin with.
@@ -335,15 +340,22 @@ func TestBackupsAreKeptOutOfTheConfigDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st := state.New()
-	st.RecordApplied("shop", 5, time.Now().Add(-time.Hour))
+	// Stopped at the point where the backups exist. A completed Apply removes
+	// them, so asserting afterwards would find an empty directory and pass
+	// whatever the code did with them in between.
+	crashAfterWriting(t,
+		Master{Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir},
+		backupDir, allocate.PoolPlan{Name: "shop", MaxChildren: 50})
 
-	_, _ = Apply(context.Background(), allocate.Plan{
-		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 50}},
-	}, Master{
-		Binary: falseBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
-	}, st, Options{BackupDir: backupDir}, nil)
+	saved, err := os.ReadDir(backupDir)
+	if err != nil || len(saved) == 0 {
+		t.Fatalf("no backup was taken, so this proves nothing about where they go (err = %v)", err)
+	}
 
+	// PHP-FPM includes the pool directory by glob. A backup that landed there —
+	// now, or after someone widened the pattern — would be loaded as
+	// configuration, which is why the default backup directory is somewhere else
+	// entirely.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)

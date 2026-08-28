@@ -14,31 +14,36 @@ import (
 // from the master's own directory would be wrong on one of them, and writing a
 // pool fragment somewhere PHP-FPM does not read is a silent no-op.
 func IncludeDirOf(configPath string) string {
-	pattern := IncludePatternOf(configPath)
-	if pattern == "" {
-		return ""
+	for _, pattern := range IncludePatternsOf(configPath) {
+		dir := filepath.Dir(pattern)
+		if dir == "." || dir == "/" {
+			continue
+		}
+
+		return dir
 	}
 
-	dir := filepath.Dir(pattern)
-	if dir == "." || dir == "/" {
-		return ""
-	}
-
-	return dir
+	return ""
 }
 
-// IncludePatternOf returns the whole glob, not just its directory.
+// IncludePatternsOf returns every include glob the master config names.
 //
-// The basename half matters: a master including [a-y]*.conf, or naming its pool
-// files one by one, does not pick up zz-fpm-tune-www.conf — and writing a
-// fragment nobody reads is the quietest possible failure, because `php-fpm -t`
-// passes, the reload succeeds and the change records itself as applied.
-func IncludePatternOf(configPath string) string {
+// All of them, and whole. The basename half matters: a master including
+// [a-y]*.conf, or naming its pool files one by one, does not pick up
+// zz-fpm-tune-www.conf — and writing a fragment nobody reads is the quietest
+// possible failure, because `php-fpm -t` passes, the reload succeeds and the
+// change records itself as applied.
+//
+// And more than one matters just as much. A master may include a distribution's
+// conf.d alongside its pools; checking only the first would either miss the pool
+// tree or judge the fragments against the wrong glob.
+func IncludePatternsOf(configPath string) []string {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return ""
+		return nil
 	}
 
+	var patterns []string
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
@@ -64,10 +69,10 @@ func IncludePatternOf(configPath string) string {
 			pattern = filepath.Join(filepath.Dir(configPath), pattern)
 		}
 
-		return pattern
+		patterns = append(patterns, pattern)
 	}
 
-	return ""
+	return patterns
 }
 
 // PIDFileOf reads the master's pid file location from its config.

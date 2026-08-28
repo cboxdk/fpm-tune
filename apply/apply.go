@@ -59,8 +59,8 @@ type Master struct {
 	// rather than a master this caller failed to identify.
 	NoMasterExpected bool
 
-	// IncludePattern is the glob the master actually includes pool files by,
-	// when it could be read.
+	// IncludePatterns are the globs the master actually includes pool files by,
+	// when they could be read.
 	//
 	// Checked against the fragments about to be written, because writing one the
 	// master does not include is the quietest possible failure: `php-fpm -t`
@@ -68,7 +68,7 @@ type Master struct {
 	// running configuration is exactly what it was. A master including
 	// [a-y]*.conf, or naming its pool files individually, does not pick up
 	// zz-fpm-tune-www.conf.
-	IncludePattern string
+	IncludePatterns []string
 
 	// PIDFile is the master's pid file, when it has one.
 	//
@@ -311,7 +311,7 @@ func Apply(
 		result.RollbackFailed = restore(backups, log)
 		result.RolledBack = len(result.RollbackFailed) == 0
 		if result.RolledBack {
-			clearTransaction(opts.BackupDir, master.DropInDir)
+			commit(opts.BackupDir, master.DropInDir, backups, log)
 		}
 
 		if !result.RolledBack {
@@ -327,8 +327,7 @@ func Apply(
 		// Provisioning: the files are in place for whenever PHP-FPM starts.
 		log.Info("Wrote pool configuration; no running master to reload", "pools", len(changes))
 		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
-		cleanup(backups, log)
-		clearTransaction(opts.BackupDir, master.DropInDir)
+		commit(opts.BackupDir, master.DropInDir, backups, log)
 		record(st, changes, now)
 
 		return result, nil
@@ -355,8 +354,7 @@ func Apply(
 				"pid", master.PID, "error", ctxErr)
 			result.Reloaded = true
 			phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
-			cleanup(backups, log)
-			clearTransaction(opts.BackupDir, master.DropInDir)
+			commit(opts.BackupDir, master.DropInDir, backups, log)
 			record(st, changes, now)
 
 			return result, nil
@@ -381,7 +379,7 @@ func Apply(
 		result.RollbackFailed = restore(backups, log)
 		result.RolledBack = len(result.RollbackFailed) == 0
 		if result.RolledBack {
-			clearTransaction(opts.BackupDir, master.DropInDir)
+			commit(opts.BackupDir, master.DropInDir, backups, log)
 		}
 
 		// Best effort: the master is already gone, so this may do nothing. It
@@ -408,8 +406,7 @@ func Apply(
 	// been set to 12.
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
-	cleanup(backups, log)
-	clearTransaction(opts.BackupDir, master.DropInDir)
+	commit(opts.BackupDir, master.DropInDir, backups, log)
 	record(st, changes, now)
 
 	return result, nil
@@ -526,6 +523,17 @@ func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, r
 		return changes
 	}
 
+	// Apply is exported, so the plan need not have come from allocate.Compute.
+	// A pool costed at zero makes growth free and the arithmetic meaningless,
+	// and an implausible cost overflows it; either way the safe answer is to
+	// leave the damping alone rather than compute a budget from nonsense.
+	for _, pp := range plan.Pools {
+		if pp.WorkerBytes <= 0 || pp.WorkerBytes > maxPlausibleWorkerBytes ||
+			pp.MaxChildren > maxPlausibleChildren || pp.Current > maxPlausibleChildren {
+			return changes
+		}
+	}
+
 	committed := commitmentOf(plan, changes)
 	if committed <= limit {
 		return changes
@@ -615,6 +623,15 @@ func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, r
 	return kept
 }
 
+// maxPlausibleWorkerBytes and maxPlausibleChildren bound the inputs to the
+// budget arithmetic. A terabyte per worker or a million children is not a
+// configuration; multiplying them wraps int64 and turns an overcommit check into
+// a permission slip.
+const (
+	maxPlausibleWorkerBytes = int64(1) << 40
+	maxPlausibleChildren    = 1_000_000
+)
+
 // commitmentOf is what the host would be running with these changes applied and
 // everything else left where it is.
 func commitmentOf(plan allocate.Plan, changes []allocate.PoolPlan) int64 {
@@ -647,21 +664,33 @@ func setOutcome(result *Result, pool string, action Action, reason string) {
 // includesOurFragments checks that the master would actually read what is about
 // to be written.
 func includesOurFragments(master Master, changes []allocate.PoolPlan) error {
-	if master.IncludePattern == "" {
-		// The pattern could not be read, or the drop-in directory was set
-		// explicitly and does not correspond to one. Nothing to check against;
-		// refusing here would break a legitimate configuration.
+	if len(master.IncludePatterns) == 0 {
+		// The master config could not be read. Nothing to check against, and
+		// refusing here would break provisioning against a host where php-fpm is
+		// not installed yet.
 		return nil
 	}
 
 	for _, pp := range changes {
-		name := filepath.Base(DropInPath(master.DropInDir, pp.Name))
+		path := DropInPath(master.DropInDir, pp.Name)
 
-		ok, err := filepath.Match(filepath.Base(master.IncludePattern), name)
-		if err != nil || !ok {
-			return fmt.Errorf("%w: %s would be written as %s, which %q does not match — "+
+		matched := false
+		for _, pattern := range master.IncludePatterns {
+			// The WHOLE path, not the basename. Comparing basenames meant a
+			// drop-in directory the master does not include at all still passed
+			// as long as the filename matched the glob — so an operator who
+			// pointed --drop-in-dir at the wrong place got a successful apply, a
+			// successful reload, a recorded change, and no effect whatsoever.
+			if ok, err := filepath.Match(pattern, path); err == nil && ok {
+				matched = true
+
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%w: %s would be written to %s, which none of %v includes — "+
 				"the change would validate and reload and have no effect",
-				ErrNotIncluded, pp.Name, name, master.IncludePattern)
+				ErrNotIncluded, pp.Name, path, master.IncludePatterns)
 		}
 	}
 
@@ -712,10 +741,20 @@ func writeDropIns(master Master, changes []allocate.PoolPlan, opts Options, log 
 		}
 
 		backups = append(backups, b)
+
+		// filepath.Base("") is ".", not "" — so a fragment that did not exist
+		// before was recorded as having a backup called ".", which is neither a
+		// file nor nothing. The record then failed its own validation and the
+		// whole transaction was ignored, which is exactly the case the tombstone
+		// exists for.
+		saved := ""
+		if b.saved != "" {
+			saved = filepath.Base(b.saved)
+		}
 		txn.Files = append(txn.Files, txnFile{
 			Path:    path,
 			Existed: b.existed,
-			Saved:   filepath.Base(b.saved),
+			Saved:   saved,
 			Wrote:   hashBytes(rendered),
 		})
 	}
@@ -836,6 +875,20 @@ func backupName(dropInDir, path string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
 
 	return hex.EncodeToString(sum[:4]) + "-" + filepath.Base(path) + ".bak"
+}
+
+// commit closes a transaction: the record goes first, then the copies it took.
+//
+// The order is the point. Removing the backups first left a window in which a
+// record still named files whose saved copies were already gone — so a run that
+// died there handed the next reconcile a manifest it could not honour, and if
+// the configuration happened to be invalid for some unrelated reason, that
+// reconcile would delete a good newly-created fragment or fail trying to restore
+// one. With the record cleared first, a death in the window leaves orphaned .bak
+// files that nothing reads, which the next reconcile sweeps.
+func commit(backupDir, dropInDir string, backups []backup, log *slog.Logger) {
+	clearTransaction(backupDir, dropInDir)
+	cleanup(backups, log)
 }
 
 // cleanup removes the saved copies once a change has stuck.

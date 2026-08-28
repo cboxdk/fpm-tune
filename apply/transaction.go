@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,9 +83,55 @@ func readTransaction(backupDir, dropInDir string) (transaction, bool) {
 	if filepath.Clean(txn.DropInDir) != filepath.Clean(dropInDir) {
 		return transaction{}, false
 	}
+	if err := txn.valid(dropInDir); err != nil {
+		return transaction{}, false
+	}
 
 	return txn, true
 }
+
+// valid checks a record before anything acts on it.
+//
+// Recovery deletes and overwrites files named in here. The record is written by
+// this tool into a root-owned directory, so this is hardening rather than a live
+// hole — but "the file said so" is not a reason to remove a path, and a
+// truncated or hand-edited record should fail closed rather than half-apply.
+func (t transaction) valid(dropInDir string) error {
+	dir := filepath.Clean(dropInDir)
+	seen := make(map[string]bool, len(t.Files))
+
+	for _, f := range t.Files {
+		path := filepath.Clean(f.Path)
+		if filepath.Dir(path) != dir {
+			return fmt.Errorf("%w: %s is not in %s", errBadTransaction, path, dir)
+		}
+		if seen[path] {
+			return fmt.Errorf("%w: %s appears twice", errBadTransaction, path)
+		}
+		seen[path] = true
+
+		if f.Existed != (f.Saved != "") {
+			return fmt.Errorf("%w: %s says existed=%v with saved=%q",
+				errBadTransaction, path, f.Existed, f.Saved)
+		}
+		// A bare name: Saved is joined onto the backup directory, and "../.."
+		// would reach out of it.
+		if f.Saved != "" && (f.Saved != filepath.Base(f.Saved) || f.Saved == "." || f.Saved == "..") {
+			return fmt.Errorf("%w: %s names backup %q, which is not a bare filename",
+				errBadTransaction, path, f.Saved)
+		}
+		if len(f.Wrote) != sha256.Size*2 {
+			return fmt.Errorf("%w: %s records a malformed hash", errBadTransaction, path)
+		}
+		if _, err := hex.DecodeString(f.Wrote); err != nil {
+			return fmt.Errorf("%w: %s records a malformed hash", errBadTransaction, path)
+		}
+	}
+
+	return nil
+}
+
+var errBadTransaction = errors.New("malformed transaction record")
 
 func clearTransaction(backupDir, dropInDir string) {
 	_ = os.Remove(transactionPath(backupDir, dropInDir))

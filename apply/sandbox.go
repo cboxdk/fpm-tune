@@ -97,7 +97,12 @@ func copyConfDir(src, dst, masterConfig string) error {
 
 	masterConfig = filepath.Clean(masterConfig)
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
+		// Stat rather than the directory entry type, so a SYMLINKED fragment is
+		// copied by its contents. php-fpm follows them, and a deployment that
+		// symlinks per-site configuration in is ordinary — skipping them
+		// validated a different tree from the one that runs.
+		info, err := os.Stat(filepath.Join(src, e.Name()))
+		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		// A master config that lives inside the directory it globs would be
@@ -159,10 +164,13 @@ func rewriteInclude(configPath, realDir, sandboxDir string) ([]byte, error) {
 	}
 
 	if !redirected {
-		// The drop-in directory was set explicitly and is not what the master
-		// includes — a legitimate configuration, and one where the sandbox must
-		// still see the fragments being validated.
-		lines = append(lines, "include = "+filepath.Join(sandboxDir, "*.conf"), "")
+		// Refused rather than papered over. This used to append an include for
+		// the sandbox, which made the rehearsal pass against a tree production
+		// does not read: the drop-in directory was not one the master includes,
+		// so the fragments would validate here, reload cleanly, record
+		// themselves as applied, and change nothing at all.
+		return nil, fmt.Errorf("%w: %s includes no pool directory matching %s",
+			ErrNotIncluded, configPath, realDir)
 	}
 
 	return []byte(strings.Join(lines, "\n")), nil

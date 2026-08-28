@@ -95,6 +95,7 @@ type Loop struct {
 
 	lastSaved  time.Time
 	release    lock.Release
+	resource   lock.Release
 	reconciled bool
 }
 
@@ -132,6 +133,10 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 
 // Close releases the lock. Safe to call more than once.
 func (l *Loop) Close() {
+	if l.resource != nil {
+		l.resource()
+		l.resource = nil
+	}
 	if l.release != nil {
 		l.release()
 		l.release = nil
@@ -314,6 +319,19 @@ func (l *Loop) reconcile(ctx context.Context) {
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
 
+	// Held for the life of the daemon. The state lock does not cover the pool
+	// directory: a run given a different --state path takes a different state
+	// lock and then writes the same fragments.
+	if l.resource == nil {
+		release, err := lock.Acquire(lock.ResourcePath(opts.BackupDir, master.DropInDir))
+		if err != nil {
+			l.log.Error("Cannot take the pool-directory lock; not applying", "error", err)
+
+			return
+		}
+		l.resource = release
+	}
+
 	if err := apply.Reconcile(ctx, master, opts, l.log); err != nil {
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
@@ -448,12 +466,12 @@ func MasterOnHost(dropInDir string, log *slog.Logger) (apply.Master, error) {
 
 	m := masters[0]
 	master := apply.Master{
-		Binary:         m.Binary,
-		ConfigPath:     m.ConfigPath,
-		PID:            m.PID,
-		PIDFile:        PIDFileOf(m.ConfigPath),
-		DropInDir:      dropInDir,
-		IncludePattern: IncludePatternOf(m.ConfigPath),
+		Binary:          m.Binary,
+		ConfigPath:      m.ConfigPath,
+		PID:             m.PID,
+		PIDFile:         PIDFileOf(m.ConfigPath),
+		DropInDir:       dropInDir,
+		IncludePatterns: IncludePatternsOf(m.ConfigPath),
 	}
 	if master.DropInDir == "" {
 		master.DropInDir = IncludeDirOf(m.ConfigPath)

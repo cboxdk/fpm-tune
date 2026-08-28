@@ -2,6 +2,8 @@ package apply
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,6 +47,12 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 
 	txn, found := readTransaction(opts.BackupDir, master.DropInDir)
 	if !found {
+		// No record, so nothing was in flight. Any saved copies still lying
+		// around belong to a transaction that was closed after they were taken —
+		// the record is removed first precisely so this is the harmless order —
+		// and nothing will ever read them again.
+		sweepOrphanBackups(opts.BackupDir, master.DropInDir, log)
+
 		return nil
 	}
 
@@ -52,7 +60,17 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		"files", len(txn.Files), "dir", opts.BackupDir)
 
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err == nil {
-		log.Info("The configuration on disk is valid; the unfinished change stands")
+		// Valid, so the change is kept — but validation is not the commit point
+		// for a RUNNING master. The run may have died after writing the files
+		// and before signalling, in which case the master is still serving the
+		// old configuration while the files on disk say otherwise. Nothing would
+		// ever correct that: the next round reads the configuration from the
+		// files, concludes the pool is already where it wants it, and never
+		// reloads. So the transaction is finished rather than merely accepted.
+		if err := finishReload(ctx, master, opts, log); err != nil {
+			return err
+		}
+
 		discard(txn, opts.BackupDir, log)
 
 		return nil
@@ -105,6 +123,73 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 	log.Info("Undid the unfinished change; the configuration validates")
 
 	return nil
+}
+
+// finishReload completes an unfinished apply by doing what it did not get to.
+//
+// Idempotent by nature: a master that already adopted these files re-reads the
+// same ones. The cost is one graceful reload at startup, and the alternative is
+// a host whose configuration files and running master disagree with nothing to
+// notice it.
+func finishReload(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
+	if master.PID <= 0 {
+		log.Info("The configuration a previous run left is valid; no master is running to adopt it")
+
+		return nil
+	}
+
+	log.Warn("The configuration a previous run left is valid but may never have been "+
+		"adopted; reloading to be sure", "pid", master.PID)
+
+	if _, err := phpfpm.ReloadAndWait(ctx, phpfpm.ReloadTarget{
+		PID:        master.PID,
+		PIDFile:    master.PIDFile,
+		ConfigPath: master.ConfigPath,
+	}, opts.SettleTime, log); err != nil {
+		return fmt.Errorf("%w: the leftover configuration is valid but the master could "+
+			"not be reloaded to adopt it: %w", ErrUnreconciled, err)
+	}
+
+	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+
+	return nil
+}
+
+// sweepOrphanBackups removes saved copies with no transaction naming them.
+func sweepOrphanBackups(backupDir, dropInDir string, log *slog.Logger) {
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".bak") {
+			continue
+		}
+		if _, ok := backupTarget(dropInDir, filepath.Join(backupDir, e.Name())); !ok {
+			continue
+		}
+		if err := os.Remove(filepath.Join(backupDir, e.Name())); err != nil {
+			log.Debug("Could not remove an orphaned backup", "name", e.Name(), "error", err)
+		}
+	}
+}
+
+// backupTarget maps a saved fragment back to the file it came from, and reports
+// whether it belongs to this master at all.
+func backupTarget(dropInDir, saved string) (string, bool) {
+	name := filepath.Base(saved)
+
+	prefix, rest, found := strings.Cut(name, "-")
+	if !found {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
+	if prefix != hex.EncodeToString(sum[:4]) {
+		return "", false
+	}
+
+	return filepath.Join(dropInDir, strings.TrimSuffix(rest, ".bak")), true
 }
 
 // undo puts one file back the way the transaction found it.

@@ -358,8 +358,9 @@ func TestReconcileLeavesAFileSomeoneElseChanged(t *testing.T) {
 	}
 }
 
-// TestReconcileLeavesAValidConfigurationAlone: the common case. The run died
-// after the change stuck, so undoing it would be its own outage.
+// TestReconcileLeavesAValidConfigurationAlone: the common case. The run wrote a
+// configuration php-fpm accepts and then died, so undoing it would be its own
+// outage — and the reload it never got to is completed rather than assumed.
 func TestReconcileLeavesAValidConfigurationAlone(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
@@ -369,10 +370,20 @@ func TestReconcileLeavesAValidConfigurationAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	master := Master{Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir}
+	// A live master, because the point is that Reconcile finishes the reload the
+	// dead run never reached. Validation passing is not the commit point: the
+	// files can say 40 while the master still serves 10, and nothing else would
+	// ever notice — the next round reads the FILES, concludes the pool is
+	// already where it wants it, and never reloads.
+	configPath := masterConfigAt(t, dir)
+	master := Master{
+		Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir,
+		PID: fakeMaster(t, configPath),
+	}
 	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
 
-	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
+	if err := Reconcile(context.Background(), master,
+		Options{BackupDir: backupDir, SettleTime: 100 * time.Millisecond}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -611,7 +622,7 @@ func TestAFragmentTheMasterDoesNotIncludeIsRefused(t *testing.T) {
 		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 		PID: 0, NoMasterExpected: true,
 		// Everything from a to y. Our fragments start with zz.
-		IncludePattern: filepath.Join(dir, "[a-y]*.conf"),
+		IncludePatterns: []string{filepath.Join(dir, "[a-y]*.conf")},
 	}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 
 	if !errors.Is(err, ErrNotIncluded) {
@@ -632,7 +643,7 @@ func TestTheOrdinaryIncludeStillWorks(t *testing.T) {
 	}, Master{
 		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
 		PID: 0, NoMasterExpected: true,
-		IncludePattern: filepath.Join(dir, "*.conf"),
+		IncludePatterns: []string{filepath.Join(dir, "*.conf")},
 	}, state.New(), Options{
 		BackupDir: filepath.Join(t.TempDir(), "backup"), SettleTime: 100 * time.Millisecond,
 	}, nil)
@@ -755,4 +766,86 @@ func newMaster(t *testing.T, dropInDir string) Master {
 		DropInDir:  dropInDir,
 		PID:        fakeMaster(t, configPath),
 	}
+}
+
+// TestAWrongDropInDirectoryIsRefused.
+//
+// The include check compared only the FILENAME against the master's glob, so a
+// drop-in directory the master does not include at all still passed as long as
+// the name matched. An operator who pointed --drop-in-dir at the wrong place got
+// a successful validation, a successful reload, a recorded change — and no
+// effect whatsoever, on that run and on every run after it, because the tool
+// then believed the pool was already where it wanted it.
+func TestAWrongDropInDirectoryIsRefused(t *testing.T) {
+	wrong := t.TempDir()
+
+	_, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, wrong), DropInDir: wrong,
+		PID: 0, NoMasterExpected: true,
+		// The master includes a different directory entirely. The filename
+		// matches the glob; the path does not.
+		IncludePatterns: []string{"/etc/php-fpm.d/*.conf"},
+	}, state.New(), Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+
+	if !errors.Is(err, ErrNotIncluded) {
+		t.Fatalf("err = %v, want ErrNotIncluded", err)
+	}
+	if _, statErr := os.Stat(DropInPath(wrong, "www")); !os.IsNotExist(statErr) {
+		t.Error("a fragment was written to a directory the master does not include")
+	}
+}
+
+// TestReconcileFinishesAReloadTheDeadRunNeverReached.
+//
+// Validation passing is not the commit point for a running master. An apply can
+// die after writing the files and before signalling, and then the files say one
+// thing while the master serves another — with nothing to notice, because the
+// next round reads the FILES, concludes the pool is already where it wants it,
+// and never reloads. The divergence would outlive every restart.
+func TestReconcileFinishesAReloadTheDeadRunNeverReached(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	if err := os.WriteFile(DropInPath(dir, "www"),
+		[]byte("[www]\npm.max_children = 10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := masterConfigAt(t, dir)
+	pid := fakeMaster(t, configPath)
+	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir, PID: pid}
+
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+
+	if err := Reconcile(context.Background(), master,
+		Options{BackupDir: backupDir, SettleTime: 100 * time.Millisecond}, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// The stub survives its reload, so a completed Reconcile leaves it running.
+	// A Reconcile that skipped the reload would leave it running too — what is
+	// asserted here is that the record was closed only after the reload was
+	// attempted, which the error path above would otherwise have surfaced.
+	if err := phpfpmProcessAlive(pid); err != nil {
+		t.Errorf("the master did not survive the completing reload: %v", err)
+	}
+	if _, found := readTransaction(backupDir, dir); found {
+		t.Error("the transaction is still open after a successful reconcile; the next " +
+			"start would reconcile all over again")
+	}
+	if entries, _ := os.ReadDir(backupDir); len(entries) != 0 {
+		t.Errorf("%d file(s) left behind in the backup directory", len(entries))
+	}
+}
+
+// phpfpmProcessAlive reports whether a pid is still running.
+func phpfpmProcessAlive(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+
+	return proc.Signal(syscall.Signal(0))
 }

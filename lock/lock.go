@@ -12,6 +12,8 @@
 package lock
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -65,8 +67,27 @@ func Acquire(path string) (Release, error) {
 	}, nil
 }
 
-// DefaultPath is the lock beside the state file, so one lock covers both the
-// configuration writes and the state the next run reads.
+// DefaultPath is the lock beside the state file. It covers the state, which is
+// read whole and written whole, so two processes sharing one file would discard
+// each other's learning.
 func DefaultPath(statePath string) string {
 	return filepath.Join(filepath.Dir(statePath), "fpm-tune.lock")
+}
+
+// ResourcePath is the lock for a pool directory.
+//
+// Separate from the state lock because they protect different things and are
+// not interchangeable. Two runs given different --state paths took different
+// state locks and then wrote the SAME pool fragments and the same backups, each
+// taking the other's half-applied state as "the previous configuration" — the
+// exact interleaving the locking was added to prevent, reachable by passing a
+// flag. This one is keyed on what is actually being written.
+//
+// It lives in the backup directory rather than the pool directory: php-fpm
+// includes that directory by glob, and a lock file that happened to match the
+// pattern would be read as configuration.
+func ResourcePath(backupDir, dropInDir string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
+
+	return filepath.Join(backupDir, hex.EncodeToString(sum[:4])+"-apply.lock")
 }
