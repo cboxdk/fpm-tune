@@ -466,6 +466,26 @@ func masterOnHost(dropInDir string, remembered *state.MasterRef, log *slog.Logge
 		return apply.Master{}, fmt.Errorf("cannot scan for PHP-FPM masters: %w", err)
 	}
 
+	// An explicit drop-in directory picks the master out. Done before the
+	// "is anything running" question, because on a host with several masters —
+	// a development machine, or one running two PHP versions — none of the
+	// others being ours is the same as ours not running.
+	if dropInDir != "" && len(masters) > 0 {
+		want := filepath.Clean(dropInDir)
+
+		var matched []phpfpm.Master
+		for _, m := range masters {
+			for _, pattern := range IncludePatternsOf(m.ConfigPath) {
+				if filepath.Clean(filepath.Dir(pattern)) == want {
+					matched = append(matched, m)
+
+					break
+				}
+			}
+		}
+		masters = matched
+	}
+
 	if len(masters) == 0 {
 		if remembered == nil || !remembered.Known() {
 			return apply.Master{}, ErrNoMaster
@@ -485,32 +505,6 @@ func masterOnHost(dropInDir string, remembered *state.MasterRef, log *slog.Logge
 		}
 
 		return m, nil
-	}
-
-	// An explicit drop-in directory picks the master out. Without this the
-	// advice in the error below was not actually followable: setting the
-	// directory did nothing to disambiguate, so an operator told to run once per
-	// master had no way to say which one they meant.
-	if dropInDir != "" && len(masters) > 1 {
-		want := filepath.Clean(dropInDir)
-
-		var matched []phpfpm.Master
-		for _, m := range masters {
-			// Every include, not the first. A master including a distribution's
-			// conf.d before its pool directory could not be selected by naming
-			// the pool directory, which is the only handle the error message
-			// offers.
-			for _, pattern := range IncludePatternsOf(m.ConfigPath) {
-				if filepath.Clean(filepath.Dir(pattern)) == want {
-					matched = append(matched, m)
-
-					break
-				}
-			}
-		}
-		if len(matched) > 0 {
-			masters = matched
-		}
 	}
 
 	if len(masters) > 1 {

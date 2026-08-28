@@ -303,7 +303,15 @@ func runApply(args []string) error {
 	// configuration php-fpm will not accept. Discovery parses the effective
 	// config to find pools, so from that point on nothing can be discovered —
 	// and the recovery path could not reach the master it exists to recover.
-	master, err := serve.MasterOnHost(*dropInDir, log)
+	// The remembered master, so recovery works on a host where php-fpm is not
+	// running — which is exactly the case when this tool's own file is what
+	// stops it starting.
+	remembered := state.MasterRef{}
+	if prior, err := state.Load(*c.statePath); err == nil {
+		remembered = prior.Master
+	}
+
+	master, err := serve.MasterFromMemory(*dropInDir, remembered, log)
 	if err != nil {
 		return err
 	}
@@ -328,6 +336,8 @@ func runApply(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	st.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
 	applied, applyErr := apply.Apply(ctx, result.Plan, master, st, opts, log)
 

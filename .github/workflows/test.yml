@@ -133,6 +133,14 @@ jobs:
       - name: End-to-end
         run: testing/e2e.sh "$PWD/build/fpm-tune"
 
+      # The perturbations a real host experiences. This exists because a soak on
+      # a VM found a P0 that every static review, every unit test and every
+      # container test had missed: a site was removed, php-fpm was reloaded, and
+      # this tool's file still declared that pool — so the master would not start
+      # and stayed down.
+      - name: Chaos
+        run: testing/chaos.sh "$PWD/build/fpm-tune"
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
