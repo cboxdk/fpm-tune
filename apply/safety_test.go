@@ -104,10 +104,7 @@ func TestShrinksGoWithTheGrowthTheyPayFor(t *testing.T) {
 			// under the 30% shrink threshold, and skipped before this existed.
 			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
 		},
-	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
-		PID: fakeMaster(t),
-	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+	}, newMaster(t, dir), st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -159,10 +156,7 @@ func TestAShrinkTheBudgetDoesNotNeedIsStillDamped(t *testing.T) {
 			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
 			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
 		},
-	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
-		PID: fakeMaster(t),
-	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+	}, newMaster(t, dir), st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -483,12 +477,16 @@ func TestSandboxDoesNotPullInTheRealPoolDirectory(t *testing.T) {
 //
 // Faking the check out instead would leave the only thing standing between this
 // package and SIGUSR2 to an arbitrary process untested.
-func fakeMaster(t *testing.T) int {
+func fakeMaster(t *testing.T, configPath string) int {
 	t.Helper()
 
+	// The title carries the CONFIG PATH as well as the master signature, because
+	// the reload is scoped to a specific master: on a host running several, a
+	// pid recycled to a different one would otherwise be signalled as though it
+	// were ours.
 	ready := filepath.Join(t.TempDir(), "ready")
 	cmd := exec.Command("/bin/sh", "-c",
-		`: "php-fpm: master process (/etc/php-fpm.conf)"; trap ':' USR2; touch `+ready+"; sleep 30 & wait")
+		`: "php-fpm: master process (`+configPath+`)"; trap ':' USR2; touch `+ready+"; sleep 30 & wait")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -522,13 +520,10 @@ func fakeMaster(t *testing.T) int {
 func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 	dir := t.TempDir()
 	st := state.New()
-	pid := fakeMaster(t)
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12, Current: 4}},
-	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir, PID: pid,
-	}, st, Options{
+	}, newMaster(t, dir), st, Options{
 		BackupDir: filepath.Join(t.TempDir(), "backup"), SettleTime: 200 * time.Millisecond,
 	}, nil)
 	if err != nil {
@@ -570,7 +565,7 @@ func TestAFragmentTheMasterDoesNotIncludeIsRefused(t *testing.T) {
 		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
 	}, Master{
 		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
-		PID: fakeMaster(t),
+		PID: 0, NoMasterExpected: true,
 		// Everything from a to y. Our fragments start with zz.
 		IncludePattern: filepath.Join(dir, "[a-y]*.conf"),
 	}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil)
@@ -592,7 +587,7 @@ func TestTheOrdinaryIncludeStillWorks(t *testing.T) {
 		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
 	}, Master{
 		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
-		PID:            fakeMaster(t),
+		PID: 0, NoMasterExpected: true,
 		IncludePattern: filepath.Join(dir, "*.conf"),
 	}, state.New(), Options{
 		BackupDir: filepath.Join(t.TempDir(), "backup"), SettleTime: 100 * time.Millisecond,
@@ -676,10 +671,7 @@ func TestAGrowthWaitsRatherThanForceAReloadTooSoon(t *testing.T) {
 			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
 			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
 		},
-	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
-		PID: fakeMaster(t),
-	}, st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	}, newMaster(t, dir), st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -704,5 +696,19 @@ func TestAGrowthWaitsRatherThanForceAReloadTooSoon(t *testing.T) {
 
 	if _, err := os.Stat(DropInPath(dir, "busy")); !os.IsNotExist(err) {
 		t.Error("the held-back growth was written anyway")
+	}
+}
+
+// newMaster is a Master backed by a stub process that will accept the reload.
+func newMaster(t *testing.T, dropInDir string) Master {
+	t.Helper()
+
+	configPath := masterConfigAt(t, dropInDir)
+
+	return Master{
+		Binary:     trueBin(t),
+		ConfigPath: configPath,
+		DropInDir:  dropInDir,
+		PID:        fakeMaster(t, configPath),
 	}
 }
