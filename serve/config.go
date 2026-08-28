@@ -14,6 +14,26 @@ import (
 // from the master's own directory would be wrong on one of them, and writing a
 // pool fragment somewhere PHP-FPM does not read is a silent no-op.
 func IncludeDirOf(configPath string) string {
+	pattern := IncludePatternOf(configPath)
+	if pattern == "" {
+		return ""
+	}
+
+	dir := filepath.Dir(pattern)
+	if dir == "." || dir == "/" {
+		return ""
+	}
+
+	return dir
+}
+
+// IncludePatternOf returns the whole glob, not just its directory.
+//
+// The basename half matters: a master including [a-y]*.conf, or naming its pool
+// files one by one, does not pick up zz-fpm-tune-www.conf — and writing a
+// fragment nobody reads is the quietest possible failure, because `php-fpm -t`
+// passes, the reload succeeds and the change records itself as applied.
+func IncludePatternOf(configPath string) string {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return ""
@@ -39,16 +59,12 @@ func IncludeDirOf(configPath string) string {
 		if pattern == "" {
 			continue
 		}
-		dir := filepath.Dir(pattern)
-		if dir == "." || dir == "/" {
-			continue
-		}
 		// The include may be relative to the master config's own directory.
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(filepath.Dir(configPath), dir)
+		if !filepath.IsAbs(pattern) {
+			pattern = filepath.Join(filepath.Dir(configPath), pattern)
 		}
 
-		return dir
+		return pattern
 	}
 
 	return ""

@@ -196,6 +196,9 @@ func TestRollbackRemovesAFragmentThatDidNotExist(t *testing.T) {
 		Binary:     falseBin(t),
 		ConfigPath: masterConfigAt(t, dir),
 		DropInDir:  dir,
+		// Provisioning: php-fpm is not up yet, which is exactly when a pool has
+		// no fragment to begin with.
+		NoMasterExpected: true,
 	}
 
 	path := DropInPath(dir, "new-pool")

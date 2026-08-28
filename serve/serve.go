@@ -14,6 +14,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cboxdk/fpm-tune/apply"
@@ -190,6 +192,14 @@ func (l *Loop) round(ctx context.Context) {
 	roundCtx, cancel := context.WithTimeout(ctx, l.cfg.ScrapeTimeout+30*time.Second)
 	defer cancel()
 
+	// Before discovery, not after. A previous run may have left configuration
+	// php-fpm will not accept, and discovery parses the effective config to find
+	// pools — so from that point on nothing is discoverable and the recovery
+	// path cannot reach the master it exists to recover.
+	if l.cfg.Apply && !l.reconciled {
+		l.reconcile(roundCtx)
+	}
+
 	targets, err := observe.Discover(l.log)
 	if err != nil {
 		l.log.Warn("Discovery failed; will retry", "error", err)
@@ -251,7 +261,7 @@ func (l *Loop) round(ctx context.Context) {
 			"free_bytes", result.Plan.FreeBytes)
 	}
 
-	if l.cfg.Apply {
+	if l.cfg.Apply && l.reconciled {
 		l.applyPlan(roundCtx, result, now)
 	}
 
@@ -259,7 +269,7 @@ func (l *Loop) round(ctx context.Context) {
 }
 
 func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time) {
-	master, err := MasterFrom(result, l.cfg.DropInDir)
+	master, err := MasterOnHost(l.cfg.DropInDir, l.log)
 	if err != nil {
 		l.log.Warn("Cannot apply", "error", err)
 
@@ -268,19 +278,6 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
-
-	// Once, on the first round that gets far enough to have a master: a previous
-	// process may have died between writing the fragments and validating them.
-	// Deferred to here rather than done in New because it needs the master, and
-	// the master is only known once discovery has run.
-	if !l.reconciled {
-		if err := apply.Reconcile(ctx, master, opts, l.log); err != nil {
-			l.log.Error("Could not reconcile what a previous run left behind; not applying", "error", err)
-
-			return
-		}
-		l.reconciled = true
-	}
 
 	applied, err := apply.Apply(ctx, result.Plan, master, l.state, opts, l.log)
 	if err != nil {
@@ -297,6 +294,37 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		// they go to disk now rather than waiting for the save interval.
 		l.save(now, true)
 	}
+}
+
+// reconcile repairs what an unfinished run left behind, once per process.
+//
+// Failure is not fatal to the loop: the daemon keeps observing and publishing
+// metrics, which is exactly what an operator needs while the host is in a state
+// nobody can write to. It simply does not apply until the repair succeeds.
+func (l *Loop) reconcile(ctx context.Context) {
+	master, err := MasterOnHost(l.cfg.DropInDir, l.log)
+	if err != nil {
+		if !errors.Is(err, ErrNoMaster) {
+			l.log.Warn("Cannot identify the master to reconcile against", "error", err)
+		}
+
+		return
+	}
+
+	opts := l.cfg.ApplyOptions
+	opts.BackupDir = l.cfg.BackupDir
+
+	if err := apply.Reconcile(ctx, master, opts, l.log); err != nil {
+		l.log.Error("A previous run left configuration this could not repair; not applying",
+			"error", err)
+
+		return
+	}
+
+	// A repair the reconcile just made would otherwise be invisible to the
+	// scrape that follows, because the parsed configuration is cached.
+	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+	l.reconciled = true
 }
 
 // save writes state, either because enough time has passed or because something
@@ -368,6 +396,77 @@ func (l *Loop) Metrics() *metrics.Collectors { return l.metrics }
 
 // State exposes the store, for tests.
 func (l *Loop) State() *state.State { return l.state }
+
+// MasterOnHost identifies the PHP-FPM instance to reconfigure, WITHOUT reading
+// its configuration.
+//
+// Used before anything else, because the configuration may be the problem. A run
+// that died between writing a fragment and validating it leaves one php-fpm will
+// not accept; discovery parses the effective config to find pools, so from that
+// point on nothing can be discovered at all and the recovery path cannot reach
+// the master it exists to recover. Observed as "no PHP-FPM pools found" — blamed
+// on permissions — against a perfectly healthy master.
+func MasterOnHost(dropInDir string, log *slog.Logger) (apply.Master, error) {
+	masters, err := phpfpm.DiscoverMasters(log)
+	if err != nil {
+		return apply.Master{}, fmt.Errorf("cannot scan for PHP-FPM masters: %w", err)
+	}
+
+	if len(masters) == 0 {
+		return apply.Master{}, ErrNoMaster
+	}
+
+	// An explicit drop-in directory picks the master out. Without this the
+	// advice in the error below was not actually followable: setting the
+	// directory did nothing to disambiguate, so an operator told to run once per
+	// master had no way to say which one they meant.
+	if dropInDir != "" && len(masters) > 1 {
+		want := filepath.Clean(dropInDir)
+
+		var matched []phpfpm.Master
+		for _, m := range masters {
+			if filepath.Clean(IncludeDirOf(m.ConfigPath)) == want {
+				matched = append(matched, m)
+			}
+		}
+		if len(matched) > 0 {
+			masters = matched
+		}
+	}
+
+	if len(masters) > 1 {
+		paths := make([]string, 0, len(masters))
+		for _, m := range masters {
+			paths = append(paths, fmt.Sprintf("pid %d (%s)", m.PID, m.ConfigPath))
+		}
+
+		return apply.Master{}, fmt.Errorf(
+			"this host runs %d PHP-FPM masters — %s. Apply handles one at a time; "+
+				"pass --drop-in-dir to say which one",
+			len(masters), strings.Join(paths, ", "))
+	}
+
+	m := masters[0]
+	master := apply.Master{
+		Binary:         m.Binary,
+		ConfigPath:     m.ConfigPath,
+		PID:            m.PID,
+		PIDFile:        PIDFileOf(m.ConfigPath),
+		DropInDir:      dropInDir,
+		IncludePattern: IncludePatternOf(m.ConfigPath),
+	}
+	if master.DropInDir == "" {
+		master.DropInDir = IncludeDirOf(m.ConfigPath)
+	}
+	if master.DropInDir == "" {
+		return master, errors.New("could not locate the pool configuration directory; set it explicitly")
+	}
+
+	return master, nil
+}
+
+// ErrNoMaster reports that no php-fpm master is running.
+var ErrNoMaster = errors.New("no running PHP-FPM master found")
 
 // MasterFrom works out which PHP-FPM instance a plan belongs to.
 //

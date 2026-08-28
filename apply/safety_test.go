@@ -474,3 +474,156 @@ func TestReconcileIgnoresAnotherMastersBackups(t *testing.T) {
 		t.Error("a fragment belonging to another master was restored into this one's pool directory")
 	}
 }
+
+// TestAFragmentTheMasterDoesNotIncludeIsRefused.
+//
+// The quietest possible failure. A master that includes [a-y]*.conf — or names
+// its pool files one by one, which plenty of hand-built configurations do —
+// never reads zz-fpm-tune-www.conf. Everything then succeeds: `php-fpm -t`
+// passes, the reload goes through, the pools are recorded as applied, the
+// operator is told the host was retuned. And the running configuration is
+// exactly what it was before, forever, with the tool reporting success on every
+// subsequent run because it believes it already made the change.
+func TestAFragmentTheMasterDoesNotIncludeIsRefused(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		PID: fakeMaster(t),
+		// Everything from a to y. Our fragments start with zz.
+		IncludePattern: filepath.Join(dir, "[a-y]*.conf"),
+	}, state.New(), Options{BackupDir: filepath.Join(dir, "backup")}, nil)
+
+	if !errors.Is(err, ErrNotIncluded) {
+		t.Fatalf("err = %v, want ErrNotIncluded", err)
+	}
+	if _, statErr := os.Stat(DropInPath(dir, "www")); !os.IsNotExist(statErr) {
+		t.Error("a fragment the master will never read was written anyway")
+	}
+}
+
+// TestTheOrdinaryIncludeStillWorks: the check above must not refuse the layout
+// every distribution actually ships.
+func TestTheOrdinaryIncludeStillWorks(t *testing.T) {
+	dir := t.TempDir()
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		PID:            fakeMaster(t),
+		IncludePattern: filepath.Join(dir, "*.conf"),
+	}, state.New(), Options{
+		BackupDir: filepath.Join(t.TempDir(), "backup"), SettleTime: 100 * time.Millisecond,
+	}, nil)
+	if err != nil {
+		t.Fatalf("the standard /etc/php-fpm.d/*.conf layout was refused: %v", err)
+	}
+	if len(res.Changed()) != 1 {
+		t.Errorf("changed = %v, want the one pool", res.Changed())
+	}
+}
+
+// TestAnUnidentifiedMasterIsRefusedBeforeAnythingIsWritten.
+//
+// This was checked AFTER the fragments were on disk, so a caller that could not
+// identify the master left new configuration in the pool directory and then had
+// to take it back. If the restore failed, or the process died, or anything
+// reloaded in between, the change was adopted with no master known to have
+// accepted it.
+func TestAnUnidentifiedMasterIsRefusedBeforeAnythingIsWritten(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	_, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		PID: 0, NoMasterExpected: false,
+	}, state.New(), Options{BackupDir: backupDir}, nil)
+
+	if !errors.Is(err, ErrMasterUnknown) {
+		t.Fatalf("err = %v, want ErrMasterUnknown", err)
+	}
+	if _, statErr := os.Stat(DropInPath(dir, "www")); !os.IsNotExist(statErr) {
+		t.Error("a fragment was written for a master that could not be identified")
+	}
+	if entries, _ := os.ReadDir(backupDir); len(entries) > 0 {
+		t.Errorf("%d backup(s) were taken before the refusal", len(entries))
+	}
+}
+
+// TestADryRunNeedsNoMaster: it reloads nothing, so rehearsing a change set on a
+// host where php-fpm is not up yet is a legitimate thing to want.
+func TestADryRunNeedsNoMaster(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 12, Current: 4}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+	}, state.New(), Options{
+		DryRun: true, BackupDir: filepath.Join(t.TempDir(), "backup"),
+	}, nil); err != nil {
+		t.Errorf("a dry run was refused for want of a master it does not use: %v", err)
+	}
+}
+
+// TestAGrowthWaitsRatherThanForceAReloadTooSoon.
+//
+// The coupling may override the SIZE threshold — a reduction too small to be
+// worth a reload on its own goes through when a neighbour needs the memory.
+// It must not override the TIME brake. A pool reloaded a minute ago must not be
+// reloaded again because something else wants to grow; the reload is the cost
+// being managed, and doing it on demand from a neighbour is the flap wearing a
+// different hat.
+//
+// So the growth waits instead. Deferring it costs some queueing on one pool.
+// Taking the memory anyway would overcommit the host.
+func TestAGrowthWaitsRatherThanForceAReloadTooSoon(t *testing.T) {
+	dir := t.TempDir()
+	const worker = 100 << 20
+
+	st := state.New()
+	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
+	// Reloaded seconds ago: inside its shrink interval whatever the size.
+	st.RecordApplied("quiet", 40, time.Now().Add(-time.Second))
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		TotalBytes: 5120 << 20, // the damped subset would need 6000MiB
+		Pools: []allocate.PoolPlan{
+			{Name: "busy", MaxChildren: 20, Current: 10, WorkerBytes: worker},
+			{Name: "quiet", MaxChildren: 30, Current: 40, WorkerBytes: worker},
+		},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		PID: fakeMaster(t),
+	}, st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	for _, o := range res.Outcomes {
+		switch o.Pool {
+		case "quiet":
+			if o.Action == ActionApplied {
+				t.Errorf("a pool reloaded a second ago was reloaded again to fund a "+
+					"neighbour's growth: %s", o.Reason)
+			}
+		case "busy":
+			if o.Action == ActionApplied {
+				t.Errorf("a growth was applied with no memory to pay for it; the host "+
+					"would be committed beyond its budget: %s", o.Reason)
+			}
+			if o.Action != ActionHeldBack {
+				t.Errorf("busy = %q, want %q so the operator can see why", o.Action, ActionHeldBack)
+			}
+		}
+	}
+
+	if _, err := os.Stat(DropInPath(dir, "busy")); !os.IsNotExist(err) {
+		t.Error("the held-back growth was written anyway")
+	}
+}

@@ -59,6 +59,17 @@ type Master struct {
 	// rather than a master this caller failed to identify.
 	NoMasterExpected bool
 
+	// IncludePattern is the glob the master actually includes pool files by,
+	// when it could be read.
+	//
+	// Checked against the fragments about to be written, because writing one the
+	// master does not include is the quietest possible failure: `php-fpm -t`
+	// passes, the reload succeeds, the change is recorded as applied, and the
+	// running configuration is exactly what it was. A master including
+	// [a-y]*.conf, or naming its pool files individually, does not pick up
+	// zz-fpm-tune-www.conf.
+	IncludePattern string
+
 	// PIDFile is the master's pid file, when it has one.
 	//
 	// Used only to recognise the master after a reload: a daemonized php-fpm
@@ -146,6 +157,10 @@ const (
 	ActionTooSoon   Action = "too soon"
 	ActionTooSmall  Action = "too small"
 	ActionUnknown   Action = "not written"
+
+	// ActionHeldBack is a growth the budget cannot pay for yet, because the
+	// reduction that would fund it is inside its own time brake.
+	ActionHeldBack Action = "held back"
 )
 
 // Outcome is what happened to one pool.
@@ -197,6 +212,10 @@ func (r Result) Changed() []Outcome {
 // Nothing was reloaded, and the previous drop-ins have been restored.
 var ErrValidationFailed = errors.New("php-fpm rejected the rendered configuration")
 
+// ErrNotIncluded reports that the fragments would be written somewhere the
+// master does not read.
+var ErrNotIncluded = errors.New("php-fpm does not include the files this would write")
+
 // ErrMasterUnknown reports that no master PID was given and the caller did not
 // confirm that none is expected. See Master.NoMasterExpected.
 var ErrMasterUnknown = errors.New("no php-fpm master to reload, and none was expected to be absent")
@@ -245,6 +264,25 @@ func Apply(
 		return result, nil
 	}
 
+	// Refused BEFORE anything is written. This used to be checked after the
+	// fragments were already on disk, so a caller that could not identify the
+	// master left new configuration in the pool directory and then had to take
+	// it back — and if the restore failed, or the process died, or anything
+	// reloaded in between, the change was adopted with no master known to have
+	// accepted it.
+	// Not for a dry run: it reloads nothing, so it does not need a master, and
+	// rehearsing a change set on a host where php-fpm is not up yet is a
+	// legitimate thing to want.
+	if !opts.DryRun && master.PID <= 0 && !master.NoMasterExpected {
+		return result, ErrMasterUnknown
+	}
+
+	// A fragment php-fpm does not include is a change that validates, reloads,
+	// records itself as applied, and does nothing at all.
+	if err := includesOurFragments(master, changes); err != nil {
+		return result, err
+	}
+
 	// Validated in a sandbox BEFORE anything is written live. The old order
 	// wrote the real fragments first and put them back if `-t` failed, which
 	// left unvalidated configuration in the directory PHP-FPM globs for as long
@@ -280,16 +318,6 @@ func Apply(
 		}
 
 		return result, fmt.Errorf("%w: %w", ErrValidationFailed, err)
-	}
-
-	if master.PID <= 0 && !master.NoMasterExpected {
-		// Refusing here rather than writing is the whole point: a caller that
-		// cannot identify the master would otherwise leave new configuration on
-		// disk, never reload it, and record it as done.
-		result.RollbackFailed = restore(backups, log)
-		result.RolledBack = len(result.RollbackFailed) == 0
-
-		return result, ErrMasterUnknown
 	}
 
 	if master.PID <= 0 {
@@ -457,7 +485,8 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 	return out, true
 }
 
-// requireShrinksWithGrowth pulls in the reductions a growth cannot fit without.
+// requireShrinksWithGrowth pulls in the reductions a growth cannot fit without,
+// and holds back the growths that still do not fit.
 //
 // The allocator divides ONE budget, so a pool being cut and a pool being grown
 // in the same plan are two halves of the same decision. Filtering them
@@ -467,34 +496,40 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 // budget applied as one that does not. Reproduced at three pools on 8GiB: the
 // balanced plan fit with 300MiB to spare and the damped subset committed 9.1GiB.
 //
+// Two rules keep the coupling from becoming a hole in the damping next door.
+//
 // It pulls in only as much as the arithmetic demands, largest saving first.
-// Forcing every reduction through whenever anything grew would be simpler and
-// would undo the anti-flap damping next door: on a host with several pools
-// there is nearly always something growing, so every shrink would fire the
-// moment it was proposed, which is the oscillation that damping exists to stop.
+// Forcing every reduction through whenever anything grew would be simpler and,
+// on a host with several pools, means something is nearly always growing — so
+// every shrink would fire the moment it was proposed, which is the oscillation
+// the thresholds exist to stop.
+//
+// And it only overrides the SIZE threshold, never the time brake. A pool
+// reloaded a minute ago must not be reloaded again because a neighbour wants to
+// grow; the reload is the cost being managed. When the memory can only come
+// from a pool that is still inside its interval, the growth waits instead.
+// Deferring a growth costs some queueing on one pool. Taking the memory anyway
+// would overcommit the host, and taking it by reloading a pool every minute
+// would be the flap.
 func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, result *Result) []allocate.PoolPlan {
 	limit := plan.TotalBytes - plan.ReserveBytes
 	if limit <= 0 {
 		return changes
 	}
 
+	committed := commitmentOf(plan, changes)
+	if committed <= limit {
+		return changes
+	}
+
+	action := make(map[string]Action, len(result.Outcomes))
+	for _, o := range result.Outcomes {
+		action[o.Pool] = o.Action
+	}
+
 	included := make(map[string]bool, len(changes))
 	for _, pp := range changes {
 		included[pp.Name] = true
-	}
-
-	// What the host would actually be running: the changes that survived
-	// damping, and everything else left where it is.
-	var committed int64
-	for _, pp := range plan.Pools {
-		n := pp.Current
-		if included[pp.Name] || n <= 0 {
-			n = pp.MaxChildren
-		}
-		committed += int64(n) * pp.WorkerBytes
-	}
-	if committed <= limit {
-		return changes
 	}
 
 	type reduction struct {
@@ -507,6 +542,11 @@ func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, r
 		if pp.Unknown || included[pp.Name] || pp.Current <= 0 || pp.MaxChildren >= pp.Current {
 			continue
 		}
+		// Only the ones damped for being small. A pool inside its reload
+		// interval stays there.
+		if action[pp.Name] != ActionTooSmall {
+			continue
+		}
 		available = append(available, reduction{pp, int64(pp.Current-pp.MaxChildren) * pp.WorkerBytes})
 	}
 	sort.Slice(available, func(i, j int) bool { return available[i].frees > available[j].frees })
@@ -517,20 +557,106 @@ func requireShrinksWithGrowth(plan allocate.Plan, changes []allocate.PoolPlan, r
 		}
 
 		changes = append(changes, r.pool)
+		included[r.pool.Name] = true
 		committed -= r.frees
 
-		for i := range result.Outcomes {
-			if result.Outcomes[i].Pool != r.pool.Name {
-				continue
-			}
-			result.Outcomes[i].Action = ActionApplied
-			result.Outcomes[i].Reason = fmt.Sprintf(
-				"%d to %d, applied below the threshold because another pool is growing into this memory",
-				r.pool.Current, r.pool.MaxChildren)
+		setOutcome(result, r.pool.Name, ActionApplied, fmt.Sprintf(
+			"%d to %d, applied below the threshold because another pool is growing into this memory",
+			r.pool.Current, r.pool.MaxChildren))
+	}
+
+	if committed <= limit {
+		return changes
+	}
+
+	// The reductions available were not enough, so the growths have to give.
+	// Largest first: dropping one big claim beats dropping several small ones,
+	// and the small ones are the cheapest to satisfy on the next round.
+	var growths []allocate.PoolPlan
+	for _, pp := range changes {
+		if pp.Current > 0 && pp.MaxChildren > pp.Current {
+			growths = append(growths, pp)
+		}
+	}
+	sort.Slice(growths, func(i, j int) bool {
+		return int64(growths[i].MaxChildren-growths[i].Current)*growths[i].WorkerBytes >
+			int64(growths[j].MaxChildren-growths[j].Current)*growths[j].WorkerBytes
+	})
+
+	for _, g := range growths {
+		if committed <= limit {
+			break
+		}
+
+		delete(included, g.Name)
+		committed -= int64(g.MaxChildren-g.Current) * g.WorkerBytes
+
+		setOutcome(result, g.Name, ActionHeldBack, fmt.Sprintf(
+			"%d to %d needs memory another pool is holding, and that pool cannot be "+
+				"reloaded again yet", g.Current, g.MaxChildren))
+	}
+
+	kept := changes[:0]
+	for _, pp := range changes {
+		if included[pp.Name] {
+			kept = append(kept, pp)
 		}
 	}
 
-	return changes
+	return kept
+}
+
+// commitmentOf is what the host would be running with these changes applied and
+// everything else left where it is.
+func commitmentOf(plan allocate.Plan, changes []allocate.PoolPlan) int64 {
+	included := make(map[string]bool, len(changes))
+	for _, pp := range changes {
+		included[pp.Name] = true
+	}
+
+	var total int64
+	for _, pp := range plan.Pools {
+		n := pp.Current
+		if included[pp.Name] || n <= 0 {
+			n = pp.MaxChildren
+		}
+		total += int64(n) * pp.WorkerBytes
+	}
+
+	return total
+}
+
+func setOutcome(result *Result, pool string, action Action, reason string) {
+	for i := range result.Outcomes {
+		if result.Outcomes[i].Pool == pool {
+			result.Outcomes[i].Action = action
+			result.Outcomes[i].Reason = reason
+		}
+	}
+}
+
+// includesOurFragments checks that the master would actually read what is about
+// to be written.
+func includesOurFragments(master Master, changes []allocate.PoolPlan) error {
+	if master.IncludePattern == "" {
+		// The pattern could not be read, or the drop-in directory was set
+		// explicitly and does not correspond to one. Nothing to check against;
+		// refusing here would break a legitimate configuration.
+		return nil
+	}
+
+	for _, pp := range changes {
+		name := filepath.Base(DropInPath(master.DropInDir, pp.Name))
+
+		ok, err := filepath.Match(filepath.Base(master.IncludePattern), name)
+		if err != nil || !ok {
+			return fmt.Errorf("%w: %s would be written as %s, which %q does not match — "+
+				"the change would validate and reload and have no effect",
+				ErrNotIncluded, pp.Name, name, master.IncludePattern)
+		}
+	}
+
+	return nil
 }
 
 // backup is one drop-in's previous state.

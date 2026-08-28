@@ -23,6 +23,7 @@ import (
 	"github.com/cboxdk/fpm-tune/plan"
 	"github.com/cboxdk/fpm-tune/serve"
 	"github.com/cboxdk/fpm-tune/state"
+	"github.com/cboxdk/phpfpm"
 )
 
 // version is set at build time.
@@ -205,6 +206,19 @@ func runPlan(args []string) error {
 
 	log := newLogger(*c.verbose)
 
+	// `plan` writes nothing to php-fpm, but it does record what it learned — and
+	// the state file is read whole and written whole. Without the lock a plan
+	// started before a `serve --apply` round would save afterwards and erase the
+	// LastAppliedAt that the reload damping depends on, so the next round would
+	// reload a pool it had just reloaded.
+	if !*c.noLearn {
+		release, err := lock.Acquire(lock.DefaultPath(*c.statePath))
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	ctx, cancelTimeout := context.WithTimeout(ctx, *c.timeout)
@@ -254,16 +268,6 @@ func runApply(args []string) error {
 	ctx, cancelTimeout := context.WithTimeout(ctx, *c.timeout+30*time.Second)
 	defer cancelTimeout()
 
-	result, st, err := gather(ctx, c, log)
-	if err != nil {
-		return err
-	}
-
-	master, err := serve.MasterFrom(result, *dropInDir)
-	if err != nil {
-		return err
-	}
-
 	opts := apply.Options{
 		MinInterval: *minInterval,
 		MinChange:   *minChange,
@@ -271,10 +275,24 @@ func runApply(args []string) error {
 		DryRun:      *dryRun,
 	}
 
-	// Before anything else: a previous run may have died between writing the
-	// fragments and validating them, leaving configuration on disk that PHP-FPM
-	// would refuse and that nothing was ever going to clean up.
+	// Before ANY of the work, and deliberately before discovery: a previous run
+	// may have died between writing the fragments and validating them, leaving
+	// configuration php-fpm will not accept. Discovery parses the effective
+	// config to find pools, so from that point on nothing can be discovered —
+	// and the recovery path could not reach the master it exists to recover.
+	master, err := serve.MasterOnHost(*dropInDir, log)
+	if err != nil {
+		return err
+	}
 	if err := apply.Reconcile(ctx, master, opts, log); err != nil {
+		return err
+	}
+	// The parsed configuration is cached, so a repair the reconcile just made
+	// would otherwise be invisible to the scrape that follows.
+	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+
+	result, st, err := gather(ctx, c, log)
+	if err != nil {
 		return err
 	}
 

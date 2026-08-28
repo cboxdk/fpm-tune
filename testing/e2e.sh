@@ -96,9 +96,23 @@ echo "php-fpm master running as pid $PID_BEFORE"
 # the other, and a fingerprint that silently produces nothing would make the
 # "changed nothing" assertions pass against any change at all.
 if command -v md5sum >/dev/null; then
-  fingerprint() { md5sum "$POOLS"/*.conf | sort; }
+  # Passed to every invocation. A development machine, or any host serving several
+# sites, genuinely runs more than one php-fpm master — this one has Herd's two
+# alongside the test's — and naming the pool directory is how an operator says
+# which master they mean. Leaving it out would test only the single-master case
+# and call it the general one.
+SCOPE=(--drop-in-dir "$POOLS")
+
+fingerprint() { md5sum "$POOLS"/*.conf | sort; }
 else
-  fingerprint() { md5 -r "$POOLS"/*.conf | sort; }
+  # Passed to every invocation. A development machine, or any host serving several
+# sites, genuinely runs more than one php-fpm master — this one has Herd's two
+# alongside the test's — and naming the pool directory is how an operator says
+# which master they mean. Leaving it out would test only the single-master case
+# and call it the general one.
+SCOPE=(--drop-in-dir "$POOLS")
+
+fingerprint() { md5 -r "$POOLS"/*.conf | sort; }
 fi
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -106,14 +120,14 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 echo "--- a dry run must leave the pool directory byte-identical"
 BEFORE="$(fingerprint)"
-"$BIN" apply --dry-run --memory 512MB --reserve 128MB \
+"$BIN" apply --dry-run --memory 512MB --reserve 128MB "${SCOPE[@]}" \
   --state "$STATE/state.json" --backup-dir "$ROOT/backup" > "$ROOT/dry.out" 2>&1 || true
 [ "$(fingerprint)" = "$BEFORE" ] || fail "the dry run modified the pool directory"
 grep -q "Dry run" "$ROOT/dry.out" || fail "the dry run did not report itself"
 
 # ---------------------------------------------------------------------------
 echo "--- a real apply must reload the master without restarting it"
-"$BIN" apply --memory 512MB --reserve 128MB \
+"$BIN" apply --memory 512MB --reserve 128MB "${SCOPE[@]}" \
   --state "$STATE/state.json" --backup-dir "$ROOT/backup" > "$ROOT/apply.out" 2>&1 \
   || fail "apply failed:$(printf '\n')$(cat "$ROOT/apply.out")"
 cat "$ROOT/apply.out"
@@ -171,11 +185,11 @@ rm -f "$POOLS/zz-probe.conf"
 # ---------------------------------------------------------------------------
 echo "--- a second run must be refused while the first holds the lock"
 "$BIN" serve --state "$STATE/state.json" --interval 60s --metrics "" \
-  --backup-dir "$ROOT/backup" \
+  --backup-dir "$ROOT/backup" "${SCOPE[@]}" \
   > "$ROOT/serve.out" 2>&1 &
 SERVE=$!
 sleep 2
-if "$BIN" apply --memory 512MB --state "$STATE/state.json" \
+if "$BIN" apply --memory 512MB --state "$STATE/state.json" "${SCOPE[@]}" \
      --backup-dir "$ROOT/backup" > "$ROOT/second.out" 2>&1; then
   kill $SERVE 2>/dev/null || true
   fail "a second run took the lock while a daemon held it"
