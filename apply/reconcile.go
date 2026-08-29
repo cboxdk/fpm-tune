@@ -42,7 +42,15 @@ var ErrUnreconciled = errors.New("a previous run left a change this could not re
 // settle leaves the record in place for the next start, because the alternatives
 // are undoing a change that was adopted, or deleting the only way back from one
 // that was not.
-func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
+// Reconcile finishes or undoes what a previous run did not complete, and reports
+// whether it had to do anything.
+//
+// The bool is the interesting half for a caller keeping counters: an ordinary
+// start finds nothing and returns false, and a start that had to undo, complete
+// or remove something returns true. Counting the ERROR return instead got this
+// exactly backwards — successful repairs were invisible and a condition it could
+// not fix was counted once per round forever.
+func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logger) (bool, error) {
 	opts = opts.Defaults()
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -54,7 +62,7 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		// because a run died with a change in flight; sweeping on the strength
 		// of it being unreadable would delete the copy that is the only route
 		// back, exactly when the state is worst.
-		return fmt.Errorf("%w: %w", ErrUnreconciled, err)
+		return false, fmt.Errorf("%w: %w", ErrUnreconciled, err)
 	}
 	if !found {
 		// Nothing was in flight. Any saved copies still lying around belong to a
@@ -81,7 +89,7 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		log.Info("The change never reached disk; nothing to undo")
 		discard(txn, opts.BackupDir, log)
 
-		return nil
+		return true, nil
 	}
 
 	valid := phpfpm.Validate(ctx, master.Binary, master.ConfigPath)
@@ -89,11 +97,12 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		// Interrupted mid-check. Undoing on the strength of a validation that
 		// was cancelled rather than failed would revert a change that may
 		// already be running.
-		return fmt.Errorf("%w: interrupted before it could be resolved: %w", ErrUnreconciled, ctxErr)
+		return false, fmt.Errorf("%w: interrupted before it could be resolved: %w",
+			ErrUnreconciled, ctxErr)
 	}
 
 	if valid != nil {
-		return undoLeftover(ctx, txn, master, opts, valid, log)
+		return true, undoLeftover(ctx, txn, master, opts, valid, log)
 	}
 
 	// Valid, so the change is kept — but validation is not the commit point for
@@ -102,12 +111,12 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 	// otherwise, and nothing would ever correct it: the next round reads the
 	// file, concludes the pool is already where it wants it, and never reloads.
 	if err := finishReload(ctx, txn, master, opts, log); err != nil {
-		return err
+		return true, err
 	}
 
 	discard(txn, opts.BackupDir, log)
 
-	return nil
+	return true, nil
 }
 
 // repairIfOursIsBroken puts the master back on its feet when this tool's own
@@ -126,26 +135,26 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 // it demonstrably fixes the problem: if the configuration is broken for some
 // other reason, deleting this tool's work would achieve nothing except deleting
 // this tool's work.
-func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log *slog.Logger) error {
+func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log *slog.Logger) (bool, error) {
 	if master.Binary == "" || master.ConfigPath == "" {
-		return nil
+		return false, nil
 	}
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err == nil {
-		return nil
+		return false, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// Interrupted, not answered. Returning nil here marked the repair as
 		// done for the life of the process, so a `php-fpm -t` that timed out
 		// once under load left the host down until someone restarted the daemon.
-		return fmt.Errorf("%w: could not determine whether this tool's file is the "+
-			"problem: %w", ErrUnreconciled, ctxErr)
+		return false, fmt.Errorf("%w: could not determine whether this tool's file is "+
+			"the problem: %w", ErrUnreconciled, ctxErr)
 	}
 
 	path := DropInPath(master.DropInDir)
 	body, err := os.ReadFile(path)
 	if err != nil {
 		// Nothing of ours on disk, so the breakage is not ours to fix.
-		return nil
+		return false, nil
 	}
 
 	// Proved ours before it is deleted, not assumed from the name. A file called
@@ -156,19 +165,19 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 		log.Error("The configuration is rejected and a file with this tool's name is "+
 			"present, but it was not written by this tool; leaving it alone", "path", path)
 
-		return nil
+		return false, nil
 	}
 
 	if err := validateReplacement(ctx, master, path, nil); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("%w: could not determine whether removing this tool's "+
-				"file would help: %w", ErrUnreconciled, ctxErr)
+			return false, fmt.Errorf("%w: could not determine whether removing this "+
+				"tool's file would help: %w", ErrUnreconciled, ctxErr)
 		}
 
 		log.Error("The configuration is rejected, and it is not this tool's file that " +
 			"is doing it; leaving it alone")
 
-		return nil
+		return false, nil
 	}
 
 	log.Error("php-fpm will not accept its configuration, and removing this tool's "+
@@ -179,8 +188,8 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 		"once you are satisfied with what happened here.", "path", path)
 
 	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("%w: this tool's file is stopping php-fpm from starting and "+
-			"could not be removed: %w", ErrUnreconciled, err)
+		return false, fmt.Errorf("%w: this tool's file is stopping php-fpm from starting "+
+			"and could not be removed: %w", ErrUnreconciled, err)
 	}
 	_ = syncDir(filepath.Dir(path))
 
@@ -189,11 +198,11 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 		// both broken AND untuned is worse than broken alone.
 		_ = writeAtomic(path, body)
 
-		return fmt.Errorf("%w: removing this tool's file did not make the configuration "+
-			"valid: %w", ErrUnreconciled, err)
+		return true, fmt.Errorf("%w: removing this tool's file did not make the "+
+			"configuration valid: %w", ErrUnreconciled, err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // completedFrom fills in what the caller could not discover.

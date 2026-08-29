@@ -387,21 +387,24 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 			ErrCannotFit, len(pools), humanBytes(minimum), humanBytes(allocatable))
 	}
 
-	// Pools with a MEASURED cost give way first.
+	// Pools with a TRUSTED baseline give way first.
 	//
-	// An unmeasured pool's floor is its own current setting, held there so a
-	// first run can only ever help — and its cost is a profile estimate, not an
-	// observation. Scaling everything uniformly cut healthy pools on that guess:
-	// a first install on a tight host, with real workers cheaper than the 48MiB
-	// the profile assumes, queued traffic on sites that never needed touching.
-	// The pools whose cost is known are the only ones there is any evidence to
-	// act on.
+	// A pool without one sits at its own configured setting, and there is no
+	// evidence for taking workers away from it. Scaling everything uniformly cut
+	// healthy pools on a guess: a first install on a tight host, with real
+	// workers cheaper than the profile assumes, queued traffic on sites nobody
+	// had any reason to touch.
 	// Reducible, not Measured. A pool whose cost is known but whose baseline has
 	// not been watched through a real traffic pattern is protected exactly like
 	// one with no measurement at all: there is no more evidence for cutting it.
+	//
+	// Unknown pools are excluded here as well as by the caller. Nothing can be
+	// written for them, so taking their memory only ever hands it to a pool that
+	// CAN be written — and the untouched pool comes back at the size it always
+	// had.
 	var protectedNeed, reducibleNeed int64
 	for i, p := range pools {
-		if p.Reducible {
+		if p.Reducible && !p.Unknown {
 			reducibleNeed += int64(floors[i]) * p.WorkerBytes
 		} else {
 			protectedNeed += int64(floors[i]) * p.WorkerBytes
@@ -410,7 +413,7 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 
 	var reducibleMinimum int64
 	for _, p := range pools {
-		if p.Reducible {
+		if p.Reducible && !p.Unknown {
 			reducibleMinimum += p.WorkerBytes
 		}
 	}
@@ -425,7 +428,7 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 
 		scale := float64(allocatable-protectedNeed) / float64(reducibleNeed)
 		for i, p := range pools {
-			if !p.Reducible {
+			if !p.Reducible || p.Unknown {
 				granted[i] = floors[i]
 				used += int64(floors[i]) * p.WorkerBytes
 
@@ -448,20 +451,50 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 		//
 		// Only reducible pools are trimmed, because only they were reduced.
 		used = trimToFit(pools, granted, used, allocatable, func(i int) bool {
-			return pools[i].Reducible
+			return pools[i].Reducible && !pools[i].Unknown
 		})
 
 		return granted, allocatable - used, true, nil
 	}
 
+	// Even here, a pool that cannot be WRITTEN keeps its floor.
+	//
+	// This is the path taken when nothing is reducible at all, and protecting
+	// unwritable pools only in the branch above left the same fault reachable by
+	// a different route. Cutting a pool nothing can be written for frees memory
+	// on paper only: apply skips it, the bytes go to a pool that IS written, and
+	// the untouched pool comes back at the size it always had — leaving the host
+	// over its budget by exactly the fiction.
+	var unwritableNeed int64
+	for i, p := range pools {
+		if p.Unknown {
+			unwritableNeed += int64(floors[i]) * p.WorkerBytes
+		}
+	}
+
+	if unwritableNeed >= allocatable {
+		return nil, 0, false, fmt.Errorf(
+			"%w: %s is needed by pools whose configuration could not be read, which is "+
+				"already more than the %s available — nothing can be written for them, so "+
+				"no plan here would help",
+			ErrCannotFit, humanBytes(unwritableNeed), humanBytes(allocatable))
+	}
+
 	plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 		"the minimum viable configuration for %d pools needs %s but only %s is available: "+
-			"floors have been reduced and every pool is undersized, including pools whose "+
-			"worker cost is still an estimate",
+			"floors have been reduced and every pool is undersized, including pools with "+
+			"no trusted baseline to justify it",
 		len(pools), humanBytes(need), humanBytes(allocatable)))
 
-	scale := float64(allocatable) / float64(need)
+	scale := float64(allocatable-unwritableNeed) / float64(need-unwritableNeed)
 	for i, p := range pools {
+		if p.Unknown {
+			granted[i] = floors[i]
+			used += int64(floors[i]) * p.WorkerBytes
+
+			continue
+		}
+
 		n := int(float64(floors[i]) * scale)
 		if n < 1 {
 			n = 1
@@ -471,7 +504,9 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 	}
 
 	// Rounding up to one worker each can push the total back over the budget.
-	used = trimToFit(pools, granted, used, allocatable, nil)
+	used = trimToFit(pools, granted, used, allocatable, func(i int) bool {
+		return !pools[i].Unknown
+	})
 
 	return granted, allocatable - used, true, nil
 }

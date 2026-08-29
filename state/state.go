@@ -711,10 +711,13 @@ func didWork(ps *PoolState, obs Observation, opts Options) bool {
 		// old reading and hide the reset. Worked through, the start time changes
 		// no answer: after a reset obs.Accepted is at least as large as the
 		// difference, so wherever the difference clears the threshold the fresh
-		// count does too — and the one case where they differ is a pool with a
-		// large lifetime count but only a request or two since the last scrape,
-		// which is a SLOW pool, and slow pools are exactly what this must not let
-		// decay. Detecting the reset there would have made it worse.
+		// count does too. Where they differ is a fresh count above the threshold
+		// with a difference below it — a pool that has served a good deal since
+		// the master came up and very little since the last scrape, which is a
+		// SLOW pool, and slow pools are exactly what this must not let decay.
+		// Detecting the reset there would have made it worse. The cost of not
+		// detecting it is one skipped decay sample, because LastAccepted now
+		// advances on every scrape and the readings realign immediately.
 		return false
 	}
 

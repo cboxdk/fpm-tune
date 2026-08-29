@@ -278,7 +278,7 @@ func TestReconcileUndoesWhatACrashLeftBehind(t *testing.T) {
 
 	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 999})
 
-	err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	_, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
 	if !errors.Is(err, ErrUnreconciled) {
 		t.Fatalf("err = %v, want ErrUnreconciled: the restore is also rejected here, "+
 			"and that must be reported rather than assumed to have worked", err)
@@ -313,7 +313,7 @@ func TestReconcileRemovesAFragmentThatDidNotExistBefore(t *testing.T) {
 		t.Fatalf("setting up: the fragment was not created: %v", err)
 	}
 
-	_ = Reconcile(context.Background(), rejecting, Options{BackupDir: backupDir}, nil)
+	_, _ = Reconcile(context.Background(), rejecting, Options{BackupDir: backupDir}, nil)
 
 	if _, err := os.Stat(created); !os.IsNotExist(err) {
 		t.Error("a fragment created by a run that died was left behind; nothing else " +
@@ -348,7 +348,7 @@ func TestReconcileLeavesAFileSomeoneElseChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	_, _ = Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
 
 	got, err := os.ReadFile(live)
 	if err != nil {
@@ -384,7 +384,7 @@ func TestReconcileLeavesAValidConfigurationAlone(t *testing.T) {
 	}
 	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
 
-	if err := Reconcile(context.Background(), master,
+	if _, err := Reconcile(context.Background(), master,
 		Options{BackupDir: backupDir, SettleTime: 100 * time.Millisecond}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestReconcileIgnoresAnotherMastersTransaction(t *testing.T) {
 		Binary: rejectsOnly(t, ourConfig), ConfigPath: ourConfig, DropInDir: ours,
 	}
 
-	if err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
+	if _, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil); err != nil {
 		t.Fatalf("Reconcile acted on another master's transaction: %v", err)
 	}
 	if _, err := os.Stat(DropInPath(ours)); !os.IsNotExist(err) {
@@ -862,7 +862,7 @@ func TestReconcileFinishesAReloadTheDeadRunNeverReached(t *testing.T) {
 
 	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
 
-	if err := Reconcile(context.Background(), master,
+	if _, err := Reconcile(context.Background(), master,
 		Options{BackupDir: backupDir, SettleTime: 100 * time.Millisecond}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -931,7 +931,7 @@ func TestAChangeThatNeverReachedDiskIsANoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Reconcile(context.Background(), master,
+	if _, err := Reconcile(context.Background(), master,
 		Options{BackupDir: backupDir, SettleTime: 100 * time.Millisecond}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -1028,7 +1028,7 @@ func TestAMalformedTransactionDoesNotSweepItsOwnBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	_, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
 	if !errors.Is(err, ErrUnreconciled) {
 		t.Fatalf("err = %v, want ErrUnreconciled: an unusable record must stop the run, "+
 			"not be read as an all-clear", err)
@@ -1203,7 +1203,7 @@ func TestItGetsTheMasterBackUpWhenItsOwnFileIsTheProblem(t *testing.T) {
 
 	master := Master{Binary: rejectsOurFile(t), ConfigPath: configPath, DropInDir: dir}
 
-	if err := Reconcile(context.Background(), master,
+	if _, err := Reconcile(context.Background(), master,
 		Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -1232,7 +1232,7 @@ func TestItLeavesAlonePhpFpmBreakageThatIsNotItsDoing(t *testing.T) {
 		Binary: alwaysRejects(t), ConfigPath: configPath, DropInDir: dir,
 	}
 
-	if err := Reconcile(context.Background(), master,
+	if _, err := Reconcile(context.Background(), master,
 		Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -1315,7 +1315,7 @@ func TestItWillNotDeleteAFileItDidNotWrite(t *testing.T) {
 		Binary: rejectsOurFile(t), ConfigPath: configPath, DropInDir: dir,
 	}
 
-	if err := Reconcile(context.Background(), master,
+	if _, err := Reconcile(context.Background(), master,
 		Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}

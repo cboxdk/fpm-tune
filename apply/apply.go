@@ -181,6 +181,15 @@ type Result struct {
 	// pools means DryRun, or a master that is not running yet.
 	Reloaded bool
 
+	// Wrote reports that the file was replaced and the master told about it, for
+	// any reason.
+	//
+	// Distinct from Changed(), which lists pool RESIZES: a run that only removes
+	// the section of a site that no longer exists writes and reloads while
+	// resizing nothing, and a caller recording "when did anything last reach the
+	// host" needs to hear about it.
+	Wrote bool
+
 	// RolledBack reports that something went wrong and the previous
 	// configuration WAS restored. Only true when every file went back.
 	RolledBack bool
@@ -367,6 +376,7 @@ func Apply(
 
 	if master.PID <= 0 {
 		// Provisioning: the file is in place for whenever PHP-FPM starts.
+		result.Wrote = true
 		log.Info("Wrote pool configuration; no running master to reload", "pools", len(pools))
 		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 		commit(opts.BackupDir, master.DropInDir, b, log)

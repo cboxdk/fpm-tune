@@ -593,3 +593,61 @@ func TestAnUnreachablePoolKeepsItsMemory(t *testing.T) {
 			up.Bytes+down.Bytes, result.Plan.TotalBytes-result.Plan.ReserveBytes)
 	}
 }
+
+// TestAnUnreachablePoolIsNotReducibleEvenWhenTrusted.
+//
+// A pool that cannot be written must not have its memory taken either. It was
+// being trimmed below the floor reserved for it whenever its baseline happened
+// to be trusted — and apply then refuses to WRITE it, because setting a ceiling
+// requires knowing the one being replaced. So the memory went to a neighbour
+// that did get written, and the unreachable pool came back at the size it always
+// had. The host overcommitted, by a pool nobody touched.
+func TestAnUnreachablePoolIsNotReducibleEvenWhenTrusted(t *testing.T) {
+	st := state.New()
+	base := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 30; i++ {
+		st.Learn(busy("down", 100*mb, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+	}
+	if !st.Pools["down"].Trusted(state.Options{}.Defaults()) {
+		t.Fatal("setting up: the pool was meant to be trusted")
+	}
+
+	// Oversubscribed on purpose: the guard only matters when the floors do not
+	// fit and something has to give. With room to spare nothing is cut and the
+	// test would pass however the code behaved.
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 3 * gb, CPUs: 4, Source: budget.SourceMemInfo},
+		State:  st,
+		Views: []observe.PoolView{
+			{
+				Name: "down", ProcessManager: "dynamic",
+				CurrentMaxChildren: 20, MaxChildrenKnown: true,
+				Err: errors.New("connection refused"),
+			},
+			{
+				Name: "busy", ProcessManager: "dynamic",
+				CurrentMaxChildren: 30, MaxChildrenKnown: true,
+				ObservedPeak: 30, QueueDepth: 20, MaxChildrenReached: 500,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var down allocate.PoolPlan
+	for _, pp := range res.Plan.Pools {
+		if pp.Name == "down" {
+			down = pp
+		}
+	}
+
+	if !down.Unknown {
+		t.Fatal("an unreachable pool was not marked unwritable")
+	}
+	if down.MaxChildren < 20 {
+		t.Errorf("a trusted but unreachable pool was cut from 20 to %d; nothing can be "+
+			"written for it, so its memory goes to a neighbour that CAN be written and "+
+			"the pool comes back at 20 regardless", down.MaxChildren)
+	}
+}

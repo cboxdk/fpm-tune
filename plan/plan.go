@@ -196,6 +196,14 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 	if view.Err != nil || !view.MaxChildrenKnown {
 		pool.Unknown = true
 
+		// And not reducible, whatever its confidence says. A trusted pool that
+		// happens to be unreachable was still being trimmed below the floor
+		// reserved for it — and apply then refuses to WRITE it, because writing a
+		// ceiling requires knowing the old one. So its memory went to a
+		// neighbour that did get written, and the pool came back at the size it
+		// always had: the host overcommitted, by a pool nobody touched.
+		pool.Reducible = false
+
 		// Reserve for it conservatively so its memory is not handed to a
 		// neighbour, but never write it: proposing a new ceiling requires
 		// knowing the old one.

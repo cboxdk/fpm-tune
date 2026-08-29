@@ -208,6 +208,17 @@ func (l *Loop) round(ctx context.Context) {
 		l.reconcile(roundCtx)
 	}
 
+	// The parsed configuration is cached for the life of the process, which is
+	// right for a scrape loop and wrong for a daemon that runs for weeks: an
+	// operator raising a pool's pm.max_children from 40 to 80 would be invisible,
+	// and the round would keep accounting for 40 while growing a neighbour into
+	// the difference. Invalidated per round so every round sees what is on disk.
+	//
+	// One `php-fpm -tt` per master per interval. On a host with forty pools that
+	// is a few hundred milliseconds against a thirty-second round, and the
+	// alternative is being wrong about the one number everything is divided by.
+	l.forgetParsedConfig()
+
 	targets, err := observe.Discover(l.log)
 	if err != nil {
 		l.log.Warn("Discovery failed; will retry", "error", err)
@@ -306,7 +317,10 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	opts.BackupDir = l.cfg.BackupDir
 
 	applied, err := apply.Apply(ctx, result.Plan, master, l.state, opts, l.log)
-	l.metrics.RecordApply(float64(now.Unix()), len(applied.Changed()) > 0, applied.RolledBack, err)
+	// Wrote, not Changed(): a run that only removes the section of a site that no
+	// longer exists writes and reloads while resizing nothing, and it reached the
+	// host just as much as a resize did.
+	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote, applied.RolledBack, err)
 
 	if err != nil {
 		l.log.Error("Apply failed", "error", err, "rolled_back", applied.RolledBack)
@@ -367,8 +381,14 @@ func (l *Loop) reconcile(ctx context.Context) {
 		l.resource = release
 	}
 
-	if err := apply.Reconcile(ctx, master, opts, l.log); err != nil {
+	acted, err := apply.Reconcile(ctx, master, opts, l.log)
+	if acted {
+		// Counted when something was actually undone, completed or removed —
+		// not when the attempt failed, which is what this used to count and is
+		// the opposite of what the name says.
 		l.metrics.RecordRepair()
+	}
+	if err != nil {
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
 
@@ -460,6 +480,20 @@ func MasterPIDOf(views []observe.PoolView) int {
 	}
 
 	return 0
+}
+
+// forgetParsedConfig drops the cached effective configuration, so the next
+// discovery reads what is actually on disk.
+func (l *Loop) forgetParsedConfig() {
+	if m := l.state.Master; m.Known() {
+		phpfpm.InvalidateConfigCache(m.Binary, m.ConfigPath)
+
+		return
+	}
+
+	// Nothing remembered yet — an early round, or a host this process has not
+	// written to. Clearing the lot costs a re-parse it was about to do anyway.
+	phpfpm.InvalidateConfigCache("", "")
 }
 
 // MasterOnHost identifies the PHP-FPM instance to reconfigure, WITHOUT reading

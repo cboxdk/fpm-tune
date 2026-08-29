@@ -332,7 +332,7 @@ func runApply(args []string) error {
 	}
 	defer releaseResource()
 
-	if err := apply.Reconcile(ctx, master, opts, log); err != nil {
+	if _, err := apply.Reconcile(ctx, master, opts, log); err != nil {
 		return err
 	}
 	// The parsed configuration is cached, so a repair the reconcile just made
