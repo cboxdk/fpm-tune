@@ -229,13 +229,35 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 		// Reserve for it conservatively so its memory is not handed to a
 		// neighbour, but never write it: proposing a new ceiling requires
 		// knowing the old one.
+		//
+		// What state REMEMBERS counts here, and it used not to. This branch
+		// returns before the remembered peak is consulted, so a pool that is
+		// unreachable AND whose ceiling could not be read fell back to the
+		// default floor of two — while state was holding a peak of thirty
+		// workers at 200MiB each. Six gigabytes of live memory reserved as four
+		// hundred megabytes, handed to the neighbours, who are writable and are
+		// therefore actually grown into it. Discovery reaches that state easily:
+		// an unparsed pm.max_children yields zero, which is indistinguishable
+		// here from a pool that allows no workers.
 		reserve := pool.CurrentMaxChildren
 		if pool.ObservedPeak > reserve {
 			reserve = pool.ObservedPeak
 		}
+		if ps != nil && ps.PeakWorkers > reserve {
+			reserve = ps.PeakWorkers
+		}
 		if reserve > 0 {
 			pool.Floor = reserve
-			pool.ObservedPeak = reserve
+
+			// Its want is its floor, and no more.
+			//
+			// Setting ObservedPeak here put the pool through the demand pass,
+			// where the headroom factor asked for 25% MORE than the ceiling it
+			// cannot exceed — memory reserved for workers that cannot exist,
+			// taken from pools that can. A pool nothing can be written for is
+			// not a candidate for growth; it is a thing to make room for.
+			pool.ObservedPeak = 0
+			pool.Ceiling = reserve
 		}
 
 		return pool, !pool.Measured

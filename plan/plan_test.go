@@ -755,3 +755,72 @@ func TestAMeasuredCheapPoolIsStillBelieved(t *testing.T) {
 			"which is the whole thing this tool is for", got/mb)
 	}
 }
+
+// TestAnUnreachablePoolIsReservedWhatIsRememberedOfIt.
+//
+// The Unknown branch returns before the remembered peak is consulted, so a pool
+// that is both unreachable AND whose ceiling could not be read fell through to
+// the default floor of two workers — while state held a peak of thirty workers
+// at 200MiB each. Six gigabytes of live memory accounted for as four hundred
+// megabytes, and the difference handed to neighbours that ARE writable and are
+// therefore actually grown into it.
+//
+// It is easy to reach. Discovery parses pm.max_children and discards the parse
+// error, so an unreadable value yields zero, which is indistinguishable here
+// from a pool configured to allow no workers.
+func TestAnUnreachablePoolIsReservedWhatIsRememberedOfIt(t *testing.T) {
+	st := state.New()
+	base := time.Now().Add(-time.Hour)
+
+	var accepted int64
+	for i := 0; i < 30; i++ {
+		accepted += 6000
+		st.Learn(state.Observation{
+			Pool: "big", At: base.Add(time.Duration(i) * 2 * time.Minute),
+			ActiveNow: 30, Accepted: accepted,
+			Workers: []state.WorkerSample{
+				{RSSBytes: 200 * mb, Requests: 500}, {RSSBytes: 200 * mb, Requests: 500},
+			},
+		}, state.Options{})
+	}
+	// The concurrency high-water mark, remembered because php-fpm resets its own
+	// on reload and this tool reloads.
+	st.Pools["big"].ObservePeak(30, time.Now(), state.Options{}.Defaults())
+
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 12 * gb, CPUs: 16, Source: budget.SourceMemInfo},
+		State:  st,
+		Views: []observe.PoolView{
+			// Unreachable, and discovery could not read its ceiling either.
+			{Name: "big", Err: errors.New("connection refused")},
+			{Name: "neighbour", ProcessManager: "dynamic",
+				CurrentMaxChildren: 20, MaxChildrenKnown: true, ObservedPeak: 18,
+				Workers: []state.WorkerSample{{RSSBytes: 100 * mb, Requests: 400}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pp := range res.Plan.Pools {
+		if pp.Name != "big" {
+			continue
+		}
+		if pp.MaxChildren < 30 {
+			t.Errorf("an unreachable pool remembered at 30 busy workers is reserved %d; "+
+				"the rest of its memory has just been offered to its neighbours",
+				pp.MaxChildren)
+		}
+		// And not MORE than it can use: it will never be written, so a headroom
+		// factor on top of its ceiling reserves memory for workers that cannot
+		// exist.
+		if pp.MaxChildren > 30 {
+			t.Errorf("an unreachable pool was grown to %d workers past the 30 it is known "+
+				"to have reached; nothing will be written for it, so that memory is taken "+
+				"from pools that can use it", pp.MaxChildren)
+		}
+
+		return
+	}
+	t.Fatal("the unreachable pool is missing from the plan")
+}

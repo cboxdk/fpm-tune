@@ -758,11 +758,24 @@ func TestASustainedReductionIsBelievedWithinTheHour(t *testing.T) {
 			}}, opts)
 	}
 
+	// An hour is two half-lives, so a quarter of the original distance is left:
+	// 90 + (240-90)/4 = 127.5MiB. That is the model working, not the model
+	// lagging.
+	//
+	// This used to assert 120MiB, which the model alone does not reach — it was
+	// met by the ten-minute jump between the two loops above being taken as ten
+	// minutes of decay in one step. It is not: nothing was watched across it, and
+	// a hole no longer buys a larger step than an ordinary scrape. The threshold
+	// was calibrated against that.
 	got := st.Pools["shop"].SizingBytes()
-	if got > 120<<20 {
+	if got > 130<<20 {
 		t.Errorf("after an hour of measuring 90MiB the estimate is still %dMiB; the pool "+
 			"is reserving %.1fx what it needs, and on a committed host that is taken "+
 			"from its neighbours", got>>20, float64(got)/float64(90<<20))
+	}
+	if got < 120<<20 {
+		t.Errorf("the estimate fell to %dMiB in an hour, past the 127MiB two half-lives "+
+			"allow: something is decaying faster than the documented rate", got>>20)
 	}
 }
 

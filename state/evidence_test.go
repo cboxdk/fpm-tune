@@ -220,3 +220,147 @@ func busyAt(pool string, at time.Time, accepted int64) Observation {
 func humanMiB(b int64) string {
 	return fmt.Sprintf("%dMiB", b/mb)
 }
+
+// TestAGapDoesNotBuyABiggerStepThanAScrape.
+//
+// The scenario is a package upgrade. fpm-tune is restarted while php-fpm keeps
+// running and keeps serving, so the state file persists, the request counter
+// climbs across the gap, and the first scrape back lands six hours later on
+// workers that have gone quiet.
+//
+// Six hours against a thirty-minute half-life is the largest step the clamp
+// permits — measured, a pool established at 300MiB a worker fell to 180MiB on
+// ONE reading, and every gap from thirty minutes to twelve hours produced that
+// identical maximum step. serve plans immediately on start, so it is the first
+// plan after every restart: +68% workers, past the growth gate, written and
+// reloaded, and at the pool's real cost that configuration needs 13.5GiB on a
+// 9GiB budget.
+//
+// Elapsed time is only evidence of decay if it was WATCHED, and the gap is
+// exactly the time that was not.
+func TestAGapDoesNotBuyABiggerStepThanAScrape(t *testing.T) {
+	opts := Options{}.Defaults()
+	base := time.Date(2026, 3, 1, 20, 0, 0, 0, time.UTC)
+
+	run := func(gap time.Duration) int64 {
+		s := New()
+		var accepted int64
+
+		// Two hours at 6 requests a second, thirty-second scrapes, workers at
+		// 300MiB. Real traffic throughout: the rate gate is not what is being
+		// tested here.
+		at := base
+		for i := 0; i < 240; i++ {
+			accepted += 180
+			s.Learn(Observation{Pool: "shop", At: at, ActiveNow: 6, Accepted: accepted,
+				Workers: []WorkerSample{
+					{RSSBytes: 300 * mb, Requests: 500}, {RSSBytes: 300 * mb, Requests: 500},
+				}}, opts)
+			at = at.Add(30 * time.Second)
+		}
+
+		// The gap. php-fpm kept serving at the same rate throughout.
+		at = at.Add(gap)
+		accepted += int64(gap.Seconds() * 6)
+
+		s.Learn(Observation{Pool: "shop", At: at, ActiveNow: 2, Accepted: accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 60 * mb, Requests: 500}, {RSSBytes: 58 * mb, Requests: 500},
+			}}, opts)
+
+		return s.Pools["shop"].SizingBytes()
+	}
+
+	// A normal scrape is the reference: whatever one reading is allowed to do,
+	// a hole may not do more.
+	reference := run(30 * time.Second)
+
+	for _, gap := range []time.Duration{
+		30 * time.Minute, 2 * time.Hour, 6 * time.Hour, 11*time.Hour + 59*time.Minute,
+	} {
+		if got := run(gap); got < reference {
+			t.Errorf("a %s hole took the estimate to %dMiB, against %dMiB for a single "+
+				"ordinary scrape: the time nobody was watching was counted as evidence "+
+				"that the pool got cheaper", gap, got/mb, reference/mb)
+		}
+	}
+}
+
+// TestAPoolThatOnlyEverRunsOneWorkerIsStillMeasured.
+//
+// An ondemand pool serving 0.4 requests a second at 150ms a request runs one
+// worker, always. The maturity gate wanted two, so — measured over seven days
+// and 20,160 scrapes — such a pool was never learned from once. SizingBytes
+// stayed at zero and the plan sized it from a 48MiB profile guess against a
+// 90MiB truth, permanently.
+//
+// On a host with two of them the plan reported 384MiB of headroom while being
+// 1056MiB over its budget: half the OS reserve, and the pools that COULD be
+// measured had been grown into the difference.
+func TestAPoolThatOnlyEverRunsOneWorkerIsStillMeasured(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	base := time.Now().Add(-4 * time.Hour)
+
+	var accepted int64
+	for i := 0; i < 200; i++ {
+		// Busy enough to clear the decay gate, and still one worker: 3 requests
+		// a second answered in 20ms is a concurrency of 0.06. That combination
+		// isolates the rule — the pool IS working, so nothing but the maturity
+		// count can be what stops it being trusted.
+		accepted += 90 // 3 req/s across a 30s scrape
+		s.Learn(Observation{Pool: "ondemand", At: base.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 1, Accepted: accepted,
+			Workers: []WorkerSample{{RSSBytes: 90 * mb, Requests: 400}},
+		}, opts)
+	}
+
+	ps := s.Pools["ondemand"]
+	if ps == nil || ps.SizingBytes() < 85*mb {
+		t.Fatalf("a pool that has run one 90MiB worker for four hours is sized at %v; the "+
+			"host is budgeted against a profile guess", ps)
+	}
+
+	// And it must NOT have earned permission to be cut. One worker is a
+	// measurement, not a traffic pattern — and a trusted ondemand pool has its
+	// floor dropped from its configured ceiling to two.
+	if ps.Trusted(opts) {
+		t.Errorf("confidence %.2f from a pool that has never run two workers at once: "+
+			"reserving what it costs is not the same as earning permission to cut it",
+			ps.Confidence(opts))
+	}
+}
+
+// TestAPoolThatHasRunTwoWorkersStillNeedsTwo: the relaxation applies only while
+// a pool has never had two mature workers. A busy pool caught mid-recycle with
+// one mature worker must not be measured off that anecdote.
+func TestAPoolThatHasRunTwoWorkersStillNeedsTwo(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	base := time.Now().Add(-time.Hour)
+
+	var accepted int64
+	for i := 0; i < 30; i++ {
+		accepted += 3000
+		s.Learn(Observation{Pool: "busy", At: base.Add(time.Duration(i) * time.Minute),
+			ActiveNow: 8, Accepted: accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 200 * mb, Requests: 400}, {RSSBytes: 200 * mb, Requests: 400},
+			}}, opts)
+	}
+	s.Pools["busy"].ObservePeak(8, base.Add(30*time.Minute), opts)
+
+	before := s.Pools["busy"].SizingBytes()
+
+	// One mature worker left, and it is small.
+	accepted += 3000
+	s.Learn(Observation{Pool: "busy", At: base.Add(31 * time.Minute),
+		ActiveNow: 1, Accepted: accepted,
+		Workers: []WorkerSample{{RSSBytes: 30 * mb, Requests: 400}},
+	}, opts)
+
+	if got := s.Pools["busy"].SizingBytes(); got < before {
+		t.Errorf("a pool known to run eight workers was re-measured from the single one "+
+			"left mid-recycle: %dMiB to %dMiB", before/mb, got/mb)
+	}
+}

@@ -127,6 +127,23 @@ type PoolState struct {
 	// work.
 	LastAccepted int64 `json:"last_accepted,omitempty"`
 
+	// TypicalIntervalSeconds is how often this pool is actually looked at,
+	// smoothed. It exists to bound what a HOLE in the observations is allowed to
+	// do.
+	//
+	// The downward weight comes from elapsed time, which is right while the
+	// looking is regular and wrong the moment it stops. A daemon restarted for a
+	// package upgrade while php-fpm keeps serving comes back to a six-hour gap,
+	// and six hours against a thirty-minute half-life is the maximum step the
+	// clamp allows: 300MiB a worker to 180MiB on ONE reading of workers that
+	// had merely gone quiet. serve plans immediately on start, so that is the
+	// first plan after every restart — measured at +68% workers, which clears
+	// the growth gate and is written.
+	//
+	// Elapsed time is only evidence of decay if it was WATCHED. This is how much
+	// of it was.
+	TypicalIntervalSeconds float64 `json:"typical_interval_seconds,omitempty"`
+
 	// PeakWorkers is the most workers this pool has had busy at once, as
 	// remembered by us rather than by PHP-FPM.
 	//
@@ -452,8 +469,34 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// workers accumulated the whole night into one comparison. That is the
 	// running total this deliberately is not: it would let a quiet stretch buy
 	// itself permission to pull the estimate down.
-	worked := didWork(ps, obs, opts, since)
+	// A threshold, and it stays a threshold. The ratio is kept because the
+	// reasoning below needs the number.
+	//
+	// A ramp was tried — decay at a speed proportional to the traffic — because
+	// the threshold is a cliff, and a measured one: 0.9 requests a second holds
+	// a pool at 300MiB a worker for a week while 1.0 takes it to 90MiB in six
+	// hours. A 10% difference in traffic, a 3.3x difference in reserved memory.
+	//
+	// The ramp does not work, and the reason is arithmetic rather than taste.
+	// Decaying at a fifth of the speed still arrives: replayed, a pool at 0.2
+	// requests a second — cron, uptime checks, crawlers — fell from 400MiB a
+	// worker to 97MiB across one night, which is the whole failure the gate
+	// exists to prevent, reached more slowly. Any speed above zero gets there
+	// given a night, and nights are long.
+	//
+	// So the cliff is kept, on the side that costs capacity rather than the host.
+	// A pool at 0.9 requests a second with 150ms requests has a concurrency of
+	// 0.14: its workers are idle almost all the time, and their memory is idle
+	// memory whatever the clock says. Every threshold has a cliff; this one is
+	// placed where the wrong answer wastes memory instead of losing it.
+	effort := workRatio(ps, obs, opts, since)
+	worked := effort >= 1
 	ps.LastAccepted = obs.Accepted
+
+	// Learned before it is used, so the cadence tracks a changing interval and a
+	// first observation contributes nothing.
+	effective := cappedSince(ps, since, opts)
+	ps.observeInterval(since, opts)
 
 	ps.Samples++
 	ps.LastUpdated = at
@@ -483,7 +526,26 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		}
 	}
 
-	if mature < opts.MinMatureWorkers || peak <= 0 {
+	if peak <= 0 {
+		return false
+	}
+
+	// Two mature workers, unless the pool has never HAD two.
+	//
+	// An ondemand pool serving 0.4 requests a second at 150ms a request runs one
+	// worker, always. Measured over seven days and 20,160 scrapes, such a pool
+	// was never learned from once: the plan sized it from a 48MiB profile guess
+	// against a 90MiB truth, for ever. On a host with two of them, the plan
+	// believed it had 384MiB of headroom while being 1056MiB over its budget —
+	// half the OS reserve, and the measured pools had been grown into it.
+	//
+	// The relaxation is to the READING only. BusySamples stays where it is
+	// (below), so confidence stays at zero, the pool is never Reducible, and its
+	// floor stays at what it is configured for. Reserving what it costs is not
+	// the same as earning permission to cut it, and letting one worker do the
+	// second job would size an ondemand pool at two.
+	sole := mature == 1 && ps.PeakWorkers <= 1
+	if mature < opts.MinMatureWorkers && !sole {
 		return false
 	}
 
@@ -497,7 +559,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// the strength of sixty-one readings of nothing. The memory readings below
 	// are recorded either way; it is the confidence accounting that needs the
 	// traffic, and `worked` is the signal the decay branch already trusts for it.
-	if worked {
+	if worked && mature >= opts.MinMatureWorkers {
 		ps.BusySamples++
 		if ps.FirstBusyAt.IsZero() {
 			ps.FirstBusyAt = at
@@ -521,7 +583,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if ps.TypicalPeakBytes == 0 {
 		ps.TypicalPeakBytes = peak
 	} else {
-		alpha := decayAlpha(since, opts.HalfLifeDown)
+		alpha := decayAlpha(effective, opts.HalfLifeDown)
 		switch {
 		case peak > ps.TypicalPeakBytes:
 			alpha = opts.AlphaUp
@@ -579,6 +641,63 @@ func (ps *PoolState) ObservePeak(current int, at time.Time, opts Options) int {
 //
 // A gap longer than the half-life is clamped: a daemon that was stopped for a
 // week should not treat its first observation on return as the whole truth.
+// observeInterval keeps a smoothed record of how often this pool is looked at.
+//
+// Only intervals that look like observation rather than absence, so a hole does
+// not teach the cadence that holes are normal.
+func (ps *PoolState) observeInterval(since time.Duration, opts Options) {
+	if since <= 0 || since > opts.MaxDecayGap {
+		return
+	}
+	if ps.TypicalIntervalSeconds <= 0 {
+		ps.TypicalIntervalSeconds = since.Seconds()
+
+		return
+	}
+	if since.Seconds() > gapMultiple*ps.TypicalIntervalSeconds {
+		// A gap, not a change of cadence. Learning from it would let a long
+		// enough absence normalise itself and unlock the step it should have
+		// been refused.
+		return
+	}
+
+	const alpha = 0.25
+	ps.TypicalIntervalSeconds = (1-alpha)*ps.TypicalIntervalSeconds + alpha*since.Seconds()
+}
+
+// gapMultiple is how far an interval may stray from the learned cadence and
+// still be taken as a change of cadence rather than a hole. A daemon whose
+// interval is reconfigured settles onto the new one within a few rounds; an
+// absence never teaches it that absences are normal.
+const gapMultiple = 3
+
+// cappedSince bounds the elapsed time that reaches the decay, so a hole can
+// never produce a larger step than a normal scrape.
+//
+// A one-shot run from cron has a cadence of an hour, and an hour of decay is
+// exactly right for it; a daemon on a fifteen-second loop that has been away for
+// six hours gets fifteen seconds' worth. The difference between them is what
+// this tool was doing during the time, which is the only thing that makes
+// elapsed time evidence.
+func cappedSince(ps *PoolState, since time.Duration, opts Options) time.Duration {
+	_ = opts
+	if ps.TypicalIntervalSeconds <= 0 {
+		return since
+	}
+
+	// The cadence itself, not a multiple of it. Whatever one ordinary scrape is
+	// allowed to move the estimate, a hole may not move it more — that is the
+	// whole claim, and a multiple would leave a long absence worth several
+	// scrapes it did not perform. Under a slightly irregular cadence this
+	// under-decays by a few percent, which is the safe direction.
+	limit := time.Duration(ps.TypicalIntervalSeconds * float64(time.Second))
+	if since > limit {
+		return limit
+	}
+
+	return since
+}
+
 func decayAlpha(since, halfLife time.Duration) float64 {
 	if since <= 0 || halfLife <= 0 {
 		return 0
@@ -741,20 +860,20 @@ func (s *State) Names() []string {
 // every reload — including the ones this tool performs. Unknown, not negative:
 // the reading is neither believed nor used to block, so the pool keeps whatever
 // estimate it had until the next scrape can compare properly.
-func didWork(ps *PoolState, obs Observation, opts Options, since time.Duration) bool {
+func workRatio(ps *PoolState, obs Observation, opts Options, since time.Duration) float64 {
 	if obs.Accepted <= 0 || ps.LastAccepted <= 0 {
 		// No counter to compare against. Refused rather than guessed: the
 		// instantaneous busy count measures request duration as much as load, and
 		// a pool answering quickly reads idle whatever it is carrying. Declining
 		// to decay leaves the estimate where it is, which costs headroom on one
 		// pool — the alternative costs the host.
-		return false
+		return 0
 	}
 
 	if since > opts.MaxDecayGap {
 		// Nothing was watched across the hole, and the average rate over it says
 		// nothing about whether the pool was working when this reading was taken.
-		return false
+		return 0
 	}
 
 	served := obs.Accepted - ps.LastAccepted
@@ -774,14 +893,22 @@ func didWork(ps *PoolState, obs Observation, opts Options, since time.Duration) 
 		// Detecting the reset there would have made it worse. The cost of not
 		// detecting it is one skipped decay sample, because LastAccepted now
 		// advances on every scrape and the readings realign immediately.
-		return false
+		return 0
 	}
 
 	if since <= 0 {
 		// The first observation of a pool, or a clock that stepped backwards.
 		// Neither is a measured interval, so there is no rate to compare.
-		return false
+		return 0
 	}
 
-	return float64(served)/since.Seconds() >= opts.MinRequestsPerSecondToDecay
+	// Clamped at 1: working harder than the threshold does not decay FASTER
+	// than the half-life says. The threshold is where a pool counts as fully
+	// exercised, not a scale.
+	ratio := (float64(served) / since.Seconds()) / opts.MinRequestsPerSecondToDecay
+	if ratio > 1 {
+		ratio = 1
+	}
+
+	return ratio
 }
