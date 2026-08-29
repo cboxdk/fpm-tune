@@ -1,7 +1,7 @@
 .PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
 
 help:
-	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-z0-9-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 test: ## Run tests with race detection and coverage
 	go test -race -coverprofile=coverage.out ./...
@@ -51,5 +51,20 @@ tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
 	fi; \
 	echo "✅ go.mod tidy"
 
-check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs
+build: ## Build the binary into build/
+	go build -o build/fpm-tune ./cmd/fpm-tune
+
+e2e: build ## End-to-end against a real php-fpm (needs php-fpm installed)
+	testing/e2e.sh "$$PWD/build/fpm-tune"
+
+chaos: build ## The perturbations a real host experiences (needs php-fpm installed)
+	testing/chaos.sh "$$PWD/build/fpm-tune"
+
+integration: e2e chaos ## Both suites against a real php-fpm
+
+# Deliberately NOT called "everything CI runs", which it said until this comment
+# was written and was not true: CI also drives e2e.sh and chaos.sh against a real
+# php-fpm, and those are where the faults that matter have been found. A gate
+# whose name overstates it sends people to CI to be surprised.
+check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs EXCEPT the real-php-fpm suites (see integration)
 	@echo "✅ All checks passed"

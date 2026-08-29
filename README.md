@@ -157,6 +157,11 @@ Beyond the unit tests, CI runs two suites against a real php-fpm:
 The chaos suite exists because a soak on a VM found a fault that every unit test,
 every container test and five rounds of review had walked past.
 
+```bash
+make check         # what CI's unit jobs run: fmt, tidy, vet, lint, race, vulncheck
+make integration   # both suites against a real php-fpm on this machine
+```
+
 ## Related
 
 - [phpfpm](https://github.com/cboxdk/phpfpm) — the shared library underneath
