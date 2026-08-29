@@ -173,12 +173,23 @@ func cgroupLimitOf(pid int) (int64, bool, error) {
 			continue
 		}
 
-		var base, file string
+		var base string
+		var files []string
 		switch {
 		case fields[0] == "0" && fields[1] == "":
-			base, file = cgroupRoot, "memory.max"
+			// memory.high as well as memory.max.
+			//
+			// systemd's MemoryHigh= is the documented way to say "keep this
+			// service under N", and above it the cgroup is throttled into
+			// aggressive reclaim rather than killed. That is not an OOM, and it
+			// is not room either: a pool sized twelve times past it thrashes
+			// instead of serving, which from outside looks like a host that has
+			// simply become slow. Reading only memory.max reported the machine.
+			base, files = cgroupRoot, []string{"memory.max", "memory.high"}
 		case strings.Contains(fields[1], "memory"):
-			base, file = cgroupRoot+"/memory", "memory.limit_in_bytes"
+			// v1's soft limit is advisory under pressure rather than a ceiling,
+			// so only the hard one counts there.
+			base, files = cgroupRoot+"/memory", []string{"memory.limit_in_bytes"}
 		default:
 			continue
 		}
@@ -186,9 +197,11 @@ func cgroupLimitOf(pid int) (int64, bool, error) {
 		// Every ancestor, not just the leaf: a cap on a parent slice binds
 		// everything under it, and the effective limit is the smallest.
 		for path := fields[2]; ; path = filepath.Dir(path) {
-			if v, ok := plausible(readTrimmed(filepath.Join(base, path, file))); ok {
-				if best == 0 || v < best {
-					best = v
+			for _, file := range files {
+				if v, ok := plausible(readTrimmed(filepath.Join(base, path, file))); ok {
+					if best == 0 || v < best {
+						best = v
+					}
 				}
 			}
 			if path == "/" || path == "." {

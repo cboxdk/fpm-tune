@@ -111,3 +111,54 @@ func TestDiscoveryHonoursTheCallersDeadline(t *testing.T) {
 			"happened", err)
 	}
 }
+
+// TestTheViewIsAboutThePoolItIsLabelledWith.
+//
+// The mapping used to take whatever entry the range reached first and break.
+// There is one pool per scrape today, so the map has one entry and the two are
+// the same thing — but that rests on an invariant of another module, and map
+// iteration order is random. Driven with three pools, the view labelled `alpha`
+// carried another pool's peak 31% of the time: one site's workers measured
+// under another site's name, silently and differently on each run.
+func TestTheViewIsAboutThePoolItIsLabelledWith(t *testing.T) {
+	outcome := phpfpm.PoolOutcome{
+		Name: "alpha",
+		Result: &phpfpm.Result{Pools: map[string]phpfpm.Pool{
+			"alpha": {Name: "alpha", MaxActiveProcesses: 11},
+			"beta":  {Name: "beta", MaxActiveProcesses: 22},
+			"gamma": {Name: "gamma", MaxActiveProcesses: 33},
+		}},
+	}
+
+	// Repeated, because the failure is a coin toss and one run proves nothing.
+	for i := 0; i < 50; i++ {
+		view := viewFromOutcome(outcome, phpfpm.Target{Name: "alpha"})
+		if view.ObservedPeak != 11 {
+			t.Fatalf("the view for alpha carried a peak of %d, which belongs to another "+
+				"pool; its workers are about to be measured as alpha's", view.ObservedPeak)
+		}
+	}
+}
+
+// TestAPoolWithNoResultStillCarriesItsCeiling.
+//
+// Sample's own failure branch carries the configured ceiling forward and this
+// one did not, so a pool that came back with no result at all was accounted for
+// as having no known ceiling — and a pool with no known ceiling is reserved at
+// the default floor while it actually runs forty workers. The difference goes
+// to a neighbour, and the neighbour is written.
+func TestAPoolWithNoResultStillCarriesItsCeiling(t *testing.T) {
+	view := viewFromOutcome(
+		phpfpm.PoolOutcome{Name: "www"},
+		phpfpm.Target{Name: "www", MaxChildren: 40, ProcessManager: "dynamic"},
+	)
+
+	if view.Err == nil {
+		t.Error("a pool with no result was not marked as failed")
+	}
+	if view.CurrentMaxChildren != 40 || !view.MaxChildrenKnown {
+		t.Errorf("CurrentMaxChildren = %d (known=%v), want the configured 40: without it "+
+			"nothing is reserved for a pool that is merely restarting",
+			view.CurrentMaxChildren, view.MaxChildrenKnown)
+	}
+}

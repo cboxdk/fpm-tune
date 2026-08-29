@@ -169,17 +169,52 @@ func Sample(ctx context.Context, targets []phpfpm.Target, log *slog.Logger) []Po
 func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView {
 	view := PoolView{Name: outcome.Name, Target: target}
 
+	// What discovery already knew, carried before anything can return early.
+	//
+	// Sample's own failure branch does this and this one did not, so a pool that
+	// came back with no result at all was accounted for as having no configured
+	// ceiling — and a pool with no known ceiling has its memory reserved at the
+	// default floor while it actually runs forty workers. It is the file's own
+	// doctrine, applied to one of two failure paths.
+	if target.MaxChildren > 0 {
+		view.CurrentMaxChildren, view.MaxChildrenKnown = target.MaxChildren, true
+	}
+	if target.ProcessManager != "" {
+		view.ProcessManager = target.ProcessManager
+	}
+
 	if outcome.Result == nil {
 		view.Err = fmt.Errorf("pool %s returned no result", outcome.Name)
 
 		return view
 	}
 
-	for name, pool := range outcome.Result.Pools {
-		if view.Name == "" {
-			view.Name = name
-		}
+	// The pool this outcome is ABOUT, by name.
+	//
+	// It used to take whatever the range reached first and break. There is one
+	// pool per scrape today, so the map has one entry and the two are the same
+	// thing — but "the same thing" rests on an invariant of another module, and
+	// map iteration order is random, so the day that stops holding this reads
+	// one pool's workers under another pool's name and nothing anywhere says so.
+	// Driven with three pools, the view labelled `alpha` carried the wrong
+	// peak 31% of the time.
+	pool, ok := outcome.Result.Pools[outcome.Name]
+	if !ok {
+		// Fall back to the single entry when the names disagree, because
+		// php-fpm's own name is the more authoritative of the two and the
+		// outcome may be labelled from discovery.
+		if len(outcome.Result.Pools) != 1 {
+			view.Err = fmt.Errorf("the scrape reported %d pools and none of them is %q",
+				len(outcome.Result.Pools), outcome.Name)
 
+			return view
+		}
+		for name, only := range outcome.Result.Pools {
+			view.Name, pool = name, only
+		}
+	}
+
+	{
 		view.ProcessManager = pool.ProcessManager
 		view.ObservedPeak = int(pool.MaxActiveProcesses)
 		view.ActiveNow = int(pool.ActiveProcesses)
@@ -205,8 +240,6 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 			})
 		}
 
-		// One pool per scrape; the map shape comes from the status endpoint.
-		break
 	}
 
 	return view

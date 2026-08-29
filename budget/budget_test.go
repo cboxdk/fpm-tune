@@ -528,3 +528,96 @@ func TestAProcessWithNoLimitAnywhereIsNotAnError(t *testing.T) {
 			got.LookupErr)
 	}
 }
+
+// TestASoftCeilingCountsToo.
+//
+// systemd's MemoryHigh= is the documented way to say "keep this service under
+// N". Above it the cgroup is throttled into aggressive reclaim rather than
+// killed — so it is not an OOM line, and it is not room either: a pool sized
+// twelve times past it thrashes instead of serving, which from outside looks
+// like a host that has simply gone slow.
+//
+// Reading only memory.max reported the whole machine for a service that had
+// been given a ceiling in the one way systemd documents for it.
+func TestASoftCeilingCountsToo(t *testing.T) {
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"),
+		[]byte("MemTotal:       16777216 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := filepath.Join(root, "cgroup")
+	for path, files := range map[string]map[string]string{
+		"system.slice/php-fpm.service": {"memory.max": "max", "memory.high": "2147483648"},
+		"system.slice":                 {"memory.max": "max", "memory.high": "max"},
+		"":                             {"memory.max": "max", "memory.high": "max"},
+	} {
+		dir := filepath.Join(cg, path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, value := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(value+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	defer swapRoots(cg, filepath.Join(root, "proc"))()
+
+	got := DetectFor(4242)
+	if want := int64(2) << 30; got.MemoryBytes != want {
+		t.Errorf("MemoryBytes = %s for a service with MemoryHigh=2G, want %s: the pools "+
+			"are about to be sized against the machine, and above the soft ceiling this "+
+			"host reclaims rather than serves",
+			HumanBytes(got.MemoryBytes), HumanBytes(want))
+	}
+}
+
+// TestTheTighterOfTheTwoCeilingsWins: MemoryMax and MemoryHigh can both be set,
+// and the one that binds first is the smaller. Sizing to the larger is sizing
+// past a line the kernel enforces.
+func TestTheTighterOfTheTwoCeilingsWins(t *testing.T) {
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"),
+		[]byte("MemTotal:       16777216 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := filepath.Join(root, "cgroup")
+	dir := filepath.Join(cg, "system.slice/php-fpm.service")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A hard cap of 4G with a soft one of 1G: the service is reclaimed at 1G.
+	for name, value := range map[string]string{
+		"memory.max": "4294967296", "memory.high": "1073741824",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	defer swapRoots(cg, filepath.Join(root, "proc"))()
+
+	if got := DetectFor(4242); got.MemoryBytes != 1<<30 {
+		t.Errorf("MemoryBytes = %s with MemoryMax=4G and MemoryHigh=1G, want 1.0GiB",
+			HumanBytes(got.MemoryBytes))
+	}
+}
