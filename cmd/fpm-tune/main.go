@@ -80,7 +80,8 @@ func usage() {
   fpm-tune plan     show what would change, and why. Changes no PHP-FPM
                     configuration; records the observation (see -no-learn).
   fpm-tune apply    write the pool settings and reload PHP-FPM.
-  fpm-tune serve    keep watching and adjusting, with metrics on /metrics.
+  fpm-tune serve    keep measuring, with metrics on /metrics. Add -apply to act
+                    on what it finds.
   fpm-tune version
 
 `, version)
@@ -316,8 +317,11 @@ func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	c := registerCommon(fs)
 	var (
-		dropInDir   = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
-		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where the previous configuration is kept while a change is in flight")
+		dropInDir = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
+		backupDir = fs.String("backup-dir", apply.DefaultBackupDir, "what is needed to undo a change and to repair a host: the previous "+
+			"configuration while a change is in flight, the record of what is in flight, "+
+			"and where php-fpm lives. Not scratch space — a rule that cleans it takes "+
+			"away both")
 		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
 		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
 		dryRun      = fs.Bool("dry-run", false, "render and validate, but write nothing and reload nothing")
@@ -574,14 +578,21 @@ func runServe(args []string) error {
 		doApply     = fs.Bool("apply", false,
 			"act on the plan. Without it the loop observes, learns and publishes metrics "+
 				"without touching any configuration, which is a reasonable way to run permanently")
-		dropInDir   = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
-		backupDir   = fs.String("backup-dir", apply.DefaultBackupDir, "where the previous configuration is kept while a change is in flight")
+		dropInDir = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
+		backupDir = fs.String("backup-dir", apply.DefaultBackupDir, "what is needed to undo a change and to repair a host: the previous "+
+			"configuration while a change is in flight, the record of what is in flight, "+
+			"and where php-fpm lives. Not scratch space — a rule that cleans it takes "+
+			"away both")
 		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
 		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
 		saveEvery   = fs.Duration("save-every", 5*time.Minute, "how often learned baselines reach disk")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "fpm-tune serve — keep watching and adjusting\n\n")
+		fmt.Fprintf(os.Stderr, "fpm-tune serve — keep measuring PHP-FPM, and act on it "+
+			"with -apply\n\nWithout -apply the loop observes, learns and publishes "+
+			"metrics without\ntouching any configuration. Note that the self-repair is "+
+			"part of applying:\na watch-only daemon will not fix a host whose master "+
+			"this tool's own file\nis stopping from starting.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

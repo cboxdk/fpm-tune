@@ -39,6 +39,12 @@ ExecStart=/usr/local/bin/fpm-tune serve --apply --metrics 127.0.0.1:9110
 Restart=on-failure
 RestartSec=5
 
+# systemd creates and owns /var/lib/fpm-tune. The tool will create it itself,
+# but then its permissions are whatever the umask happened to be — and what
+# lives there is the record of what was changed and how to undo it.
+StateDirectory=fpm-tune
+StateDirectoryMode=0700
+
 [Install]
 WantedBy=multi-user.target
 ```
