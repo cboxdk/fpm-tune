@@ -3,7 +3,6 @@ package budget
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -352,10 +351,6 @@ func TestDetectForTakesTheTightestLimitInThePath(t *testing.T) {
 // through and the guard that prefers the tighter of the two readings covered by
 // nothing at all.
 func TestDetectForFallsBackWhenThereIsNoLimit(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the fixture stands in for /proc/meminfo, which only Linux reads")
-	}
-
 	root := t.TempDir()
 
 	proc := filepath.Join(root, "proc", "4242")
@@ -398,10 +393,6 @@ func TestDetectForFallsBackWhenThereIsNoLimit(t *testing.T) {
 // machine's own memory is not a budget, it is the absence of one, and sizing to
 // it commits memory the host does not have.
 func TestACgroupLimitLargerThanTheMachineIsIgnored(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the fixture stands in for /proc/meminfo, which only Linux reads")
-	}
-
 	root := t.TempDir()
 
 	proc := filepath.Join(root, "proc", "4242")
@@ -442,9 +433,98 @@ func TestACgroupLimitLargerThanTheMachineIsIgnored(t *testing.T) {
 	}
 }
 
+// swapRoots points the whole detection at a fixture tree.
+//
+// defaultPaths as well as the two roots, and the difference matters: it holds
+// absolute literals, so a test that swapped only the roots still read the
+// RUNNER's /proc/meminfo for the host fallback. Two tests written against a
+// 16GiB fixture therefore asserted a number no real machine reports exactly,
+// and would have failed the first time CI ran them on Linux — while passing
+// locally, because darwin skips them.
 func swapRoots(cg, proc string) func() {
-	oldCg, oldProc := cgroupRoot, procRoot
+	oldCg, oldProc, oldPaths := cgroupRoot, procRoot, defaultPaths
 	cgroupRoot, procRoot = cg, proc
+	defaultPaths = sysPaths{
+		cgroupV2Memory: filepath.Join(cg, "memory.max"),
+		cgroupV2CPU:    filepath.Join(cg, "cpu.max"),
+		cgroupV1Memory: filepath.Join(cg, "memory", "memory.limit_in_bytes"),
+		cgroupV1Quota:  filepath.Join(cg, "cpu", "cpu.cfs_quota_us"),
+		cgroupV1Period: filepath.Join(cg, "cpu", "cpu.cfs_period_us"),
+		memInfo:        filepath.Join(proc, "meminfo"),
+	}
 
-	return func() { cgroupRoot, procRoot = oldCg, oldProc }
+	return func() { cgroupRoot, procRoot, defaultPaths = oldCg, oldProc, oldPaths }
+}
+
+// TestAProcessWhoseLimitCannotBeReadIsNotReportedAsUnlimited.
+//
+// "Could not look" and "found no limit" produced the same answer and the same
+// silence: the machine's memory, with no error, no flag and nothing in
+// Describe. So a php-fpm capped at 3GiB was sized against a 24GiB machine —
+// eight times its real ceiling — and the output was indistinguishable from a
+// genuinely unlimited host.
+//
+// Three ordinary routes in, none exotic: /proc mounted hidepid=2 while php-fpm
+// runs as root and this does not; this running as a deploy user on a hardened
+// host; and the plain race, since the limit is read AFTER the scrape, so a
+// restart anywhere in that window leaves a pid that has gone.
+func TestAProcessWhoseLimitCannotBeReadIsNotReportedAsUnlimited(t *testing.T) {
+	root := t.TempDir()
+	// A /proc with no entry for the pid at all, which is what a dead process and
+	// a hidden one both look like from here.
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer swapRoots(filepath.Join(root, "cgroup"), filepath.Join(root, "proc"))()
+
+	got := DetectFor(4242)
+
+	if got.LookupErr == nil {
+		t.Fatal("a process whose cgroup could not be read reported a budget with no " +
+			"reservation at all; that number is the machine's, and it is the widest " +
+			"possible answer to a question about a limit")
+	}
+	if !strings.Contains(got.Describe(), "WARNING") {
+		t.Errorf("Describe says nothing about it:\n%s", got.Describe())
+	}
+	if !strings.Contains(got.Describe(), "too large") {
+		t.Errorf("the warning does not say which direction the error is in:\n%s",
+			got.Describe())
+	}
+}
+
+// TestAProcessWithNoLimitAnywhereIsNotAnError is the other half: a genuinely
+// unlimited host must not be reported as a failed lookup, or the warning
+// becomes noise and stops being read.
+func TestAProcessWithNoLimitAnywhereIsNotAnError(t *testing.T) {
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cg := filepath.Join(root, "cgroup")
+	for _, p := range []string{"system.slice/php-fpm.service", "system.slice", ""} {
+		dir := filepath.Join(cg, p)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte("max\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"),
+		[]byte("MemTotal:       16777216 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	defer swapRoots(cg, filepath.Join(root, "proc"))()
+
+	if got := DetectFor(4242); got.LookupErr != nil {
+		t.Errorf("a host with no limit anywhere was reported as a failed lookup: %v",
+			got.LookupErr)
+	}
 }

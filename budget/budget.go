@@ -49,6 +49,16 @@ type Limits struct {
 
 	// Source names where MemoryBytes came from.
 	Source Source
+
+	// LookupErr is set when the managed process's OWN limit could not be read,
+	// and MemoryBytes therefore fell back to the machine.
+	//
+	// The two look identical in the number and are opposite situations: a host
+	// with no limit anywhere, and a host whose limit could not be reached. The
+	// second is the one that sizes a 3GiB service against a 24GiB machine, so it
+	// has to be visible — Describe says so, and the caller can decide whether to
+	// act on a budget it could not confirm.
+	LookupErr error
 }
 
 // sysPaths are the files consulted, in a struct so tests can point them at
@@ -119,7 +129,15 @@ func DetectFor(pid int) Limits {
 		return limits
 	}
 
-	bytes, ok := cgroupLimitOf(pid)
+	bytes, ok, err := cgroupLimitOf(pid)
+	if err != nil {
+		// Reported, not swallowed. This reading OUTRANKS the machine total when
+		// it exists, so failing to take it and silently using the machine total
+		// is the widest possible answer to a question about a limit.
+		limits.LookupErr = err
+
+		return limits
+	}
 	if !ok || bytes <= 0 || bytes >= limits.MemoryBytes {
 		return limits
 	}
@@ -133,10 +151,17 @@ func DetectFor(pid int) Limits {
 
 // cgroupLimitOf walks the cgroups a process belongs to and returns the tightest
 // memory limit found.
-func cgroupLimitOf(pid int) (int64, bool) {
+func cgroupLimitOf(pid int) (int64, bool, error) {
 	data, err := os.ReadFile(fmt.Sprintf("%s/%d/cgroup", procRoot, pid))
 	if err != nil {
-		return 0, false
+		// COULD NOT LOOK is not the same as FOUND NO LIMIT, and returning the
+		// same thing for both is how a 3GiB service got sized against a 24GiB
+		// machine with nothing printed. Three ordinary ways in: /proc mounted
+		// hidepid=2 while php-fpm runs as root and this does not; this running
+		// as a deploy user on a hardened host; and the plain race, since the
+		// limit is read AFTER the scrape, so a restart anywhere in that window
+		// leaves a pid that has gone.
+		return 0, false, fmt.Errorf("cannot read the cgroup of process %d: %w", pid, err)
 	}
 
 	best := int64(0)
@@ -172,7 +197,7 @@ func cgroupLimitOf(pid int) (int64, bool) {
 		}
 	}
 
-	return best, best > 0
+	return best, best > 0, nil
 }
 
 func readTrimmed(path string) string {
@@ -238,8 +263,20 @@ func (l Limits) Describe() string {
 		where = "container"
 	}
 
-	return fmt.Sprintf("%s memory %s, %d CPU(s) (via %s)",
+	base := fmt.Sprintf("%s memory %s, %d CPU(s) (via %s)",
 		where, HumanBytes(l.MemoryBytes), l.CPUs, l.Source)
+
+	if l.LookupErr != nil {
+		// Said out loud, because this number and a genuinely unlimited host's
+		// number are the same number. Sizing against the machine when php-fpm is
+		// capped below it is how a service gets grown into a ceiling it never
+		// sees.
+		return base + fmt.Sprintf("\n  WARNING: php-fpm's own limit could not be read "+
+			"(%v), so this is the MACHINE's memory. If php-fpm is capped below it — a "+
+			"systemd MemoryMax, a container — this budget is too large.", l.LookupErr)
+	}
+
+	return base
 }
 
 func readCgroupV2Memory(path string) (int64, bool) {

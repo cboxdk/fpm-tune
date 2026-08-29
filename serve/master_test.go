@@ -152,3 +152,63 @@ func swapDiscovery(masters []phpfpm.Master) func() {
 }
 
 func noMastersRunning() func() { return swapDiscovery(nil) }
+
+// TestTheDaemonPlansOnlyTheMasterItWasPointedAt.
+//
+// --drop-in-dir "also selects which master to manage on a host running several",
+// says its own help — and the filter that honours it lived in the CLI, so plan
+// and apply scoped and serve did not.
+//
+// A daemon on a two-master host therefore learned, sized and RENDERED the other
+// master's pools. The budget came from whichever master owned the first pool
+// alphabetically, so the plan was divided against a cgroup limit binding nothing
+// it was writing for; and the rendered file named pools that master does not
+// serve, which the sandbox refused every round — the safety net working, and a
+// daemon that never applies anything again.
+func TestTheDaemonPlansOnlyTheMasterItWasPointedAt(t *testing.T) {
+	dir := t.TempDir()
+	mine := writeMasterConfig(t, dir, "8.5")
+	theirs := writeMasterConfig(t, dir, "8.2")
+
+	targets := []phpfpm.Target{
+		{Name: "shop", ConfigPath: mine, PID: 100},
+		{Name: "api", ConfigPath: theirs, PID: 200},
+	}
+
+	kept := ForMaster(targets, filepath.Join(dir, "8.5", "pool.d"), nil)
+
+	if len(kept) != 1 || kept[0].Name != "shop" {
+		names := make([]string, 0, len(kept))
+		for _, k := range kept {
+			names = append(names, k.Name)
+		}
+		t.Errorf("planning %v for a daemon pointed at the 8.5 pool directory; the other "+
+			"master's pools are sized against a limit that does not bind them, and "+
+			"written into a file it does not read", names)
+	}
+}
+
+// TestNoMasterIsChosenWhenThePoolsSpanTwo: the budget is read from ONE master's
+// cgroup, so views spanning two masters have no single right answer. Returning
+// the first pool's pid picks one host's limit to size another host's pools
+// against — the same fault as reading the root cgroup, reached from the other
+// side. Zero means "no opinion", and the caller falls back to the machine.
+func TestNoMasterIsChosenWhenThePoolsSpanTwo(t *testing.T) {
+	if got := MasterPIDOf([]observe.PoolView{
+		{Name: "a", Target: phpfpm.Target{PID: 100}},
+		{Name: "b", Target: phpfpm.Target{PID: 200}},
+	}); got != 0 {
+		t.Errorf("MasterPIDOf = %d for pools belonging to two different masters; that "+
+			"master's memory limit is about to be divided among pools it does not run",
+			got)
+	}
+
+	// One master, some pools unreachable: still an answer.
+	if got := MasterPIDOf([]observe.PoolView{
+		{Name: "down"},
+		{Name: "up", Target: phpfpm.Target{PID: 4242}},
+		{Name: "also-up", Target: phpfpm.Target{PID: 4242}},
+	}); got != 4242 {
+		t.Errorf("MasterPIDOf = %d, want 4242", got)
+	}
+}

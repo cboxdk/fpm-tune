@@ -524,7 +524,15 @@ func (l *Loop) discover(ctx context.Context) ([]phpfpm.Target, error) {
 		return l.cfg.Discover(ctx)
 	}
 
-	return observe.Discover(ctx, l.log)
+	targets, err := observe.Discover(ctx, l.log)
+	if err != nil {
+		return nil, err
+	}
+
+	// Scoped to the master this daemon was pointed at, the same way plan and
+	// apply scope. Without it a daemon on a two-master host learned and sized
+	// the other master's pools as if they were its own.
+	return ForMaster(targets, l.cfg.DropInDir, l.log), nil
 }
 
 func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.PoolView {
@@ -638,13 +646,28 @@ func (l *Loop) State() *state.State { return l.state }
 var discoverMasters = phpfpm.DiscoverMasters
 
 func MasterPIDOf(views []observe.PoolView) int {
+	pid := 0
 	for _, v := range views {
-		if v.Target.PID > 0 {
-			return v.Target.PID
+		if v.Target.PID <= 0 {
+			continue
+		}
+		if pid == 0 {
+			pid = v.Target.PID
+
+			continue
+		}
+		if v.Target.PID != pid {
+			// Pools from more than one master. Picking the first is picking one
+			// host's memory limit to size another host's pools against, which is
+			// exactly what reading the ROOT cgroup used to do — the same fault,
+			// arrived at from a different direction. Zero means "no opinion",
+			// and the caller falls back to the machine, which is at least a
+			// limit that binds all of them.
+			return 0
 		}
 	}
 
-	return 0
+	return pid
 }
 
 // forgetParsedConfig drops the cached effective configuration, so the next

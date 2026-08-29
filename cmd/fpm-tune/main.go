@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -126,36 +125,23 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 // With no directory named it keeps everything, and says so when that spans more
 // than one master — the numbers are then a mixture, and an operator reading them
 // should know before acting on them.
-func forMaster(targets []phpfpm.Target, dropInDir string, log *slog.Logger) []phpfpm.Target {
-	if dropInDir == "" {
-		configs := map[string]bool{}
-		for _, t := range targets {
-			configs[t.ConfigPath] = true
-		}
-		if len(configs) > 1 {
-			log.Warn("This host runs more than one PHP-FPM master and no --drop-in-dir was "+
-				"given, so these pools are planned together against one master's memory "+
-				"limit. Name a pool directory to plan for one of them.",
-				"masters", len(configs))
-		}
-
-		return targets
+// noPositionalArgs refuses a stray word on the command line.
+//
+// Go's flag package stops parsing at the first non-flag token and silently
+// discards everything after it. So `fpm-tune plan -state S POOL -memory 1G`
+// dropped -memory — the one flag whose whole purpose is to stop this tool
+// sizing against the wrong number — and reported the entire host's memory
+// instead, exit 0, no warning. A pool name is the obvious thing to type at a
+// pool-sizing tool, and on `apply` the same slip discards -memory, -reserve,
+// -state and -drop-in-dir and then WRITES.
+func noPositionalArgs(fs *flag.FlagSet) error {
+	if fs.NArg() == 0 {
+		return nil
 	}
 
-	want := filepath.Clean(dropInDir)
-
-	var kept []phpfpm.Target
-	for _, t := range targets {
-		for _, pattern := range serve.IncludePatternsOf(t.ConfigPath) {
-			if filepath.Clean(filepath.Dir(pattern)) == want {
-				kept = append(kept, t)
-
-				break
-			}
-		}
-	}
-
-	return kept
+	return fmt.Errorf("unexpected argument %q. fpm-tune takes no positional arguments, "+
+		"and any flag after one is silently ignored — which is how a run ends up sizing "+
+		"against the whole machine", fs.Arg(0))
 }
 
 // gather does everything both commands need: read the host, scrape the pools,
@@ -195,7 +181,7 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	// versions: the budget belongs to one of them and the pools to both. `apply`
 	// already refuses that situation and tells the operator to name a directory;
 	// `plan` did not offer the flag at all, so there was nothing to answer with.
-	targets = forMaster(targets, dropInDir, log)
+	targets = serve.ForMaster(targets, dropInDir, log)
 	if len(targets) == 0 {
 		return plan.Result{}, nil, fmt.Errorf(
 			"no pools belong to a master that includes %s", dropInDir)
@@ -271,6 +257,9 @@ func runPlan(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := noPositionalArgs(fs); err != nil {
+		return err
+	}
 
 	log := newLogger(*c.verbose)
 
@@ -331,6 +320,9 @@ func runApply(args []string) error {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := noPositionalArgs(fs); err != nil {
 		return err
 	}
 
@@ -596,6 +588,9 @@ func runServe(args []string) error {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := noPositionalArgs(fs); err != nil {
 		return err
 	}
 
