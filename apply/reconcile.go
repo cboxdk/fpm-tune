@@ -204,6 +204,13 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 		return false, nil
 	}
 
+	// Rehearsed in a sandbox before the file is touched.
+	//
+	// The live re-check below, with its put-back, already guarantees the final
+	// bytes — so what this buys is the WINDOW. Removing first and checking after
+	// leaves the pool directory without the file for as long as a `php-fpm -t`
+	// takes, and anything reloading php-fpm in that window adopts a
+	// configuration nobody chose. That is the whole reason it is here.
 	if err := validateReplacement(ctx, master, path, nil); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return false, fmt.Errorf("%w: could not determine whether removing this "+
