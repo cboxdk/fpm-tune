@@ -74,9 +74,22 @@ Three things make the measurement honest:
   more expensive and falls on a half-life measured in time, not in samples. Sizing
   to a percentile of the day pins the host to its busiest hour; a per-sample decay
   means the scrape interval silently changes the behaviour.
-- **Never learns from an idle pool.** A worker that has served three requests is
-  much smaller than one that has served five hundred. Learning from a quiet pool
-  produces a number that fails the moment traffic arrives.
+- **Never learns from an idle pool.** A quiet pool's workers give their memory
+  back to the operating system, so they read small — and that is a lull, not a
+  cheaper application. A pool must be serving at least a request a second before
+  a smaller reading counts as evidence. The threshold is a real cliff and it is
+  deliberate: below it the wrong answer wastes memory, and above it the wrong
+  answer loses the host.
+- **Time only counts if it was watched.** The estimate falls on a half-life, so
+  elapsed time is the weight — which is right while the looking is regular and
+  wrong the moment it stops. Restart this tool while php-fpm keeps serving and
+  the first reading back is hours old; each pool remembers how often it is
+  actually looked at, so a gap can never move the estimate further than one
+  ordinary scrape.
+- **Small pools are measured too.** A pool that never runs two workers at once,
+  or that recycles them before they warm up, was invisible to a stricter version
+  of this and got a table's guess for ever. Its readings count toward what it
+  COSTS; they still do not count toward permission to shrink it.
 - **Follows the peak of the sawtooth.** `pm.max_requests` recycles workers, so
   memory climbs and resets. The peak is the number that has to fit — and PHP-FPM
   resets its own high-water marks on reload, so the peak is remembered here.
