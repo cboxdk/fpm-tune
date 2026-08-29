@@ -220,11 +220,16 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		ConfidenceSamples: *c.confSamples,
 		ConfidenceSpan:    *c.confSpan,
 	}
+	// One clock for the round. Learning and planning both move time-based state,
+	// and two calls to time.Now() a few hundred milliseconds apart is two
+	// different rounds as far as a decay measured in time is concerned.
+	now := time.Now()
 	if !*c.noLearn {
-		plan.LearnFrom(st, views, time.Now(), stateOpts)
+		plan.LearnFrom(st, views, now, stateOpts)
 	}
 
 	result, buildErr := plan.Build(plan.Input{
+		At:           now,
 		Limits:       limits,
 		Views:        views,
 		State:        st,

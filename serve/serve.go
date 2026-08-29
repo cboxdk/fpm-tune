@@ -272,6 +272,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	result, err := plan.Build(plan.Input{
+		At:           now,
 		Limits:       limits,
 		Views:        views,
 		State:        l.state,

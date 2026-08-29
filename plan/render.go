@@ -90,6 +90,16 @@ func (r Result) Render(w io.Writer) error {
 			"  must not have its memory handed to its neighbours.\n")
 	}
 
+	// Said only when it does not fit, and said as what it is: not a prediction,
+	// but the ceiling nobody was checking.
+	if allocatable := r.Plan.TotalBytes - r.Reserve; r.WorstCaseBytes > allocatable {
+		fmt.Fprintf(&b, "\nIf every pool filled its ceiling with the largest worker ever seen\n"+
+			"from it, this plan would need %s against %s. That is a rare\n"+
+			"combination and not what the sizing assumes — but if this host OOMs, it is\n"+
+			"the arithmetic to look at.\n",
+			budget.HumanBytes(r.WorstCaseBytes), budget.HumanBytes(allocatable))
+	}
+
 	for _, warning := range r.Plan.Warnings {
 		fmt.Fprintf(&b, "\nWARNING: %s\n", warning)
 	}

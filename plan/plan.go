@@ -58,6 +58,14 @@ type Input struct {
 
 	StateOptions    state.Options
 	AllocateOptions allocate.Options
+
+	// At is the round's clock, shared with LearnFrom.
+	//
+	// Build reads and refreshes the remembered concurrency peak, and it used to
+	// stamp that with its own time.Now() while the same round's learning used an
+	// explicit timestamp — two clocks in one round, in a package whose decay is
+	// measured in time. Zero means now.
+	At time.Time
 }
 
 // Result is a plan plus the reasoning that produced it.
@@ -78,6 +86,11 @@ type Result struct {
 	// budget handed to its neighbours.
 	Unreachable []string
 
+	// WorstCaseBytes is what this plan costs if every pool fills its ceiling
+	// with the most expensive worker ever seen from it. Advisory: sizing to it
+	// would pin the host to its worst minute.
+	WorstCaseBytes int64
+
 	// Views is what was observed, kept so the rendered plan can show each pool's
 	// current setting beside the proposed one. A plan that shows only the new
 	// number gives an operator nothing to judge it against.
@@ -91,6 +104,11 @@ func Build(in Input) (Result, error) {
 		profile = DefaultProfile
 	}
 	stateOpts := in.StateOptions.Defaults()
+
+	at := in.At
+	if at.IsZero() {
+		at = time.Now()
+	}
 
 	reserve, reason := reserveFor(in.Limits, profile, in.ReserveBytes)
 
@@ -106,7 +124,7 @@ func Build(in Input) (Result, error) {
 			result.Unreachable = append(result.Unreachable, view.Name)
 		}
 
-		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts)
+		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -127,8 +145,38 @@ func Build(in Input) (Result, error) {
 
 	result.Plan = allocation
 	result.Views = in.Views
+	result.WorstCaseBytes = worstCase(allocation, in.State)
 
 	return result, nil
+}
+
+// worstCase is what the plan would cost if every pool filled its ceiling with
+// the most expensive worker this tool has ever seen from it.
+//
+// Sizing to the high-water mark would pin every host to its worst minute, which
+// is why the estimate follows the typical peak instead. But the number is kept,
+// and nothing looked at it — so a pool with a rare 700MiB export endpoint and a
+// 90MiB typical cost was planned at ninety-odd workers with nothing anywhere
+// noting that those workers, all busy on the export at once, do not fit on the
+// machine.
+//
+// It is not a sizing input and must not become one. It is the sentence an
+// operator wants when the host OOMs anyway.
+func worstCase(p allocate.Plan, st *state.State) int64 {
+	if st == nil {
+		return 0
+	}
+
+	var total int64
+	for _, pp := range p.Pools {
+		cost := pp.WorkerBytes
+		if ps := st.Pools[pp.Name]; ps != nil && ps.HighWaterBytes > cost {
+			cost = ps.HighWaterBytes
+		}
+		total += int64(pp.MaxChildren) * cost
+	}
+
+	return total
 }
 
 // poolFor decides what one pool costs and what it wants.
@@ -146,7 +194,7 @@ func Build(in Input) (Result, error) {
 // tool like this causes the outage it was installed to prevent, so until then
 // its floor holds at whatever it is configured for and the first run can only
 // ever help.
-func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state.Options) (allocate.Pool, bool) {
+func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state.Options, at time.Time) (allocate.Pool, bool) {
 	pool := allocate.Pool{
 		Name:               view.Name,
 		CurrentMaxChildren: view.CurrentMaxChildren,
@@ -269,7 +317,7 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 	// the peak has to be remembered here rather than read fresh each time. See
 	// PoolState.ObservePeak.
 	if ps != nil {
-		pool.ObservedPeak = ps.ObservePeak(view.ObservedPeak, time.Now(), opts)
+		pool.ObservedPeak = ps.ObservePeak(view.ObservedPeak, at, opts)
 	}
 
 	return pool, !pool.Measured
