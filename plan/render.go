@@ -94,13 +94,20 @@ func (r Result) Render(w io.Writer) error {
 		fmt.Fprintf(&b, "\nWARNING: %s\n", warning)
 	}
 
+	// One arm, because there is one state.
+	//
+	// The second used to say a later run would rebalance toward the pools marked
+	// *, and it could not be reached: the allocator sets CapacityExhausted from
+	// the same unmet demand the marks come from. The rebalancing has already
+	// happened by the time a plan exists — headroom was taken from the idle
+	// pools and given to the busy ones — so a pool still short in a FINISHED
+	// plan is short because the budget ran out, and telling an operator to wait
+	// for the next run would have been advice to wait for nothing.
 	if r.Plan.CapacityExhausted {
 		fmt.Fprintf(&b, "\nCAPACITY EXHAUSTED — pools marked * want more workers and there is\n"+
-			"nowhere left to get them. No configuration change will help: this host\n"+
+			"nowhere left to get them. The free budget above is smaller than one more\n"+
+			"worker would cost them, so no configuration change will help: this host\n"+
 			"needs more memory, or fewer sites.\n")
-	} else if anyUnmet(r) {
-		fmt.Fprintf(&b, "\nPools marked * want more workers than they were given, but there is\n"+
-			"headroom elsewhere — a later run will rebalance toward them.\n")
 	}
 
 	_, err := io.WriteString(w, b.String())
@@ -116,14 +123,4 @@ func currentOf(r Result, name string) int {
 	}
 
 	return 0
-}
-
-func anyUnmet(r Result) bool {
-	for _, p := range r.Plan.Pools {
-		if p.DemandUnmet {
-			return true
-		}
-	}
-
-	return false
 }

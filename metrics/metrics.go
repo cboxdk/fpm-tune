@@ -67,7 +67,7 @@ func New() *Collectors {
 			// measurement whatever the confidence.
 			"How far the learned baseline is trusted, 0 to 1. Below 1 the pool will not be cut below what it is configured for; its per-worker cost is still whatever has been measured. See fpm_tune_pool_measured.", "pool"),
 		demandUnmet: gaugeVec(reg, "fpm_tune_pool_demand_unmet",
-			"1 when a pool wants more workers than it was given. On its own this is routine — read it with fpm_tune_capacity_exhausted.", "pool"),
+			"1 when a pool wants more workers than it was given, and could not be. fpm_tune_capacity_exhausted is 1 whenever any pool is in this state — the two are the same news at different granularity, which pool and whether any.", "pool"),
 		poolMeasured: gaugeVec(reg, "fpm_tune_pool_measured",
 			"1 when a pool is sized from its own observed memory rather than a bootstrap estimate.", "pool"),
 

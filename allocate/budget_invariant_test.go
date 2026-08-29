@@ -3,6 +3,7 @@ package allocate
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"testing"
 )
@@ -132,5 +133,21 @@ func TestAWorkerCountThatCannotBeRealIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("a floor of 16.7 million workers was accepted; the product wraps to zero " +
 			"and the plan reports the pool as costing nothing")
+	}
+}
+
+// TestAPerWorkerCostThatCannotBeRealIsRefused: bounding the worker COUNT is not
+// enough, because the product wraps if EITHER factor is absurd. A per-worker
+// cost near MaxInt64 makes floor × cost negative with a floor of two — and a
+// negative total passes a fit precondition and a budget assertion alike, both of
+// which are written to catch a number that is too large.
+func TestAPerWorkerCostThatCannotBeRealIsRefused(t *testing.T) {
+	_, err := Compute(Budget{TotalBytes: 1024 * mb, CPUs: 4}, []Pool{
+		{Name: "wrapped", WorkerBytes: math.MaxInt64/2 + 1, Floor: 2, CurrentMaxChildren: 2},
+	}, Options{}.Defaults())
+
+	if err == nil {
+		t.Fatal("a per-worker cost of 4 exabytes was accepted; two workers of it wrap to " +
+			"a negative total, which reads as a pool that costs less than nothing")
 	}
 }

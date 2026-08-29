@@ -257,6 +257,15 @@ var ErrNoBudget = errors.New("no memory available to allocate")
 // near this; a number above it came from a misparse, and int64 wraps on it.
 const maxPlausibleChildren = 100_000
 
+// maxPlausibleWorkerBytes bounds a per-worker cost for the same reason.
+//
+// Bounding the worker COUNT alone was not enough: the product wraps if either
+// factor is absurd, and a per-worker cost near MaxInt64 makes `floor * cost`
+// negative with a floor of two. A negative product passes the fit precondition,
+// and the terminal assertion compares against the budget from the wrong side.
+// No PHP worker costs 64GiB; a number above this came from a misparse.
+const maxPlausibleWorkerBytes = 64 << 30
+
 var ErrCannotFit = errors.New("pools do not fit on this host")
 
 // Compute divides the budget between the pools.
@@ -296,6 +305,12 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 		// count in the millions wraps it — to zero, in the case that was
 		// demonstrated, which reads as a free pool and passes every budget check
 		// below.
+		if p.WorkerBytes > maxPlausibleWorkerBytes {
+			return plan, fmt.Errorf(
+				"pool %q reports %s per worker: past %s this is a bad reading rather than "+
+					"a measurement, and multiplying it by a worker count overflows",
+				p.Name, humanBytes(p.WorkerBytes), humanBytes(maxPlausibleWorkerBytes))
+		}
 		if p.Floor > maxPlausibleChildren || p.Ceiling > maxPlausibleChildren {
 			return plan, fmt.Errorf(
 				"pool %q asks for %d workers with a ceiling of %d: past %d this is a bad "+
@@ -367,7 +382,10 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	// with FreeBytes negative — 3.8GiB past the budget on an eight-pool host,
 	// eating the OS reserve whole. An error is a bad outcome; a plan that
 	// overcommits the machine is a worse one, and it looks like success.
-	if allocated > allocatable {
+	// Negative as well as too large. A wrapped product is negative, and a plan
+	// that thinks it committed less than nothing passes every check written the
+	// other way round.
+	if allocated < 0 || allocated > allocatable {
 		return Plan{}, fmt.Errorf(
 			"%w: the plan commits %s against %s available; this is a bug in the "+
 				"allocator and nothing should be written from it",
