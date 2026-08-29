@@ -198,7 +198,14 @@ func cgroupLimitOf(pid int) (int64, bool, error) {
 		// everything under it, and the effective limit is the smallest.
 		for path := fields[2]; ; path = filepath.Dir(path) {
 			for _, file := range files {
-				if v, ok := plausible(readTrimmed(filepath.Join(base, path, file))); ok {
+				raw, rerr := readTrimmed(filepath.Join(base, path, file))
+				if rerr != nil {
+					// The limit exists and cannot be read, which is the case
+					// that must not pass for "unlimited".
+					return 0, false, fmt.Errorf("cannot read the memory limit at %s: %w",
+						filepath.Join(base, path, file), rerr)
+				}
+				if v, ok := plausible(raw); ok {
 					if best == 0 || v < best {
 						best = v
 					}
@@ -213,13 +220,25 @@ func cgroupLimitOf(pid int) (int64, bool, error) {
 	return best, best > 0, nil
 }
 
-func readTrimmed(path string) string {
+// readTrimmed returns a file's contents, and whether it could not be read for a
+// reason other than not being there.
+//
+// The distinction is the whole point. A cgroup with no limit set simply has no
+// such file, and that is an answer. A limit file that exists and returns EACCES
+// — this process is not root, the host is hardened — is NOT an answer, and
+// collapsing both to "" meant a 3GiB service was sized against a 32GiB machine
+// with nothing anywhere saying the number had not been confirmed.
+func readTrimmed(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+
+		return "", err
 	}
 
-	return strings.TrimSpace(string(data))
+	return strings.TrimSpace(string(data)), nil
 }
 
 func detectWith(p sysPaths) Limits {

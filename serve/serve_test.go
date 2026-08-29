@@ -12,10 +12,8 @@ import (
 	"time"
 
 	"github.com/cboxdk/fpm-tune/allocate"
-	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
 	"github.com/cboxdk/fpm-tune/state"
-	"github.com/cboxdk/phpfpm"
 )
 
 // TestIncludeDirIsReadNotGuessed: the layouts genuinely differ. RHEL puts the
@@ -105,55 +103,6 @@ func TestPIDFileIsRead(t *testing.T) {
 				t.Errorf("PIDFileOf = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-// TestTwoMastersAreRefusedRatherThanHalfHandled: reconfiguring one and silently
-// ignoring the other would leave the operator with a host that is half tuned and
-// no indication of which half.
-func TestTwoMastersAreRefusedRatherThanHalfHandled(t *testing.T) {
-	_, err := MasterFrom(plan.Result{Views: []observe.PoolView{
-		{Name: "a", Target: phpfpm.Target{Binary: "/usr/sbin/php-fpm8.2", ConfigPath: "/etc/php/8.2/fpm/php-fpm.conf"}},
-		{Name: "b", Target: phpfpm.Target{Binary: "/usr/sbin/php-fpm8.3", ConfigPath: "/etc/php/8.3/fpm/php-fpm.conf"}},
-	}}, "")
-
-	if err == nil {
-		t.Fatal("two masters were accepted; one would have been silently ignored")
-	}
-	if !strings.Contains(err.Error(), "2 PHP-FPM masters") {
-		t.Errorf("the error does not say what the problem is: %v", err)
-	}
-}
-
-// TestOneMasterResolves, including the include directory read from its config.
-func TestOneMasterResolves(t *testing.T) {
-	dir := t.TempDir()
-	config := filepath.Join(dir, "php-fpm.conf")
-	poolDir := filepath.Join(dir, "php-fpm.d")
-	if err := os.WriteFile(config, []byte("include="+poolDir+"/*.conf\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	master, err := MasterFrom(plan.Result{Views: []observe.PoolView{
-		{Name: "a", Target: phpfpm.Target{Binary: "/usr/sbin/php-fpm", ConfigPath: config}},
-		{Name: "b", Target: phpfpm.Target{Binary: "/usr/sbin/php-fpm", ConfigPath: config}},
-	}}, "")
-	if err != nil {
-		t.Fatalf("MasterFrom: %v", err)
-	}
-
-	if master.DropInDir != poolDir {
-		t.Errorf("DropInDir = %q, want %q", master.DropInDir, poolDir)
-	}
-	if master.ConfigPath != config {
-		t.Errorf("ConfigPath = %q, want %q", master.ConfigPath, config)
-	}
-}
-
-// TestNoMasterIsAClearError rather than a nil struct that fails later.
-func TestNoMasterIsAClearError(t *testing.T) {
-	if _, err := MasterFrom(plan.Result{}, ""); err == nil {
-		t.Error("a plan with no pools produced a usable master")
 	}
 }
 

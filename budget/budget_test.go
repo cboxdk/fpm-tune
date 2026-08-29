@@ -621,3 +621,57 @@ func TestTheTighterOfTheTwoCeilingsWins(t *testing.T) {
 			HumanBytes(got.MemoryBytes))
 	}
 }
+
+// TestALimitThatCannotBeReadIsNotAnAbsentLimit.
+//
+// A cgroup with no limit set simply has no such file, and that is an answer. A
+// limit file that exists and returns EACCES — this process is not root, the
+// host is hardened — is not an answer, and collapsing both to an empty string
+// meant a 3GiB service was sized against a 32GiB machine with nothing anywhere
+// saying the number had not been confirmed.
+//
+// The earlier fix covered an unreadable /proc/<pid>/cgroup. This is the other
+// half: the path is readable and names a slice, and the slice's own limit file
+// is not.
+func TestALimitThatCannotBeReadIsNotAnAbsentLimit(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file with mode 000")
+	}
+
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"),
+		[]byte("MemTotal:       33554432 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := filepath.Join(root, "cgroup")
+	dir := filepath.Join(cg, "system.slice/php-fpm.service")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	limit := filepath.Join(dir, "memory.max")
+	if err := os.WriteFile(limit, []byte("3221225472\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(limit, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(limit, 0o644) })
+
+	defer swapRoots(cg, filepath.Join(root, "proc"))()
+
+	got := DetectFor(4242)
+	if got.LookupErr == nil {
+		t.Errorf("a 3GiB limit that could not be read was reported as %s with no "+
+			"reservation at all; that is the machine's memory, and apply is about to "+
+			"write from it", HumanBytes(got.MemoryBytes))
+	}
+}

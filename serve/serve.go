@@ -270,8 +270,13 @@ func (l *Loop) round(ctx context.Context) {
 	for _, v := range views {
 		names = append(names, v.Name)
 	}
-	if dropped := l.state.Forget(names, l.masterScope(targets)); len(dropped) > 0 {
-		l.log.Info("Forgot pools that are no longer configured", "pools", dropped)
+	// Not while told to record nothing. Forgetting is a change to the store as
+	// much as learning is, and a daemon watching a host without disturbing its
+	// baselines should not be deleting them.
+	if !l.cfg.NoLearn {
+		if dropped := l.state.Forget(names, l.masterScope(targets)); len(dropped) > 0 {
+			l.log.Info("Forgot pools that are no longer configured", "pools", dropped)
+		}
 	}
 
 	// The MASTER's limit, not this process's. On a VM the cap lives on php-fpm's
@@ -685,6 +690,14 @@ func (l *Loop) shutdown(srv *http.Server) {
 		}
 	}
 
+	if l.cfg.NoLearn {
+		// The one save that went straight to the store rather than through
+		// save(), and so the one that ignored -no-learn. A daemon told to record
+		// nothing wrote a file on its way out — creating one where there had
+		// been none, or replacing what a previous run had learned.
+		return
+	}
+
 	if err := l.state.Save(l.cfg.StatePath); err != nil {
 		l.log.Error("Could not save state on shutdown; this restart returns to bootstrap",
 			"path", l.cfg.StatePath, "error", err)
@@ -855,81 +868,3 @@ func masterOnHost(dropInDir string, remembered *state.MasterRef, log *slog.Logge
 
 // ErrNoMaster reports that no php-fpm master is running.
 var ErrNoMaster = errors.New("no running PHP-FPM master found")
-
-// MasterFrom works out which PHP-FPM instance a plan belongs to.
-//
-// Every pool on a host normally belongs to one master and they share a single
-// reload. Two masters would need two reloads and two validations — a real
-// configuration, but not one handled here, so it says so rather than
-// reconfiguring one and silently ignoring the other.
-func MasterFrom(result plan.Result, dropInDir string) (apply.Master, error) {
-	type target struct{ binary, config string }
-
-	found := map[string]target{}
-	for _, v := range result.Views {
-		if v.Target.Binary == "" || v.Target.ConfigPath == "" {
-			continue
-		}
-		found[v.Target.Binary+"::"+v.Target.ConfigPath] = target{v.Target.Binary, v.Target.ConfigPath}
-	}
-
-	switch len(found) {
-	case 0:
-		return apply.Master{}, errors.New("could not determine which php-fpm binary and config to validate against")
-	case 1:
-	default:
-		return apply.Master{}, fmt.Errorf(
-			"this host runs %d PHP-FPM masters; apply handles one at a time, "+
-				"so run it once per master with the drop-in directory set accordingly", len(found))
-	}
-
-	var t target
-	for _, v := range found {
-		t = v
-	}
-
-	master := apply.Master{Binary: t.binary, ConfigPath: t.config, DropInDir: dropInDir}
-	if master.DropInDir == "" {
-		master.DropInDir = IncludeDirOf(t.config)
-	}
-	if master.DropInDir == "" {
-		return master, errors.New("could not locate the pool configuration directory; set it explicitly")
-	}
-
-	master.PID = masterPID(result, t.config)
-	master.PIDFile = PIDFileOf(t.config)
-
-	return master, nil
-}
-
-// ErrMasterUnidentified reports that pools were found but the master serving
-// them could not be identified.
-//
-// This is deliberately an error rather than a quiet fallback. Apply treats
-// PID == 0 as "provisioning: write the files, there is nothing to reload" — which
-// is correct before PHP-FPM starts and catastrophic afterwards, because it
-// records the pools as applied and never retries. The official php:8.3-fpm image
-// ships `pid` commented out, so on the most common deployment there is no pid
-// file at all: files written, master untouched, state poisoned, silent forever.
-var ErrMasterUnidentified = errors.New("PHP-FPM is running but its master process could not be identified")
-
-// masterPID resolves the running master.
-//
-// Discovery scanned the process table and had the pid in hand, so that is the
-// primary source; the pid file is a fallback for a caller that supplied targets
-// without going through discovery.
-func masterPID(result plan.Result, configPath string) int {
-	for _, v := range result.Views {
-		if v.Target.PID > 0 {
-			return v.Target.PID
-		}
-	}
-
-	if pidFile := PIDFileOf(configPath); pidFile != "" {
-		if pid, err := phpfpm.MasterPID(pidFile); err == nil {
-			return pid
-		}
-	}
-
-	return 0
-}

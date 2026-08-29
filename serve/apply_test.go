@@ -395,3 +395,44 @@ func TestNoLearnRecordsNothing(t *testing.T) {
 			"a previous run learned has just been replaced by a file that learned nothing")
 	}
 }
+
+// TestNoLearnDoesNotForgetOrSaveOnTheWayOut.
+//
+// -no-learn skipped LearnFrom and nothing else. Forget still counted absences
+// and deleted pools, and the shutdown save went straight to the store rather
+// than through the path that honours the flag — so a daemon told to record
+// nothing wrote a file on its way out, creating one where there had been none
+// or replacing what a previous run had learned.
+//
+// Forgetting is a change to the store as much as learning is.
+func TestNoLearnDoesNotForgetOrSaveOnTheWayOut(t *testing.T) {
+	tr := poolTree(t, "8.5")
+	defer swapDiscovery([]phpfpm.Master{
+		{PID: livingMaster(t, tr.configPath), ConfigPath: tr.configPath, Binary: trueBinary(t)},
+	})()
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	loop := applyingLoop(t, tr.poolDir, tr.configPath)
+	loop.cfg.Apply = false
+	loop.cfg.NoLearn = true
+	loop.cfg.StatePath = statePath
+
+	// A baseline for a pool this round will not see.
+	loop.State().Learn(state.Observation{
+		Pool: "gone", MasterConfig: tr.configPath, At: time.Now().Add(-time.Hour),
+		Workers: []state.WorkerSample{{RSSBytes: 90 * mb, Requests: 400}},
+	}, state.Options{})
+
+	for i := 0; i < 10; i++ {
+		loop.round(context.Background())
+	}
+	loop.shutdown(nil)
+
+	if loop.State().Lookup(tr.configPath, "gone") == nil {
+		t.Error("a run told to record nothing deleted a baseline; forgetting is a change " +
+			"to the store as much as learning is")
+	}
+	if _, err := os.Stat(statePath); err == nil {
+		t.Error("a run told to record nothing wrote a state file on its way out")
+	}
+}
