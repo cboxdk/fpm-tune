@@ -181,3 +181,48 @@ func TestTheCPUCeilingDoesNotCutAnUnwritableReserve(t *testing.T) {
 	}
 	t.Fatal("the unwritable pool is missing from the plan")
 }
+
+// TestAmongQueueingPoolsTheCheapestFixGoesFirst.
+//
+// Ordering, not share. When several pools are queueing and the budget cannot
+// take all of them out of it, the one that needs least is served first —
+// because that resolves the most sites with the memory available, and a site
+// that is queueing is a site that is down for somebody.
+//
+// The share rule alone does not pin this: a saturated pool is given its whole
+// shortfall, so with room for either one the order decides which. The budget
+// here fits the small fix and not the large one.
+func TestAmongQueueingPoolsTheCheapestFixGoesFirst(t *testing.T) {
+	opts := Options{}.Defaults()
+
+	// 60MiB of headroom above the floors. `near` needs 2 more workers at 20MiB
+	// (40MiB); `far` needs 8 at 20MiB (160MiB). Only one of them fits.
+	plan, err := Compute(Budget{TotalBytes: 100 * mb, CPUs: 64}, []Pool{
+		{
+			Name: "far", WorkerBytes: 20 * mb, Floor: 1, CurrentMaxChildren: 1,
+			ObservedPeak: 8, HitMaxChildren: true, QueueDepth: 30,
+			Measured: true, Reducible: true,
+		},
+		{
+			Name: "near", WorkerBytes: 20 * mb, Floor: 1, CurrentMaxChildren: 1,
+			ObservedPeak: 2, HitMaxChildren: true, QueueDepth: 5,
+			Measured: true, Reducible: true,
+		},
+	}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byName := map[string]PoolPlan{}
+	for _, pp := range plan.Pools {
+		byName[pp.Name] = pp
+	}
+
+	near := byName["near"]
+	if near.MaxChildren < near.Want {
+		t.Errorf("the pool two workers short of not queueing got %d of the %d it needs, "+
+			"while the one eight short got %d of %d: the budget went to the larger "+
+			"shortfall, so neither site came out of the queue",
+			near.MaxChildren, near.Want, byName["far"].MaxChildren, byName["far"].Want)
+	}
+}

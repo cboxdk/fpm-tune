@@ -62,6 +62,9 @@ chaos: build ## The perturbations a real host experiences (needs php-fpm install
 
 integration: e2e chaos ## Both suites against a real php-fpm
 
+mutations: ## Remove each safety guard in turn; the suite must fail every time
+	python3 testing/mutations.py
+
 # Deliberately NOT called "everything CI runs", which it said until this comment
 # was written and was not true: CI also drives e2e.sh and chaos.sh against a real
 # php-fpm, and those are where the faults that matter have been found. A gate

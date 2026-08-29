@@ -216,9 +216,18 @@ Beyond the unit tests, CI runs two suites against a real php-fpm:
 The chaos suite exists because a soak on a VM found a fault that every unit test,
 every container test and five rounds of review had walked past.
 
+And a third thing, which is what stopped several of the tests above from being
+decoration: `testing/mutations.py` removes each safety guard in turn and
+requires the suite to fail. A test that passes against a deleted guard is not
+testing it — this repo has shipped an end-to-end reload test that passed with
+the reload deleted outright, a rollback test that only ever ran the success
+path, and a shell scenario asserting on a directory the run never touched.
+Coverage does not catch those.
+
 ```bash
 make check         # what CI's unit jobs run: fmt, tidy, vet, lint, race, vulncheck
 make integration   # both suites against a real php-fpm on this machine
+make mutations     # every guard removed in turn; the suite must fail each time
 ```
 
 ## Related
