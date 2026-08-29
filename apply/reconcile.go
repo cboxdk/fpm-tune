@@ -82,11 +82,38 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 
 	log.Warn("A previous run did not finish", "phase", txn.Phase, "file", txn.Path)
 
-	if !txn.landed() {
+	if !txn.landed() && txn.Phase == PhaseWritten {
 		// The rename never happened, so the file is untouched and there is
 		// nothing to undo. One atomic write is what makes this a clean answer;
 		// the per-pool layout had to guess which of N files were ours.
 		log.Info("The change never reached disk; nothing to undo")
+		discard(txn, opts.BackupDir, log)
+
+		return true, nil
+	}
+
+	if !txn.landed() {
+		// Signalled, and what is on disk is not what was written. That is not
+		// "nothing happened": the master may well have adopted the change and
+		// something else — an operator, a config-management run — has edited the
+		// file since without reloading. Discarding here threw away the only
+		// record saying a master might be running on a configuration nobody can
+		// see any more.
+		//
+		// The file on disk is what the next reload will adopt, so the question
+		// worth asking is whether php-fpm accepts it. If it does, the record has
+		// done its job and the current file stands; if it does not, this is a
+		// broken host and the caller has to know.
+		log.Warn("A previous run signalled the master, and the file has been changed since",
+			"file", txn.Path)
+
+		if verr := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); verr != nil {
+			return false, fmt.Errorf("%w: a previous run signalled the master and the "+
+				"configuration has been edited since, and php-fpm will not accept what is "+
+				"there now (%s): %w", ErrUnreconciled, txn.Path, verr)
+		}
+
+		log.Info("What is on disk now is valid; adopting it and closing the record")
 		discard(txn, opts.BackupDir, log)
 
 		return true, nil

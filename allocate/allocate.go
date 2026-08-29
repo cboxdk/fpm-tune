@@ -330,7 +330,13 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 		if cpuCap > 0 && wants[i] > cpuCap {
 			wants[i] = cpuCap
 		}
-		if cpuCap > 0 && floors[i] > cpuCap {
+		// The CPU ceiling is a bound on what to PROPOSE, and an unwritable pool
+		// is not being proposed anything. Its floor is a reservation for workers
+		// that are already running: capping it hands the difference to
+		// neighbours who are written and do fork it, while the unwritable pool
+		// keeps every one of its 200. Measured on a two-core host, that is
+		// 6.4GiB the plan believes is free.
+		if cpuCap > 0 && floors[i] > cpuCap && !p.Unknown {
 			floors[i] = cpuCap
 		}
 	}

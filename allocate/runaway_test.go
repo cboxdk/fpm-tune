@@ -133,3 +133,51 @@ func TestTheQueueingPoolIsServedBeforeTheHungryOne(t *testing.T) {
 			got.MaxChildren, got.Want, byName["cheap"].MaxChildren)
 	}
 }
+
+// TestTheCPUCeilingDoesNotCutAnUnwritableReserve.
+//
+// The CPU ceiling bounds what to PROPOSE — a pool with more workers than cores
+// can usefully serve is a pool queueing on the scheduler instead of on the
+// socket. An unwritable pool is not being proposed anything: its floor is a
+// reservation for workers that are already running, and nothing this tool does
+// will change how many there are.
+//
+// Capping it hands the difference to neighbours who ARE written and do fork it,
+// while the unwritable pool keeps every one of its workers. On a two-core host
+// with a pool remembered at 200 workers of 64MiB, that is 6.4GiB the plan
+// believes is free.
+func TestTheCPUCeilingDoesNotCutAnUnwritableReserve(t *testing.T) {
+	opts := Options{}.Defaults()
+
+	plan, err := Compute(Budget{TotalBytes: 32 * 1024 * mb, CPUs: 2}, []Pool{
+		{
+			Name: "legacy", WorkerBytes: 64 * mb,
+			Floor: 200, CurrentMaxChildren: 200, Unknown: true,
+		},
+		{
+			Name: "neighbour", WorkerBytes: 64 * mb,
+			Floor: 4, CurrentMaxChildren: 4, ObservedPeak: 40,
+			Measured: true, Reducible: true,
+		},
+	}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pp := range plan.Pools {
+		if pp.Name != "legacy" {
+			continue
+		}
+		if pp.MaxChildren < 200 {
+			t.Errorf("a pool that cannot be written was reserved %d of the 200 workers it "+
+				"is running, because a two-core host caps proposals at %d. Nothing will "+
+				"be written for it, so those workers stay — and the %s difference has "+
+				"been offered to a pool that will fork it",
+				pp.MaxChildren, opts.MaxWorkersPerCPU*2,
+				humanBytes(int64(200-pp.MaxChildren)*64*mb))
+		}
+
+		return
+	}
+	t.Fatal("the unwritable pool is missing from the plan")
+}

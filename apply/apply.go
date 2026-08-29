@@ -1098,20 +1098,43 @@ func writeAtomic(path string, content []byte) error {
 	return syncDir(filepath.Dir(path))
 }
 
+// writeAtomicDurable is writeAtomic with a strict directory sync.
+//
+// Used for the recovery record, where the whole value of the write is that the
+// next start can read it. Losing the pool file's directory entry costs a
+// configuration; losing the RECORD's costs the ability to tell what happened to
+// one, which is the thing recovery decides on.
+func writeAtomicDurable(path string, content []byte) error {
+	if err := writeAtomic(path, content); err != nil {
+		return err
+	}
+
+	return syncDirStrict(filepath.Dir(path))
+}
+
 // syncDir flushes a directory's own entries.
 //
 // Best effort on the error: a filesystem that will not open its own directory
 // for reading is unusual, and failing the write for it would be worse than
 // proceeding with a rename that is already durable in every ordinary case.
 func syncDir(dir string) error {
+	if err := syncDirStrict(dir); err != nil {
+		return nil //nolint:nilerr // see above
+	}
+
+	return nil
+}
+
+// syncDirStrict reports what syncDir swallows.
+func syncDirStrict(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return nil //nolint:nilerr // see above
+		return fmt.Errorf("cannot open %s to flush it: %w", dir, err)
 	}
 	defer func() { _ = d.Close() }()
 
 	if err := d.Sync(); err != nil {
-		return nil //nolint:nilerr // see above
+		return fmt.Errorf("cannot flush %s: %w", dir, err)
 	}
 
 	return nil
@@ -1300,17 +1323,26 @@ func overrideSet(
 
 			continue
 		}
-		if pp.Unknown {
-			continue
-		}
-
 		// Already ours and not changing now: it keeps exactly the settings it
 		// already has, read back from the file rather than reconstructed.
+		//
+		// Checked BEFORE the unknown skip, and the order is the whole point.
+		// Unknown means "do not change this pool"; it used to mean "delete the
+		// ceiling this tool already set for it". A pool whose scrape failed
+		// while a NEIGHBOUR was being resized had its section dropped from the
+		// rewritten file — so the reload returned it to whatever its own config
+		// says, which is the number this tool was lowering it from. The plan had
+		// reserved it at six workers and the host got fifty, none of them
+		// budgeted.
 		if held, ok := owned[pp.Name]; ok {
 			held.Name = pp.Name
 			held.Reason = "unchanged"
 			out = append(out, held)
 
+			continue
+		}
+
+		if pp.Unknown {
 			continue
 		}
 

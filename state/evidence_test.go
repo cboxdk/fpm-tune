@@ -2,6 +2,8 @@ package state
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -427,5 +429,90 @@ func TestTheMaturityGateStillHoldsAtFirst(t *testing.T) {
 		t.Errorf("a pool five scrapes old was sized at %dMiB from workers that have "+
 			"served two requests; those workers have not loaded the application yet",
 			got/mb)
+	}
+}
+
+// TestStateWrittenBeforeTheCadenceWasRecordedIsSafeOnItsFirstScrape.
+//
+// The cadence bound is what stops a hole in the observations buying a full
+// decay step. State written by the version that shipped before it has no
+// cadence — so the very first scrape after the upgrade that fixed the problem
+// is a pool with no cadence and hours of elapsed time, which is the uncapped
+// step in its original form.
+//
+// The upgrade is itself the gap, which makes this the likeliest moment for it.
+func TestStateWrittenBeforeTheCadenceWasRecordedIsSafeOnItsFirstScrape(t *testing.T) {
+	opts := Options{}.Defaults()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	// Round-12 shape: a pool learned at thirty-second scrapes over two hours,
+	// with no typical_interval_seconds field at all.
+	night := time.Date(2026, 3, 1, 2, 0, 0, 0, time.UTC)
+	legacy := `{"version":1,"pools":{"shop":{"pool":"shop","typical_peak_bytes":314572800,` +
+		`"last_peak_bytes":314572800,"high_water_bytes":314572800,"samples":240,` +
+		`"busy_samples":240,"last_accepted":100000,` +
+		`"first_seen":"` + night.Add(-2*time.Hour).Format(time.RFC3339) + `",` +
+		`"last_updated":"` + night.Format(time.RFC3339) + `",` +
+		`"first_busy_at":"` + night.Add(-2*time.Hour).Format(time.RFC3339) + `",` +
+		`"last_busy_at":"` + night.Format(time.RFC3339) + `"}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := s.Pools["shop"].SizingBytes()
+
+	// Six hours later — the upgrade — php-fpm has kept serving throughout and
+	// the surviving workers have gone quiet.
+	s.Learn(Observation{Pool: "shop", At: night.Add(6 * time.Hour), ActiveNow: 2,
+		Accepted: 100000 + 6*3600*6,
+		Workers: []WorkerSample{
+			{RSSBytes: 60 * mb, Requests: 500}, {RSSBytes: 58 * mb, Requests: 500},
+		}}, opts)
+
+	got := s.Pools["shop"].SizingBytes()
+	if got < before*9/10 {
+		t.Errorf("the first scrape after the upgrade took the estimate from %dMiB to "+
+			"%dMiB; the state carried no cadence, so the six hours nobody was watching "+
+			"were counted in full — which is the fault the cadence was added to fix, on "+
+			"the one run where it matters most", before/mb, got/mb)
+	}
+}
+
+// TestTheRecycledWaiverIsEarnedByRecyclingNotByIdling.
+//
+// The waiver reads a pool's immature workers once it has proved it cannot
+// produce a mature one. Counting total samples let an ondemand pool sitting
+// visible-but-empty for twenty scrapes earn it without having been seen to
+// recycle anything — and its first burst of four one-request workers at 80MiB
+// was then taken as the pool's cost, against a 200MiB truth.
+func TestTheRecycledWaiverIsEarnedByRecyclingNotByIdling(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	base := time.Now().Add(-time.Hour)
+
+	// Visible and empty: no workers at all.
+	for i := 0; i < 25; i++ {
+		s.Learn(Observation{Pool: "ondemand", At: base.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 0, Accepted: 0,
+		}, opts)
+	}
+
+	// First traffic: four workers, none of them warm yet.
+	s.Learn(Observation{Pool: "ondemand", At: base.Add(13 * time.Minute),
+		ActiveNow: 4, Accepted: 400,
+		Workers: []WorkerSample{
+			{RSSBytes: 80 * mb, Requests: 1}, {RSSBytes: 80 * mb, Requests: 2},
+			{RSSBytes: 78 * mb, Requests: 3}, {RSSBytes: 81 * mb, Requests: 1},
+		}}, opts)
+
+	if got := s.Pools["ondemand"].SizingBytes(); got > 0 {
+		t.Errorf("a pool that had been idle, not recycling, was sized at %dMiB from four "+
+			"workers that have served one request each; they have not loaded the "+
+			"application yet, and its warm cost is more than twice that", got/mb)
 	}
 }

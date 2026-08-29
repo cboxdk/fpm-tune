@@ -149,6 +149,12 @@ type PoolState struct {
 	// week of learning.
 	MissedRounds int `json:"missed_rounds,omitempty"`
 
+	// ImmatureRounds counts consecutive rounds in which this pool had workers
+	// and none of them had served enough requests to count. It is the evidence
+	// for waiving the maturity gate, and it is deliberately not the sample
+	// count: an idle pool teaches nothing about how fast its workers recycle.
+	ImmatureRounds int `json:"immature_rounds,omitempty"`
+
 	// PeakWorkers is the most workers this pool has had busy at once, as
 	// remembered by us rather than by PHP-FPM.
 	//
@@ -395,7 +401,31 @@ func Load(path string) (*State, error) {
 	}
 	s.Version = formatVersion
 
+	for _, ps := range s.Pools {
+		ps.inferCadence()
+	}
+
 	return &s, nil
+}
+
+// inferCadence fills in the observation cadence for state written before it was
+// recorded.
+//
+// Without it, the first scrape after an upgrade is a pool with no cadence and
+// hours of elapsed time, which is exactly the uncapped step the cadence exists
+// to prevent: 300MiB a worker to 180MiB on the first reading after the deploy
+// that shipped the fix. The average interval over the pool's whole life is a
+// good enough starting point, and one real scrape replaces it.
+func (ps *PoolState) inferCadence() {
+	if ps.TypicalIntervalSeconds > 0 || ps.Samples < 2 {
+		return
+	}
+	if ps.FirstSeen.IsZero() || !ps.LastUpdated.After(ps.FirstSeen) {
+		return
+	}
+
+	span := ps.LastUpdated.Sub(ps.FirstSeen).Seconds()
+	ps.TypicalIntervalSeconds = span / float64(ps.Samples-1)
 }
 
 // Save writes the store atomically.
@@ -571,8 +601,20 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	//
 	// Waived only after a long stretch of learning nothing at all, so an
 	// ordinary pool's first few scrapes are still held to the real gate.
+	// Counted on rounds where the pool HAD workers and none of them matured,
+	// which is what "recycled before they warm up" looks like. Total samples
+	// counts idle rounds too, and an ondemand pool sitting visible-but-empty for
+	// twenty scrapes earned the waiver without ever having been seen to recycle
+	// anything — so the first burst of four one-request workers at 80MiB was
+	// taken as the pool's cost against a 200MiB truth.
+	if mature == 0 && len(obs.Workers) > 0 {
+		ps.ImmatureRounds++
+	} else if mature > 0 {
+		ps.ImmatureRounds = 0
+	}
+
 	recycled := mature == 0 && ps.TypicalPeakBytes == 0 &&
-		ps.Samples >= opts.SamplesBeforeMaturityIsWaived
+		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived
 
 	if mature < opts.MinMatureWorkers && !sole && !recycled {
 		return false

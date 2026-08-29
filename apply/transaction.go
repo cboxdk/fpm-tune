@@ -84,7 +84,10 @@ func writeTransaction(backupDir string, txn transaction) error {
 
 	// Atomic, and fsynced by writeAtomic: a torn record is worse than none,
 	// because recovery would act on half of it.
-	return writeAtomic(transactionPath(backupDir, txn.DropInDir), append(data, '\n'))
+	// Durable, not best effort. The record's entire value is that the next start
+	// can read it: a rename this process believes happened and the kernel has
+	// not committed leaves recovery deciding on a record that is not there.
+	return writeAtomicDurable(transactionPath(backupDir, txn.DropInDir), append(data, '\n'))
 }
 
 // readTransaction distinguishes three states, and the distinction is the point.

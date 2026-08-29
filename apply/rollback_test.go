@@ -421,3 +421,167 @@ func TestARecordThatCannotBeWrittenStopsTheReload(t *testing.T) {
 		t.Errorf("the previous configuration was not put back:\n%s", body)
 	}
 }
+
+// TestAnUnreachablePoolKeepsTheCeilingWeAlreadySetForIt.
+//
+// Unknown means "do not change this pool". It used to mean "delete the ceiling
+// this tool already set for it": overrideSet skipped unknown pools BEFORE
+// checking whether they were in the file, so a pool whose scrape failed while a
+// neighbour was being resized had its section dropped from the rewritten file.
+//
+// The reload then returns it to whatever its own config says — which is the
+// number this tool was lowering it from. The plan reserved six workers and the
+// host got fifty, none of them budgeted.
+func TestAnUnreachablePoolKeepsTheCeilingWeAlreadySetForIt(t *testing.T) {
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+
+	// A previous run set both.
+	if err := os.WriteFile(DropInPath(dir), Render([]allocate.PoolPlan{
+		{Name: "shop", MaxChildren: 6},
+		{Name: "api", MaxChildren: 8},
+	}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := state.New()
+	st.RecordApplied("shop", 6, time.Now().Add(-time.Hour))
+	st.RecordApplied("api", 8, time.Now().Add(-time.Hour))
+
+	// This round shop could not be read, and api is being resized.
+	_, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{
+			{Name: "shop", MaxChildren: 6, Current: 6, Unknown: true},
+			{Name: "api", MaxChildren: 12, Current: 8},
+		},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: configPath,
+		DropInDir: dir, NoMasterExpected: true,
+	}, st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	body, rerr := os.ReadFile(DropInPath(dir))
+	if rerr != nil {
+		t.Fatalf("nothing was written: %v", rerr)
+	}
+	if !strings.Contains(string(body), "[shop]") {
+		t.Errorf("the unreachable pool's existing override was dropped while a neighbour "+
+			"was resized; the next reload returns it to its own config and those workers "+
+			"were never budgeted:\n%s", body)
+	}
+	if !strings.Contains(string(body), "pm.max_children = 6") {
+		t.Errorf("the unreachable pool's ceiling was changed rather than kept:\n%s", body)
+	}
+}
+
+// TestASignalledChangeEditedSinceIsNotTreatedAsNeverHavingHappened.
+//
+// A record whose hash does not match the file on disk used to be read as "the
+// rename never happened, nothing to undo" — for both phases. After a SIGNAL
+// that is the wrong reading. The master may well have adopted the change, and a
+// mismatch then means something else edited the file afterwards without
+// reloading: an operator, a config-management run, another tool.
+//
+// Discarding there threw away the only record saying a master might be running
+// on a configuration nobody can see any more. What is on disk is what the next
+// reload adopts, so the question worth asking is whether php-fpm accepts it.
+func TestASignalledChangeEditedSinceIsNotTreatedAsNeverHavingHappened(t *testing.T) {
+	stage := func(t *testing.T, binary string) (string, error) {
+		t.Helper()
+
+		dir := t.TempDir()
+		backupDir := filepath.Join(t.TempDir(), "backup")
+		configPath := masterConfigAt(t, dir)
+
+		if err := os.WriteFile(DropInPath(dir),
+			Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 10}}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		master := Master{Binary: binary, ConfigPath: configPath, DropInDir: dir}
+		crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+		b := backup{
+			path: DropInPath(dir), existed: true,
+			saved: filepath.Join(backupDir, backupName(dir, DropInPath(dir))),
+		}
+		if err := markSignalled(backupDir, master, b,
+			Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 40}})); err != nil {
+			t.Fatal(err)
+		}
+
+		// Someone edits the file afterwards and does not reload. The hash in the
+		// record now matches nothing.
+		if err := os.WriteFile(DropInPath(dir),
+			Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 12}}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// A master is running, so this is not the provisioning path.
+		master.PID = fakeMaster(t, configPath)
+
+		_, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+
+		body, rerr := os.ReadFile(DropInPath(dir))
+		if rerr != nil {
+			t.Fatalf("the file is gone: %v", rerr)
+		}
+
+		return string(body), err
+	}
+
+	t.Run("what is there now is valid", func(t *testing.T) {
+		body, err := stage(t, trueBin(t))
+		if err != nil {
+			t.Errorf("Reconcile: %v", err)
+		}
+		if !strings.Contains(body, "pm.max_children = 12") {
+			t.Errorf("the edit was overwritten by a backup taken before it:\n%s", body)
+		}
+	})
+
+	t.Run("what is there now is rejected", func(t *testing.T) {
+		_, err := stage(t, alwaysRejects(t))
+		if !errors.Is(err, ErrUnreconciled) {
+			t.Errorf("err = %v, want ErrUnreconciled: the master was signalled, the file "+
+				"has been changed since, and php-fpm will not accept what is there — the "+
+				"one state where saying nothing is worst", err)
+		}
+	})
+}
+
+// TestTheRecordIsDurableOrTheReloadDoesNotHappen.
+//
+// The record's whole value is that the NEXT start can read it. A rename this
+// process believes happened and the kernel has not committed leaves recovery
+// deciding on a record that is not there — so the directory flush is strict for
+// the record, where it is best-effort for everything else.
+//
+// Staged with a directory that can be written but not read, which is what a
+// failing directory sync looks like from here.
+func TestTheRecordIsDurableOrTheReloadDoesNotHappen(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory without read permission")
+	}
+
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Write and traverse, but not read: the temp file lands and the rename
+	// succeeds, and flushing the directory entry cannot be confirmed.
+	if err := os.Chmod(backupDir, 0o333); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(backupDir, 0o755) })
+
+	err := writeTransaction(backupDir, transaction{
+		DropInDir: "/etc/php-fpm.d", Path: "/etc/php-fpm.d/zz-fpm-tune.conf",
+		Phase: PhaseSignalled, Wrote: "abc",
+	})
+	if err == nil {
+		t.Error("a record whose directory entry could not be flushed was reported as " +
+			"written; the reload then goes ahead on a promise the kernel has not made")
+	}
+}
