@@ -111,5 +111,28 @@ func resourceLockDir() string {
 		}
 	}
 
-	return filepath.Join(os.TempDir(), "fpm-tune")
+	// A fallback for development machines, where /run does not exist. The name
+	// is deliberately specific: /tmp is shared, and something else being there
+	// under a plausible name is not hypothetical — a stray binary called
+	// /tmp/fpm-tune broke this while it was being written.
+	locks := filepath.Join("/tmp", "fpm-tune-locks")
+	if err := os.MkdirAll(locks, 0o700); err == nil {
+		return locks
+	}
+
+	// Returned even though it could not be created, so Acquire fails and the
+	// caller refuses to write.
+	//
+	// A FIXED path, not os.TempDir().
+	//
+	// os.TempDir() reads $TMPDIR, which every process chooses for itself — so
+	// two runs of this tool against the same pool directory took two different
+	// lock files and both proceeded. Verified: an apply under a different
+	// TMPDIR ran concurrently with a `serve --apply` daemon on the same
+	// directory, which is precisely what this lock exists to stop.
+	//
+	// /run is where this belongs and is where it lands on any Linux host running
+	// as root. The fallback is for development machines, where /run does not
+	// exist; it has to be somewhere both processes agree on without being told.
+	return locks
 }

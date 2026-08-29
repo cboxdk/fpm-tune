@@ -53,7 +53,12 @@ func TestAcquireDoesNotBlock(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrHeld) && err == nil {
+		// `&& err == nil` was here, which made the whole condition false
+		// whenever err was non-nil — so a contended acquire failing with the
+		// WRONG error, or for the wrong reason entirely, passed silently. The
+		// type is the assertion: callers branch on ErrHeld to print "another
+		// fpm-tune is already running" rather than a filesystem error.
+		if !errors.Is(err, ErrHeld) {
 			t.Errorf("a contended acquire returned %v, want ErrHeld", err)
 		}
 	case <-t.Context().Done():
@@ -92,4 +97,27 @@ func TestLockChildHelper(t *testing.T) {
 		t.Fatalf("held: %v", err)
 	}
 	release()
+}
+
+// TestTheResourceLockDoesNotFollowTMPDIR.
+//
+// The lock that stops two processes writing the same pool files has to be at a
+// path both of them compute the same way. os.TempDir() reads $TMPDIR, which
+// every process chooses for itself — so two runs against the same pool
+// directory took two different lock files and both proceeded. Verified against
+// the real binary: an apply under a different TMPDIR ran concurrently with a
+// `serve --apply` daemon on the same directory.
+func TestTheResourceLockDoesNotFollowTMPDIR(t *testing.T) {
+	const dropInDir = "/etc/php-fpm.d"
+
+	t.Setenv("TMPDIR", t.TempDir())
+	first := ResourcePath(dropInDir)
+
+	t.Setenv("TMPDIR", t.TempDir())
+	second := ResourcePath(dropInDir)
+
+	if first != second {
+		t.Errorf("the same pool directory locks at %q under one TMPDIR and %q under "+
+			"another; either process can take its own and both will write", first, second)
+	}
 }

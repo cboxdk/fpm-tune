@@ -210,8 +210,21 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 				"tool's file would help: %w", ErrUnreconciled, ctxErr)
 		}
 
-		log.Error("The configuration is rejected, and it is not this tool's file that " +
-			"is doing it; leaving it alone")
+		// Two things reach here and they need different words. php-fpm may have
+		// rejected the configuration for a reason this file is not the whole
+		// cause of — removing it does not FIX it, which is not the same as it
+		// not being involved — or php-fpm may not have run at all, because the
+		// binary recorded for it no longer exists after an upgrade.
+		if !binaryRuns(master.Binary) {
+			log.Error("The configuration cannot be checked: the php-fpm binary recorded "+
+				"for this master is not there. It is not safe to remove anything on that "+
+				"basis.", "binary", master.Binary)
+
+			return false, nil
+		}
+
+		log.Error("The configuration is rejected, and removing this tool's file does not " +
+			"fix it; leaving it alone. Something else in the configuration is broken too.")
 
 		return false, nil
 	}
@@ -239,6 +252,20 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 	}
 
 	return true, nil
+}
+
+// binaryRuns reports whether the recorded php-fpm can be executed at all.
+//
+// A validation that fails because the binary is missing says nothing about the
+// configuration, and this package removes files on the strength of validations.
+// After a PHP upgrade plus a stale state file, that is a real distinction.
+func binaryRuns(binary string) bool {
+	if binary == "" {
+		return false
+	}
+	info, err := os.Stat(binary)
+
+	return err == nil && !info.IsDir()
 }
 
 // removeOursIfThatFixesIt takes this tool's file out when doing so makes the
