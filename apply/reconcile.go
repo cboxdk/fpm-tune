@@ -70,6 +70,15 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		// precisely so this is the harmless order — and nothing will read them.
 		sweepOrphanBackups(opts.BackupDir, master.DropInDir, log)
 
+		// The repair needs a binary and a config path to ask php-fpm anything,
+		// and the caller has neither when discovery failed and the state file is
+		// missing — which is exactly the host this repair exists for, because
+		// php-fpm being DOWN is why discovery failed. The sidecar written beside
+		// the backups on every successful apply is the answer: it survives a
+		// lost state file, and it is written by the same code that knows the
+		// master is real.
+		master = master.filledFrom(rememberedMaster(opts.BackupDir))
+
 		return repairIfOursIsBroken(ctx, master, opts, log)
 	}
 
@@ -232,6 +241,48 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 	return true, nil
 }
 
+// removeOursIfThatFixesIt takes this tool's file out when doing so makes the
+// configuration valid, and puts it back when it does not.
+//
+// The same trade the repair path makes, reached from the other direction: a
+// rejected leftover with no copy to restore. Rehearsed first, so the file is
+// never absent from the pool directory on the strength of a guess, and checked
+// again in place afterwards, because the sandbox is a faithful copy and not the
+// thing itself.
+func removeOursIfThatFixesIt(ctx context.Context, master Master, path string, log *slog.Logger) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	if !isOurs(body) {
+		return fmt.Errorf("%s was not written by this tool", path)
+	}
+
+	if err := validateReplacement(ctx, master, path, nil); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+
+		return fmt.Errorf("removing it would not make the configuration valid: %w", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("cannot remove %s: %w", path, err)
+	}
+	_ = syncDir(filepath.Dir(path))
+
+	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
+		_ = writeAtomic(path, body)
+		if log != nil {
+			log.Error("Removing this tool's file did not help after all; put back", "path", path)
+		}
+
+		return fmt.Errorf("removing it did not make the configuration valid: %w", err)
+	}
+
+	return nil
+}
+
 // PendingRepair reports whether a previous run left something unfinished,
 // without touching anything.
 //
@@ -284,8 +335,33 @@ func undoLeftover(
 
 	previous, err := previousContent(txn, opts.BackupDir)
 	if err != nil {
-		return fmt.Errorf("%w: it is rejected and the previous configuration is gone: %w",
-			ErrUnreconciled, err)
+		// No copy to put back — the backup directory was cleaned by a tmpfiles
+		// rule, or an operator tidying /var/lib/fpm-tune.
+		//
+		// This used to be the end of it, and it is the worst place to stop: the
+		// host is down BECAUSE of this tool's file, and the repair that would
+		// take it out and get php-fpm started runs only when there is no record
+		// at all. `apply` exited 1 before it could plan, `serve` published
+		// apply_blocked="unrepaired" and never applied again, and nothing but a
+		// person cleared it.
+		//
+		// Removing the file is the same trade the repair path already makes,
+		// and it is rehearsed the same way: a running master on the settings the
+		// operator configured beats a master that is not running.
+		log.Error("The configuration left on disk is rejected and there is no copy to put "+
+			"back; trying to remove this tool's file instead", "file", txn.Path, "error", err)
+
+		if rerr := removeOursIfThatFixesIt(ctx, master, txn.Path, log); rerr != nil {
+			return fmt.Errorf("%w: it is rejected, the previous configuration is gone, "+
+				"and removing this tool's file does not fix it either: %w",
+				ErrUnreconciled, rerr)
+		}
+
+		clearTransaction(opts.BackupDir, txn.DropInDir)
+		log.Warn("Removed this tool's file to get php-fpm startable again; the pools are " +
+			"back at what they are configured for until the next run")
+
+		return nil
 	}
 
 	if err := validateReplacement(ctx, master, txn.Path, previous); err != nil {

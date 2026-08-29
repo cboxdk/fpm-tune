@@ -389,8 +389,22 @@ func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 		t.Fatalf("changed = %v, want one pool", res.Changed())
 	}
 
-	if entries, err := os.ReadDir(backupDir); err == nil && len(entries) > 0 {
-		t.Errorf("%d backup(s) left behind after a successful apply", len(entries))
+	// Nothing transient left behind. The master sidecar is not transient: it
+	// records where php-fpm lives so recovery can ask it something on a host
+	// where discovery cannot — which is the host where php-fpm is down because
+	// of this tool's own file.
+	if entries, err := os.ReadDir(backupDir); err == nil {
+		for _, e := range entries {
+			if e.Name() == "master.json" {
+				continue
+			}
+			t.Errorf("%s was left behind after a successful apply", e.Name())
+		}
+	}
+
+	if ref := rememberedMaster(backupDir); ref.Binary == "" || ref.ConfigPath == "" {
+		t.Errorf("nothing records where php-fpm lives: %+v — and recovery on a host whose "+
+			"master will not start has no other way to find out", ref)
 	}
 	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the change was not recorded: %+v", ps)

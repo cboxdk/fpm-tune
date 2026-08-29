@@ -625,3 +625,118 @@ func TestRecoveryDoesNotUndoTheFirstApplyOnAHostWithNoMaster(t *testing.T) {
 			"own ceiling and nothing on this host is budgeted: %v", serr)
 	}
 }
+
+// TestARejectedLeftoverWithNoBackupIsStillRepaired.
+//
+// The dead end. A rejected leftover whose saved copy has gone — cleaned by a
+// tmpfiles rule, or an operator tidying /var/lib/fpm-tune — used to end the
+// story: the host is down BECAUSE of this tool's file, and the repair that
+// would take it out runs only when there is no record at all. `apply` exited
+// before it could plan, `serve` published apply_blocked and never applied
+// again, and nothing but a person cleared it.
+//
+// Removing the file is the same trade the repair path already makes, rehearsed
+// the same way: a running master on the settings the operator configured beats
+// a master that is not running.
+func TestARejectedLeftoverWithNoBackupIsStillRepaired(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	configPath := masterConfigAt(t, dir)
+
+	// Rejects while our file is present, accepts once it is gone: the shape of
+	// a pool that exists only as an override, which is what a removed site
+	// leaves behind.
+	master := Master{Binary: rejectsOurFile(t), ConfigPath: configPath, DropInDir: dir}
+
+	// A previous version has to EXIST, or "the previous configuration is gone"
+	// is not the state under test: with nothing there before, the ordinary undo
+	// simply removes the file and never reaches the dead end.
+	if err := os.WriteFile(DropInPath(dir),
+		Render([]allocate.PoolPlan{{Name: "shop", MaxChildren: 6}}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "gone", MaxChildren: 4})
+
+	// The saved copy is removed, which is the whole point of the case.
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".bak") {
+			if rerr := os.Remove(filepath.Join(backupDir, e.Name())); rerr != nil {
+				t.Fatal(rerr)
+			}
+		}
+	}
+
+	acted, rerr := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	if rerr != nil {
+		t.Fatalf("Reconcile: %v", rerr)
+	}
+	if !acted {
+		t.Error("Reconcile reported doing nothing while removing a file")
+	}
+
+	if _, serr := os.Stat(DropInPath(dir)); !os.IsNotExist(serr) {
+		t.Errorf("the rejected file is still there, so php-fpm still will not start "+
+			"and nothing will ever clear it: %v", serr)
+	}
+	if _, found, terr := readTransaction(backupDir, dir); found || terr != nil {
+		t.Errorf("the record was left behind (found=%v err=%v), so every future run "+
+			"reconciles it again", found, terr)
+	}
+}
+
+// TestTheRepairWorksWithNothingButTheBackupDirectory.
+//
+// The host this repair exists for is one where php-fpm will not start because
+// of this tool's own file. On that host discovery finds nothing — there is no
+// master to discover — so the caller has no binary and no config path, and
+// repairIfOursIsBroken returned immediately without doing anything. If the
+// state file was also missing or from an older version, nothing anywhere knew
+// where php-fpm lived and the repair silently no-opped.
+//
+// The sidecar written beside the backups on every successful apply closes that:
+// it is written by the code that has just proved the master is real, and it
+// survives the state file being deleted to reset the baselines.
+func TestTheRepairWorksWithNothingButTheBackupDirectory(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	configPath := masterConfigAt(t, dir)
+	binary := rejectsOurFile(t)
+
+	// A successful apply on a host where the tool's file is fine, which is what
+	// leaves the sidecar. trueBin accepts everything.
+	if _, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 6}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir,
+		NoMasterExpected: true,
+	}, state.New(), Options{BackupDir: backupDir}, nil); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	// Then a site is removed, php-fpm will no longer start, and nothing can be
+	// discovered. This is the Master the CLI builds in that situation: a
+	// directory and nothing else.
+	blind := Master{DropInDir: dir}
+
+	// The sidecar names a binary that accepts everything; point it at the one
+	// that rejects while our file is present, which is the removed-site shape.
+	rememberMaster(backupDir, Master{Binary: binary, ConfigPath: configPath, DropInDir: dir})
+
+	acted, err := Reconcile(context.Background(), blind, Options{BackupDir: backupDir}, nil)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !acted {
+		t.Fatal("the repair did nothing at all: with no binary and no config path it " +
+			"cannot ask php-fpm anything, so a host that is down because of this tool's " +
+			"file stays down and nothing but a person clears it")
+	}
+	if _, serr := os.Stat(DropInPath(dir)); !os.IsNotExist(serr) {
+		t.Errorf("this tool's file is still there: %v", serr)
+	}
+}

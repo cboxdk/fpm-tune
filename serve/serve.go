@@ -439,10 +439,20 @@ func (l *Loop) reconcile(ctx context.Context) {
 
 			return
 		}
-		if l.cfg.DropInDir == "" {
+		// The sidecar beside the backups, when no directory was named.
+		//
+		// Returning here made the promise above empty in exactly the case it is
+		// for: a daemon started with no --drop-in-dir on a host whose master
+		// will not start has nothing to discover, nothing remembered in a state
+		// file that may be missing, and so no directory to reconcile — which is
+		// the one thing standing between the host and being repaired.
+		master = apply.Master{DropInDir: l.cfg.DropInDir}
+		if master.DropInDir == "" {
+			master = apply.RememberedMaster(l.cfg.BackupDir)
+		}
+		if master.DropInDir == "" {
 			return
 		}
-		master = apply.Master{DropInDir: l.cfg.DropInDir}
 	}
 
 	// Re-keyed when the directory changes, and released when the work fails.

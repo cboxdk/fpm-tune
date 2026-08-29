@@ -408,6 +408,15 @@ func Apply(
 		return result, fmt.Errorf("%w: %w", ErrValidationFailed, err)
 	}
 
+	// Where php-fpm lives, kept beside the backups.
+	//
+	// Recovery needs it, and the moment it needs it most is the one where it
+	// cannot get it any other way: a master this tool's own file will not let
+	// start cannot be discovered, and the state file may be missing. Written
+	// here because this is the point at which the master has been validated
+	// against and is known to be real.
+	rememberMaster(opts.BackupDir, master)
+
 	// Anything that reached the pool directory counts as written, whether or not
 	// a pool changed size. Wrote was set only on the provisioning branch, so on
 	// a live host — the ordinary case — last_apply_timestamp_seconds never
