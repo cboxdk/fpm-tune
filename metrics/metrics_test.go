@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/budget"
@@ -82,24 +83,42 @@ func TestSaturationSeriesAreDistinct(t *testing.T) {
 // measured number from a guess, or the recommendation means nothing.
 func TestBaselineIsPublishedWithItsConfidence(t *testing.T) {
 	st := state.New()
+	now := time.Now()
 	st.Pools["shop"] = &state.PoolState{
 		Pool: "shop", TypicalPeakBytes: 90 * mb, HighWaterBytes: 140 * mb,
 		BusySamples: 30,
+		// Confidence is measured across the evidence, so a fixture without
+		// these has a span of zero and publishes 0 whatever the code does.
+		FirstBusyAt: now.Add(-time.Hour), LastBusyAt: now,
 	}
 
-	c := New()
-	c.Update(result(poolPlan("shop", 12, false)), st, state.Options{}, 1)
+	measured := poolPlan("shop", 12, false)
+	measured.Measured = true
 
-	for _, want := range []string{
+	c := New()
+	c.Update(result(measured), st, state.Options{}, 1)
+
+	// The VALUES, not just the names. exposes matches a name-and-labels prefix,
+	// so swapping typical_peak for high_water left every one of these passing —
+	// while the help text tells operators that typical_peak is the number sizing
+	// uses. A series under the wrong label is worse than a missing one: it is
+	// read, and believed.
+	for want, value := range map[string]string{
 		// Labels come out alphabetically, so estimate precedes pool.
-		`fpm_tune_pool_worker_rss_bytes{estimate="typical_peak",pool="shop"}`,
-		`fpm_tune_pool_worker_rss_bytes{estimate="high_water",pool="shop"}`,
-		`fpm_tune_pool_baseline_confidence{pool="shop"}`,
-		`fpm_tune_pool_measured{pool="shop"}`,
+		`fpm_tune_pool_worker_rss_bytes{estimate="typical_peak",pool="shop"}`: trimFloat(90 * mb),
+		`fpm_tune_pool_worker_rss_bytes{estimate="high_water",pool="shop"}`:   trimFloat(140 * mb),
+		`fpm_tune_pool_measured{pool="shop"}`:                                 "1",
 	} {
-		if !exposes(t, c, want) {
-			t.Errorf("%s is not published", want)
+		if !exposes(t, c, want+" "+value) {
+			t.Errorf("%s is not published as %s", want, value)
 		}
+	}
+
+	// Confidence is the one number here that is not a copy of a field, and the
+	// fixture has to have earned it: with no busy timestamps the span is zero
+	// and this is 0 however the calculation behaves.
+	if !exposes(t, c, `fpm_tune_pool_baseline_confidence{pool="shop"} 1`) {
+		t.Error("a pool with 30 busy samples across an hour is not published as trusted")
 	}
 }
 
@@ -114,9 +133,15 @@ func TestBudgetIsPublishedByState(t *testing.T) {
 	r.Plan.FreeBytes = 5120 * mb
 	c.Update(r, state.New(), state.Options{}, 1)
 
-	for _, st := range []string{"total", "reserved", "allocated", "free"} {
-		if !exposes(t, c, `fpm_tune_budget_bytes{state="`+st+`"}`) {
-			t.Errorf("budget state %q is not published", st)
+	// Values again, and here the label is the whole meaning: publishing
+	// AllocatedBytes under state="reserved" left the previous version green,
+	// and an operator graphing headroom would have been reading the wrong line.
+	for st, value := range map[string]int64{
+		"total": 8192 * mb, "reserved": 2048 * mb,
+		"allocated": 1024 * mb, "free": 5120 * mb,
+	} {
+		if !exposes(t, c, `fpm_tune_budget_bytes{state="`+st+`"} `+trimFloat(float64(value))) {
+			t.Errorf("budget state %q is not published as %d", st, value)
 		}
 	}
 }

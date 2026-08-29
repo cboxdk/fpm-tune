@@ -451,6 +451,13 @@ func TestUnsafePoolNamesAreRefused(t *testing.T) {
 		"a/b",
 		"..",
 		"",
+		// Now that the layout is ONE file, a control character matters more
+		// than a path separator does. Render writes the name into [%s], so a
+		// newline ends the section header and everything after it is read as
+		// directives in the file php-fpm actually loads.
+		"shop\nlisten = 0.0.0.0:9000",
+		"shop\rpm.max_children = 9999",
+		"a\x00b",
 	} {
 		_, err := Apply(context.Background(), allocate.Plan{
 			Pools: []allocate.PoolPlan{{Name: name, MaxChildren: 8}},

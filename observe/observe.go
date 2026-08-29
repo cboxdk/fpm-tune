@@ -102,6 +102,17 @@ func Discover(ctx context.Context, log *slog.Logger) ([]phpfpm.Target, error) {
 		return nil, fmt.Errorf("cannot discover PHP-FPM pools: %w", err)
 	}
 
+	// A cancelled context is reported even when the scan happened to complete.
+	//
+	// With nothing to fork — no master on the host — DiscoverContext returns an
+	// empty list and no error however the context is handled, and an empty list
+	// with a nil error is a different statement: it says this host runs no
+	// php-fpm, which is what the CLI tells the operator. Being interrupted is
+	// not knowing.
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("discovery was interrupted: %w", cerr)
+	}
+
 	targets := make([]phpfpm.Target, 0, len(found))
 	for _, d := range found {
 		targets = append(targets, phpfpm.TargetFromDiscovered(d))

@@ -329,7 +329,11 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	// floors is where the allocation STARTS, not where it ends: skipping the
 	// distribution left budget unspent while pools sat below the floor it had
 	// just been decided they could not have.
-	remaining = allocateDemand(pools, wants, granted, remaining)
+	// The return value was consumed by canStillGive, which was unreachable and
+	// is gone. What is left of the budget is FreeBytes, computed below from what
+	// the plan actually commits, which is the same number arrived at from the
+	// side that cannot drift.
+	_ = allocateDemand(pools, wants, granted, remaining)
 
 	var allocated int64
 	unmet := false
@@ -370,15 +374,32 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			ErrCannotFit, humanBytes(allocated), humanBytes(allocatable))
 	}
 
-	// Unmet demand is only a capacity problem when there is nothing left to give
-	// it. With budget still free the next run rebalances; without, no
-	// configuration change helps.
-	plan.CapacityExhausted = unmet && !canStillGive(pools, granted, wants, remaining)
+	// Unmet demand in a FINISHED plan already means it could not be met.
+	//
+	// This used to be qualified by canStillGive, on the reading that a pool
+	// could be short now and topped up on the next run. Both of its tests are
+	// unreachable. The first is the exact negation of the demand pass's own
+	// candidate filter, and that pass only returns when no candidate is left; the
+	// second needs a pool granted MORE than it wants, and wants are clamped at or
+	// above floors on every path. Measured across 277,684 generated plans: of
+	// 909,297 pool-plans with unmet demand, not one had this come out false.
+	//
+	// So the two signals carry the same news at different granularity — which
+	// pool, and whether any — and saying so is better than a qualifier that
+	// reads like a second opinion and is not one.
+	plan.CapacityExhausted = unmet
 
 	if plan.CapacityExhausted {
-		plan.Warnings = append(plan.Warnings,
-			"at least one pool is short of workers and the memory budget is fully committed: "+
-				"no configuration change will help, the host needs more memory or fewer pools")
+		// The free budget belongs in the message. "Fully committed" was printed
+		// with 30% of the budget free, because free budget that is smaller than
+		// ONE worker of the pool that needs one buys nothing — true, and not
+		// what those words say to someone reading a log at two in the morning.
+		short := cheapestUnmet(pools, granted, wants)
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+			"at least one pool is short of workers, and the %s left in the budget is less "+
+				"than the %s one more worker would cost it: no rearrangement helps, the host "+
+				"needs more memory or fewer pools",
+			humanBytes(plan.FreeBytes), humanBytes(short)))
 	}
 
 	return plan, nil
@@ -651,23 +672,21 @@ func allocateDemand(pools []Pool, wants, granted []int, remaining int64) int64 {
 	}
 }
 
-// canStillGive reports whether any pool short of workers could be given one from
-// what is left, or from a pool holding more than it wants.
-func canStillGive(pools []Pool, granted, wants []int, remaining int64) bool {
+// cheapestUnmet is what one more worker would cost the least expensive pool
+// that wanted one and did not get it — the number that says how far off the
+// budget is, rather than merely that it is.
+func cheapestUnmet(pools []Pool, granted, wants []int) int64 {
+	var cheapest int64
 	for i, p := range pools {
-		if granted[i] < wants[i] && p.WorkerBytes <= remaining {
-			return true
+		if granted[i] >= wants[i] {
+			continue
+		}
+		if cheapest == 0 || p.WorkerBytes < cheapest {
+			cheapest = p.WorkerBytes
 		}
 	}
 
-	// Headroom held by a pool that does not want it can move on the next run.
-	for i := range pools {
-		if granted[i] > wants[i] {
-			return true
-		}
-	}
-
-	return false
+	return cheapest
 }
 
 // cpuCeiling is the most workers one pool may be given regardless of memory.

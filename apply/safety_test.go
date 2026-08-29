@@ -527,6 +527,14 @@ func (s stub) signalsSeen(t *testing.T) int {
 func fakeMasterWithLog(t *testing.T, configPath string) stub {
 	t.Helper()
 
+	return stubMaster(t, configPath, false)
+}
+
+// stubMaster with dies set is a master that exits on SIGUSR2, the way php-fpm
+// does when the configuration it re-reads will not initialise.
+func stubMaster(t *testing.T, configPath string, dies bool) stub {
+	t.Helper()
+
 	binDir := t.TempDir()
 	binary := filepath.Join(binDir, "php-fpm")
 
@@ -547,12 +555,27 @@ func fakeMasterWithLog(t *testing.T, configPath string) stub {
 		"php-fpm: master process ("+configPath+")")
 	cmd.Env = append(os.Environ(), "FPM_TUNE_STUB=1",
 		"FPM_TUNE_STUB_READY="+ready, "FPM_TUNE_STUB_SIGNALS="+signals)
+	if dies {
+		cmd.Env = append(cmd.Env, "FPM_TUNE_STUB_DIE_ON_SIGNAL=1")
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Reaped in the background rather than at cleanup.
+	//
+	// Without this the stub becomes a zombie the moment it exits, and a zombie
+	// answers signal 0 — so a master that died during its reload looked alive
+	// for the whole settle window and the rollback under test never ran. On a
+	// real host php-fpm's parent is systemd, which reaps at once; the test has
+	// to do the same or it is not standing in for the same thing.
+	waited := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(waited)
+	}()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-waited
 	})
 
 	// Waited for AFTER the handler is installed. The process exists the instant
@@ -587,11 +610,19 @@ func TestStubMasterHelper(t *testing.T) {
 	}
 
 	// Survives the reload, as a healthy master does, and leaves a mark so a test
-	// can tell a reload that happened from one that did not.
+	// can tell a reload that happened from one that did not — unless it is
+	// standing in for a master that does NOT come back, which is the case the
+	// rollback exists for and the one no test could reach.
 	log := os.Getenv("FPM_TUNE_STUB_SIGNALS")
+	die := os.Getenv("FPM_TUNE_STUB_DIE_ON_SIGNAL") == "1"
 	for {
 		select {
 		case <-got:
+			if die {
+				// php-fpm re-reads its configuration on SIGUSR2 and exits if it
+				// cannot initialise. This is that master.
+				os.Exit(78)
+			}
 			if log == "" {
 				continue
 			}
@@ -617,16 +648,25 @@ func TestStubMasterHelper(t *testing.T) {
 func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 	dir := t.TempDir()
 	st := state.New()
+	master, stubbed := newMasterWithStub(t, dir)
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12, Current: 4}},
-	}, newMaster(t, dir), st, Options{
+	}, master, st, Options{
 		BackupDir: filepath.Join(t.TempDir(), "backup"), SettleTime: 200 * time.Millisecond,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
+	// The master, not the Result. res.Reloaded is Apply's own bookkeeping, and a
+	// reload path that does nothing at all sets it just the same: with this
+	// assertion missing, deleting the ReloadAndWait call left every test in the
+	// package passing, including this one.
+	if n := stubbed.signalsSeen(t); n != 1 {
+		t.Errorf("the master received %d SIGUSR2s; the configuration was written and "+
+			"php-fpm was never told to read it", n)
+	}
 	if !res.Reloaded {
 		t.Error("the master was not reloaded")
 	}
@@ -797,17 +837,31 @@ func TestAGrowthWaitsRatherThanForceAReloadTooSoon(t *testing.T) {
 }
 
 // newMaster is a Master backed by a stub process that will accept the reload.
+//
+// It returns the stub as well as the Master. It used to discard it, and the
+// consequence was that the package's only end-to-end reload test could not tell
+// a master that was signalled from one that was merely still running — so
+// deleting the ReloadAndWait call outright left the whole suite green.
 func newMaster(t *testing.T, dropInDir string) Master {
 	t.Helper()
 
+	m, _ := newMasterWithStub(t, dropInDir)
+
+	return m
+}
+
+func newMasterWithStub(t *testing.T, dropInDir string) (Master, stub) {
+	t.Helper()
+
 	configPath := masterConfigAt(t, dropInDir)
+	st := fakeMasterWithLog(t, configPath)
 
 	return Master{
 		Binary:     trueBin(t),
 		ConfigPath: configPath,
 		DropInDir:  dropInDir,
-		PID:        fakeMaster(t, configPath),
-	}
+		PID:        st.pid,
+	}, st
 }
 
 // TestAWrongDropInDirectoryIsRefused.
@@ -1222,9 +1276,19 @@ func TestItLeavesAlonePhpFpmBreakageThatIsNotItsDoing(t *testing.T) {
 	configPath := masterConfigAt(t, dir)
 	ours := DropInPath(dir)
 
-	body := "[shop]\npm.max_children = 8\n"
+	// Written by Render, so it carries the generated header and recovery
+	// RECOGNISES it as its own. The fixture used to be a bare fragment, which
+	// isOurs rejects — so this exited at the ownership check and never reached
+	// the rehearsal it is named for. Deleting that rehearsal left the suite
+	// green, and this test alongside a near-identical one that really is about
+	// ownership.
+	body := string(Render([]allocate.PoolPlan{{Name: "shop", MaxChildren: 8}}))
 	if err := os.WriteFile(ours, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if !isOurs([]byte(body)) {
+		t.Fatal("setup: the fixture is not recognised as this tool's own file, so the " +
+			"guard under test is not the one that will run")
 	}
 
 	master := Master{

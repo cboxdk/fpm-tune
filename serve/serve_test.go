@@ -3,6 +3,8 @@ package serve
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -265,9 +267,88 @@ func TestSaveIsThrottledButForceable(t *testing.T) {
 	}
 }
 
-// TestMetricsEndpointServes: fpm-tune has to stand alone, so the saturation
-// series must be reachable without another process.
-func TestMetricsEndpointServes(t *testing.T) {
+// TestMetricsEndpointIsReachable.
+//
+// Dialled, because the point of the endpoint is that something else can reach
+// it. The previous version of this test bound nothing and called Registry.Gather
+// directly, which is the metrics package's own test — re-routing /metrics to
+// /nope left it green, and so did downgrading the bind failure from an error to
+// a log line.
+//
+// That second one matters more than it looks: a metrics server that could not
+// bind and carried on is a daemon that looks alive and publishes nothing, which
+// is also the situation where two of them are writing the same pool files.
+func TestMetricsEndpointIsReachable(t *testing.T) {
+	loop, err := New(Config{
+		StatePath:   filepath.Join(t.TempDir(), "state.json"),
+		MetricsAddr: "127.0.0.1:0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Metrics().Update(plan.Result{
+		Plan: allocate.Plan{Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 8}}},
+	}, loop.State(), state.Options{}, 1)
+
+	srv, err := loop.startMetrics()
+	if err != nil {
+		t.Fatalf("startMetrics: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	base := "http://" + loop.BoundMetricsAddr()
+
+	body := get(t, base+"/metrics")
+	if !strings.Contains(body, "fpm_tune_pool_workers_recommended") {
+		t.Errorf("/metrics does not carry the series a scraper comes for:\n%s", body)
+	}
+	if got := get(t, base+"/healthz"); !strings.Contains(got, "ok") {
+		t.Errorf("/healthz = %q", got)
+	}
+
+	// A second loop asked for the SAME address must refuse to start.
+	second, err := New(Config{
+		StatePath:   filepath.Join(t.TempDir(), "state.json"),
+		MetricsAddr: loop.BoundMetricsAddr(),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv2, err := second.startMetrics(); err == nil {
+		_ = srv2.Close()
+		t.Error("a second process bound the same metrics address without complaint; a " +
+			"daemon that could not serve its metrics and carried on looks alive and " +
+			"publishes nothing")
+	}
+}
+
+func get(t *testing.T, url string) string {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(body)
+}
+
+// TestMetricsRegistryCarriesTheSeries is the handler-free half, kept because it
+// runs where a listener cannot be bound.
+func TestMetricsRegistryCarriesTheSeries(t *testing.T) {
 	loop, err := New(Config{
 		StatePath:   filepath.Join(t.TempDir(), "state.json"),
 		MetricsAddr: "127.0.0.1:0", // not dialled; the handler is what matters

@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -411,6 +412,12 @@ func TestFutureFormatIsRefused(t *testing.T) {
 // TestSaveIsAtomic: a crash mid-write must leave the previous state, not a
 // truncated file. This runs on a schedule for as long as the host is up, which
 // is enough occasions for the unlucky one to happen.
+//
+// Checked by the inode, because that is the only observable difference between
+// the two implementations. A rename installs a NEW inode over the name; an
+// in-place rewrite keeps it and is the thing that can be caught half-written.
+// Asserting only that no temp files were left behind passed against a plain
+// os.WriteFile, which is exactly what must not be there.
 func TestSaveIsAtomic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
@@ -421,9 +428,33 @@ func TestSaveIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	before, err := inodeOf(t, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// A second save must not leave temp files behind.
 	if err := first.Save(path); err != nil {
 		t.Fatal(err)
+	}
+
+	after, err := inodeOf(t, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Error("the second save kept the same inode: the file was rewritten in place " +
+			"rather than renamed over, so a crash part-way through leaves a truncated " +
+			"state file where the previous one used to be")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("mode = %04o, want 0644: the temp file's mode carries across the rename",
+			perm)
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -1180,4 +1211,21 @@ func TestNoCounterMeansNoDecay(t *testing.T) {
 		t.Errorf("the estimate fell from %dMiB to %dMiB on readings with nothing to say "+
 			"whether the pool was working", settled>>20, got>>20)
 	}
+}
+
+// inodeOf identifies the file behind a name, which is what tells a rename from
+// an in-place rewrite.
+func inodeOf(t *testing.T, path string) (uint64, error) {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	sys, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no inode available on this platform")
+	}
+
+	return uint64(sys.Ino), nil
 }

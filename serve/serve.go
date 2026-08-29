@@ -34,6 +34,16 @@ type Config struct {
 	// Interval is how often the pools are sampled.
 	Interval time.Duration
 
+	// Discover and Sample replace the loop's two views of the outside world.
+	//
+	// Nil in production, where they are php-fpm itself. A test sets them to hold
+	// the world still, which is the only way to assert the ORDER this loop does
+	// things in — and that order is a correctness property, not a style: the
+	// plan has to read the ceiling counter before the counter is overwritten
+	// for the next round.
+	Discover func(context.Context) ([]phpfpm.Target, error)
+	Sample   func(context.Context, []phpfpm.Target) []observe.PoolView
+
 	// StatePath is where baselines are persisted.
 	StatePath string
 
@@ -99,6 +109,7 @@ type Loop struct {
 	resourceDir string
 	reconciled  bool
 	exhausted   bool
+	boundAddr   string
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -220,7 +231,7 @@ func (l *Loop) round(ctx context.Context) {
 	// alternative is being wrong about the one number everything is divided by.
 	l.forgetParsedConfig()
 
-	targets, err := observe.Discover(roundCtx, l.log)
+	targets, err := l.discover(roundCtx)
 	if err != nil {
 		l.log.Warn("Discovery failed; will retry", "error", err)
 
@@ -237,7 +248,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	scrapeCtx, cancelScrape := context.WithTimeout(roundCtx, l.cfg.ScrapeTimeout)
-	views := observe.Sample(scrapeCtx, targets, l.log)
+	views := l.sample(scrapeCtx, targets)
 	cancelScrape()
 
 	now := time.Now()
@@ -460,6 +471,30 @@ func (l *Loop) save(now time.Time, force bool) {
 	l.lastSaved = now
 }
 
+// discover and sample are the loop's only two views of the outside world, and
+// they are indirected so a test can hold them still.
+//
+// Not indulgence: the ORDER in which this loop learns, plans and records
+// counters is a correctness property — the ceiling counter has to be read by the
+// plan before it is overwritten for the next round, and getting that wrong once
+// meant the growth signal never fired in any round since it was written. Nothing
+// could assert it, because the only way in was through a real php-fpm.
+func (l *Loop) discover(ctx context.Context) ([]phpfpm.Target, error) {
+	if l.cfg.Discover != nil {
+		return l.cfg.Discover(ctx)
+	}
+
+	return observe.Discover(ctx, l.log)
+}
+
+func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.PoolView {
+	if l.cfg.Sample != nil {
+		return l.cfg.Sample(ctx, targets)
+	}
+
+	return observe.Sample(ctx, targets, l.log)
+}
+
 func (l *Loop) startMetrics() (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(l.metrics.Registry, promhttp.HandlerOpts{}))
@@ -475,6 +510,11 @@ func (l *Loop) startMetrics() (*http.Server, error) {
 		return nil, fmt.Errorf("cannot serve metrics on %s: %w", l.cfg.MetricsAddr, err)
 	}
 
+	// The address actually bound, not the one asked for. They differ whenever
+	// the request carries port 0, and then the configured string is the one
+	// thing that cannot tell anyone where to point a scraper.
+	l.boundAddr = ln.Addr().String()
+
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -482,12 +522,18 @@ func (l *Loop) startMetrics() (*http.Server, error) {
 
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			l.log.Error("Metrics server stopped", "addr", l.cfg.MetricsAddr, "error", err)
+			l.log.Error("Metrics server stopped", "addr", l.boundAddr, "error", err)
 		}
 	}()
 
 	return srv, nil
 }
+
+// BoundMetricsAddr is where the metrics endpoint is actually listening, once
+// started. Empty before that, and when no address was configured.
+// Written by startMetrics before Run enters its loop, and not touched
+// afterwards, so no lock is needed.
+func (l *Loop) BoundMetricsAddr() string { return l.boundAddr }
 
 func (l *Loop) shutdown(srv *http.Server) {
 	l.log.Info("Stopping")

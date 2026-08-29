@@ -11,9 +11,14 @@
 # each one has been observed failing at some point:
 #
 #   - a dry run left rewritten fragments behind
-#   - a rejected change set reached the live pool directory
+#   - a run aimed at a directory no master includes wrote there anyway
 #   - the reload was refused because the master was pid 1
 #   - the master was reported dead when the signal had never been sent
+#
+# NOT proven here: that a change set php-fpm rejects never reaches the live
+# directory. That needs a state where this tool has already written and the
+# world has moved underneath it, which is what chaos.sh sets up — its
+# removed-site scenario reaches the guard and this suite cannot.
 #
 # Usage: testing/e2e.sh /path/to/fpm-tune
 set -euo pipefail
@@ -165,53 +170,51 @@ ls "$POOLS"/zz-fpm-tune.conf >/dev/null 2>&1 \
   || fail "apply reported success but wrote no fragments"
 
 # ---------------------------------------------------------------------------
-echo "--- a rejected change set must never reach the live directory"
+echo "--- a run that cannot see a master must refuse, not write"
 #
-# Driven through fpm-tune itself, not simulated. The previous version copied a
-# bad file in by hand and took it out again, which proved that php-fpm rejects
-# such a file and nothing whatever about what this tool does when handed one.
+# What this block used to claim was that a rejected change set never reaches the
+# live directory. It did not test that. It built a broken master config and
+# never passed it to anything, ran the tool against a directory no master
+# includes — so it failed inside discovery, before a change set was rendered —
+# and then fingerprinted the LIVE pool directory, which that run never targeted.
+# Deleting the sandbox validation, the post-write validation and the rollback
+# all left it printing "confirmed".
+#
+# The rejected-change-set property is real and is proven, by chaos.sh's
+# removed-site scenario: it renders an override for a pool that no longer
+# exists, php-fpm refuses the whole configuration, and the tool takes its own
+# file back out. That needs a state where the tool has already written, which is
+# what chaos.sh sets up and this suite does not.
+#
+# What IS worth proving here, and is not proven anywhere else: pointing this
+# tool at a pool directory no running master includes must refuse. That flag is
+# how an operator aims it at the wrong place, and the failure has to be a
+# refusal rather than a file written where nothing will read it.
 BEFORE="$(fingerprint)"
 
-# A pool the master does not have. php-fpm exits 78 on this, and adopting it on
-# the next reload would kill the master permanently.
-cat > "$POOLS/zz-probe.conf" <<EOF
-[does-not-exist]
-pm.max_children = 4
-EOF
-
-if "$FPM" -t --fpm-config "$ROOT/php-fpm.conf" 2>/dev/null; then
-  rm -f "$POOLS/zz-probe.conf"
-  echo "  (this php-fpm accepts an unknown pool; skipping the rejection probe)"
-else
-  echo "  confirmed: php-fpm rejects a pool that exists only as an override"
-  rm -f "$POOLS/zz-probe.conf"
-
-  # Now drive it THROUGH fpm-tune: a master config that names a pool php-fpm
-  # will not accept, so this tool's own change set is the rejected one.
-  BROKEN="$ROOT/broken-php-fpm.conf"
-  cp "$ROOT/php-fpm.conf" "$BROKEN"
-  printf '\n[does-not-exist]\npm.max_children = 2\n' >> "$BROKEN"
-
-  "$FPM" -t --fpm-config "$BROKEN" 2>/dev/null \
-    && fail "the broken master config is accepted; the case is not set up"
-
-  # A separate pool directory so this cannot disturb the live one, pointed at a
-  # master php-fpm rejects.
-  mkdir -p "$ROOT/broken.d"
-  OUT="$ROOT/rejected.out"
-  if "$BIN" apply --memory 512MB --reserve 128MB \
-       --drop-in-dir "$ROOT/broken.d" --state "$STATE/rejected.json" \
-       --backup-dir "$ROOT/backup" > "$OUT" 2>&1; then
-    echo "  (nothing was proposed against the broken master; no rejection to observe)"
-  else
-    echo "  confirmed: the run against a rejected configuration failed rather than writing"
-  fi
-
-  [ "$(fingerprint)" = "$BEFORE" ] \
-    || fail "a run against a configuration php-fpm rejects changed the pool directory"
+mkdir -p "$ROOT/orphan.d"
+OUT="$ROOT/orphan.out"
+if "$BIN" apply --memory 512MB --reserve 128MB \
+     --drop-in-dir "$ROOT/orphan.d" --state "$STATE/orphan.json" \
+     --backup-dir "$ROOT/backup" > "$OUT" 2>&1; then
+  fail "a run against a directory no master includes reported success:
+$(cat "$OUT")"
 fi
 
-[ "$(fingerprint)" = "$BEFORE" ] || fail "the probe changed the pool directory"
+# The wording, so "it failed" cannot pass for the wrong reason — which is
+# exactly how the previous version of this block stayed green.
+grep -qi "no pools belong to a master that includes" "$OUT" \
+  || fail "the run failed, but not because the directory is not included:
+$(cat "$OUT")"
+
+# Both directories: the one it was aimed at, and the live one it must not have
+# fallen back to.
+[ -z "$(ls -A "$ROOT/orphan.d")" ] \
+  || fail "the refused run wrote into $ROOT/orphan.d: $(ls -A "$ROOT/orphan.d")"
+[ "$(fingerprint)" = "$BEFORE" ] \
+  || fail "a refused run changed the live pool directory"
+
+echo "  confirmed: refused by name, and neither directory was touched"
 
 echo "--- a second run must be refused while the first holds the lock"
 "$BIN" serve --state "$STATE/state.json" --interval 60s --metrics "" \

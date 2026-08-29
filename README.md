@@ -95,12 +95,19 @@ only tenant.
 
 ## Telling "needs more" from "machine is full"
 
-The distinction that matters when a site slows down:
+When a site slows down, the question is whether a configuration change can help:
 
 ```
-fpm_tune_pool_demand_unmet{pool}   # this pool wants more workers
-fpm_tune_capacity_exhausted        # ...and there is nowhere left to get them
+fpm_tune_pool_demand_unmet{pool}   # this pool wanted more workers than it got
+fpm_tune_capacity_exhausted        # ...and that is true of at least one pool
 ```
+
+These are the same news at two granularities — which pool, and whether any. The
+plan has already taken headroom from the idle pools and given it to the busy
+ones by the time it is published, so a pool still short in the finished plan is
+short because the budget ran out, not because the next run might rearrange
+things. The warning names how far off it is: the free budget against what one
+more worker would cost the pool that needs one.
 
 And the ones to alert on. Capacity exhaustion is logged on the transition rather
 than every interval, so the log will not keep reminding you:
@@ -118,11 +125,14 @@ fpm_tune_repairs_total                    # it had to undo something a run left 
 
 `/metrics` defaults to `:9110`; `/healthz` answers 200 while the process is up.
 
-Demand alone is routine — fpm-tune takes headroom from an idle pool and gives it
-to a busy one. Both together is the signal that no configuration change will
-help: the machine needs more RAM, or fewer sites. On a host in that state it
-stops rearranging and says so, because moving the shortfall between pools costs a
-reload of each and does not make it smaller.
+Either one is the signal that no configuration change will help: the machine
+needs more RAM, or fewer sites. On a host in that state it stops rearranging and
+says so, because moving the shortfall between pools costs a reload of each and
+does not make it smaller.
+
+A note on free budget. The warning can fire with headroom still showing, and
+that is not a contradiction — 300MiB free is nothing to a pool whose workers
+cost 700MiB each. That is why the message carries both numbers.
 
 ## Operating it
 

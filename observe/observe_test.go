@@ -2,6 +2,7 @@ package observe
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -95,10 +96,18 @@ func TestDiscoveryHonoursTheCallersDeadline(t *testing.T) {
 	_, err := Discover(ctx, nil)
 	elapsed := time.Since(start)
 
-	// Whether it errors depends on the host — there may be no masters at all —
-	// but it must not sit there.
-	_ = err
 	if elapsed > 5*time.Second {
 		t.Errorf("discovery took %s against a cancelled context", elapsed)
+	}
+
+	// The error, not just the clock. On any host with no php-fpm master —
+	// every runner in the unit-test job — there is nothing to fork, so the
+	// elapsed time is near zero however the context is handled: passing
+	// context.Background() straight through left this passing.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled: with no master on the host there is "+
+			"nothing to fork, so the elapsed time says nothing — and an empty list with "+
+			"a nil error tells the operator this host runs no php-fpm, which is not what "+
+			"happened", err)
 	}
 }

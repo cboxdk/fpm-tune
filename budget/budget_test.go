@@ -3,6 +3,7 @@ package budget
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -342,18 +343,102 @@ func TestDetectForTakesTheTightestLimitInThePath(t *testing.T) {
 	}
 }
 
-// TestDetectForFallsBackWhenThereIsNoLimit: a bare VM with no slice cap must
-// still report the machine's memory rather than nothing. Pid zero is how that is
-// asked, and it is the only way to ask it.
+// TestDetectForFallsBackWhenThereIsNoLimit: a bare VM with no cgroup cap
+// anywhere must report the machine's memory rather than nothing.
+//
+// Against a fixture, because the previous version compared DetectFor(0) with
+// DetectFor(0) — a leftover from the refactor that removed Detect(), and an
+// equality no change to the code could break. It also left the "max" fall-
+// through and the guard that prefers the tighter of the two readings covered by
+// nothing at all.
 func TestDetectForFallsBackWhenThereIsNoLimit(t *testing.T) {
-	plain := DetectFor(0)
-	if plain.MemoryBytes <= 0 {
-		t.Skip("no memory reading available on this host")
+	if runtime.GOOS != "linux" {
+		t.Skip("the fixture stands in for /proc/meminfo, which only Linux reads")
 	}
 
-	if got := DetectFor(0); got.MemoryBytes != plain.MemoryBytes {
-		t.Errorf("DetectFor(0) = %s, want the same as Detect() = %s",
-			HumanBytes(got.MemoryBytes), HumanBytes(plain.MemoryBytes))
+	root := t.TempDir()
+
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php8.5-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The bare-VM shape: a cgroup hierarchy with no limit set anywhere in it.
+	cg := filepath.Join(root, "cgroup")
+	for _, path := range []string{"system.slice/php8.5-fpm.service", "system.slice", ""} {
+		dir := filepath.Join(cg, path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte("max\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"),
+		[]byte("MemTotal:       16777216 kB\nMemFree:         8388608 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	defer swapRoots(cg, filepath.Join(root, "proc"))()
+
+	got := DetectFor(4242)
+	if got.Source != SourceMemInfo {
+		t.Errorf("Source = %q, want %q: with no limit anywhere, the machine's own memory "+
+			"is the only honest answer", got.Source, SourceMemInfo)
+	}
+	if want := int64(16777216) * 1024; got.MemoryBytes != want {
+		t.Errorf("MemoryBytes = %s, want %s", HumanBytes(got.MemoryBytes), HumanBytes(want))
+	}
+}
+
+// TestACgroupLimitLargerThanTheMachineIsIgnored: a slice capped above the
+// machine's own memory is not a budget, it is the absence of one, and sizing to
+// it commits memory the host does not have.
+func TestACgroupLimitLargerThanTheMachineIsIgnored(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the fixture stands in for /proc/meminfo, which only Linux reads")
+	}
+
+	root := t.TempDir()
+
+	proc := filepath.Join(root, "proc", "4242")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "cgroup"),
+		[]byte("0::/system.slice/php8.5-fpm.service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cg := filepath.Join(root, "cgroup")
+	for path, value := range map[string]string{
+		// 64GiB on a 16GiB machine, which is what MemoryMax=infinity-adjacent
+		// settings and container defaults look like.
+		"system.slice/php8.5-fpm.service": "68719476736",
+		"system.slice":                    "max",
+		"":                                "max",
+	} {
+		dir := filepath.Join(cg, path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(value+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"),
+		[]byte("MemTotal:       16777216 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	defer swapRoots(cg, filepath.Join(root, "proc"))()
+
+	got := DetectFor(4242)
+	if want := int64(16777216) * 1024; got.MemoryBytes != want {
+		t.Errorf("MemoryBytes = %s from a 64GiB cgroup limit on a 16GiB machine, want %s",
+			HumanBytes(got.MemoryBytes), HumanBytes(want))
 	}
 }
 
