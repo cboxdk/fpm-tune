@@ -67,9 +67,19 @@ type Pool struct {
 	WorkerBytes int64
 
 	// Measured distinguishes a WorkerBytes that was observed from one that came
-	// from a workload profile. Both allocate; only one is trusted enough to size
-	// a pool down.
+	// from a workload profile. It says where the NUMBER came from and nothing
+	// else.
 	Measured bool
+
+	// Reducible says whether this pool may be taken below its floor when the
+	// budget does not stretch.
+	//
+	// Separate from Measured, and conflating them undid the protection it exists
+	// for. A pool can have a real measurement and still not have been watched
+	// long enough to justify taking workers away — that is the whole point of
+	// the confidence gate — and using "has a measurement" as "may be cut" put
+	// exactly those pools first in the queue to give way.
+	Reducible bool
 
 	// ObservedPeak is the highest number of workers seen busy at once
 	// (pm.max_active_processes). It is the demand signal: a pool that has never
@@ -386,33 +396,36 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 	// the profile assumes, queued traffic on sites that never needed touching.
 	// The pools whose cost is known are the only ones there is any evidence to
 	// act on.
-	var unmeasuredNeed, measuredNeed int64
+	// Reducible, not Measured. A pool whose cost is known but whose baseline has
+	// not been watched through a real traffic pattern is protected exactly like
+	// one with no measurement at all: there is no more evidence for cutting it.
+	var protectedNeed, reducibleNeed int64
 	for i, p := range pools {
-		if p.Measured {
-			measuredNeed += int64(floors[i]) * p.WorkerBytes
+		if p.Reducible {
+			reducibleNeed += int64(floors[i]) * p.WorkerBytes
 		} else {
-			unmeasuredNeed += int64(floors[i]) * p.WorkerBytes
+			protectedNeed += int64(floors[i]) * p.WorkerBytes
 		}
 	}
 
-	var measuredMinimum int64
+	var reducibleMinimum int64
 	for _, p := range pools {
-		if p.Measured {
-			measuredMinimum += p.WorkerBytes
+		if p.Reducible {
+			reducibleMinimum += p.WorkerBytes
 		}
 	}
 
 	var used int64
-	if measuredNeed > 0 && unmeasuredNeed+measuredMinimum <= allocatable {
+	if reducibleNeed > 0 && protectedNeed+reducibleMinimum <= allocatable {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
-			"the configuration needs %s but only %s is available: the pools whose worker "+
-				"cost has been measured were reduced to fit, and the ones still being "+
-				"estimated were left alone",
+			"the configuration needs %s but only %s is available: the pools with a "+
+				"trusted baseline were reduced to fit, and the ones without one were left "+
+				"alone",
 			humanBytes(need), humanBytes(allocatable)))
 
-		scale := float64(allocatable-unmeasuredNeed) / float64(measuredNeed)
+		scale := float64(allocatable-protectedNeed) / float64(reducibleNeed)
 		for i, p := range pools {
-			if !p.Measured {
+			if !p.Reducible {
 				granted[i] = floors[i]
 				used += int64(floors[i]) * p.WorkerBytes
 
@@ -433,9 +446,9 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 		// two measured pools at 100MiB with floors of 100 and 1 against 250MiB
 		// committing 300MiB.
 		//
-		// Only measured pools are trimmed, because only they were reduced.
+		// Only reducible pools are trimmed, because only they were reduced.
 		used = trimToFit(pools, granted, used, allocatable, func(i int) bool {
-			return pools[i].Measured
+			return pools[i].Reducible
 		})
 
 		return granted, allocatable - used, true, nil

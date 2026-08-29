@@ -114,8 +114,8 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 		// instead of the bootstrap estimate. Both must be satisfied: samples
 		// alone would let a tight loop claim confidence in seconds, which
 		// measures the polling interval rather than the workload.
-		confSamples: fs.Int("confidence-samples", 0, "busy samples before a pool is sized from its own memory (default 20)"),
-		confSpan:    fs.Duration("confidence-span", 0, "time span before a pool is sized from its own memory (default 30m)"),
+		confSamples: fs.Int("confidence-samples", 0, "busy samples before a pool's baseline is trusted enough to CUT it; its measured cost is used from the first sample either way (default 20)"),
+		confSpan:    fs.Duration("confidence-span", 0, "time span of busy evidence before a pool's baseline is trusted enough to CUT it (default 30m)"),
 	}
 }
 

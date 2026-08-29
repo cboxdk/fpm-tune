@@ -1050,3 +1050,40 @@ func TestASlowPoolHoldsItsEstimateRatherThanDrifting(t *testing.T) {
 			"the pool sized for workers that do not exist", settled>>20, got>>20)
 	}
 }
+
+// TestTheRequestCounterAdvancesOnEveryScrape.
+//
+// The gate is meant to ask "did this pool serve anything since the LAST scrape".
+// The counter advanced only on scrapes that produced mature workers, so it
+// actually asked "since the last scrape that taught us something" — and a pool
+// with young workers overnight banked the whole night into one comparison.
+//
+// The consequence is smaller than it sounds, since one decay step against a
+// thirty-minute half-life moves the estimate about a percent, and the very next
+// scrape blocks again. It is tested as the invariant rather than dressed up as a
+// disaster: the question is per-scrape, so the bookkeeping has to be per-scrape.
+func TestTheRequestCounterAdvancesOnEveryScrape(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	// One scrape that teaches something, so the pool exists.
+	st.Learn(Observation{Pool: "shop", At: now, ActiveNow: 4, Accepted: 100,
+		Workers: []WorkerSample{{RSSBytes: 100 << 20, Requests: 500}, {RSSBytes: 100 << 20, Requests: 500}},
+	}, opts)
+
+	// Then scrapes with workers too young to learn from, while requests are
+	// served. Each one must still move the counter.
+	for i := range 5 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i+1) * 30 * time.Second),
+			ActiveNow: 1, Accepted: int64(200 + i*100),
+			Workers: []WorkerSample{{RSSBytes: 20 << 20, Requests: 1}},
+		}, opts)
+	}
+
+	if got := st.Pools["shop"].LastAccepted; got != 600 {
+		t.Errorf("LastAccepted = %d after five scrapes reporting up to 600; the next "+
+			"comparison is against a reading five scrapes old, so a quiet stretch banks "+
+			"itself into permission to decay", got)
+	}
+}

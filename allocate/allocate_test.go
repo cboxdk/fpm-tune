@@ -495,23 +495,28 @@ func mustComputeWith(t *testing.T, b Budget, pools []Pool) Plan {
 	return plan
 }
 
-// TestAnEstimatedPoolIsNotCutToPayForAMeasuredOne.
+// TestAPoolWithNoTrustedBaselineIsNotCutToPayForOneThatHasIt.
 //
-// An unmeasured pool's floor is its own current setting, held there so a first
-// run can only ever help, and its cost is a profile estimate rather than an
-// observation. Scaling every floor uniformly cut healthy pools on that guess: a
-// first install on a tight host, with real workers cheaper than the profile
-// assumes, queued traffic on sites nobody had any evidence to touch.
-func TestAnEstimatedPoolIsNotCutToPayForAMeasuredOne(t *testing.T) {
+// A pool that has not been watched through a real traffic pattern sits at its own
+// configured setting, and there is no evidence for taking workers away from it.
+// Scaling every floor uniformly cut healthy pools on a guess: a first install on
+// a tight host, with real workers cheaper than the profile assumes, queued
+// traffic on sites nobody had any reason to touch.
+//
+// Note Reducible rather than Measured. Having a measurement says where the cost
+// came from; it does not say the baseline has been watched long enough to
+// justify a cut, and using one for the other put exactly the wrong pools first
+// in the queue to give way.
+func TestAPoolWithNoTrustedBaselineIsNotCutToPayForOneThatHasIt(t *testing.T) {
 	plan, err := Compute(
 		Budget{TotalBytes: 1200 * mb},
 		[]Pool{
-			// Measured, and expensive: this is what there is evidence to reduce.
-			{Name: "measured", CurrentMaxChildren: 20, WorkerBytes: 100 * mb, Measured: true,
-				ProcessManager: "dynamic", Floor: 20},
-			// Still an estimate, sitting at what the operator configured.
-			{Name: "guessed", CurrentMaxChildren: 10, WorkerBytes: 48 * mb,
-				ProcessManager: "dynamic", Floor: 10},
+			// A trusted baseline: this is what there is evidence to reduce.
+			{Name: "trusted", CurrentMaxChildren: 20, WorkerBytes: 100 * mb,
+				Measured: true, Reducible: true, ProcessManager: "dynamic", Floor: 20},
+			// Measured, but not yet watched long enough to justify a cut.
+			{Name: "untrusted", CurrentMaxChildren: 10, WorkerBytes: 48 * mb,
+				Measured: true, Reducible: false, ProcessManager: "dynamic", Floor: 10},
 		},
 		Options{},
 	)
@@ -524,13 +529,13 @@ func TestAnEstimatedPoolIsNotCutToPayForAMeasuredOne(t *testing.T) {
 		byName[pp.Name] = pp
 	}
 
-	if got := byName["guessed"].MaxChildren; got < 10 {
-		t.Errorf("the pool whose cost is still a guess was cut from 10 to %d to pay for "+
-			"one whose cost is known; there is no evidence it needed touching", got)
+	if got := byName["untrusted"].MaxChildren; got < 10 {
+		t.Errorf("a pool with no trusted baseline was cut from 10 to %d to pay for one "+
+			"that has one; there is no evidence it needed touching", got)
 	}
-	if got := byName["measured"].MaxChildren; got >= 20 {
-		t.Errorf("the measured pool was not reduced (%d); something has to give when the "+
-			"budget does not fit", got)
+	if got := byName["trusted"].MaxChildren; got >= 20 {
+		t.Errorf("the pool with a trusted baseline was not reduced (%d); something has "+
+			"to give when the budget does not fit", got)
 	}
 
 	var total int64
@@ -549,9 +554,9 @@ func TestEverythingGivesWayWhenTheMeasuredPoolsAreNotEnough(t *testing.T) {
 	plan, err := Compute(
 		Budget{TotalBytes: 300 * mb},
 		[]Pool{
-			{Name: "measured", CurrentMaxChildren: 20, WorkerBytes: 100 * mb, Measured: true,
-				ProcessManager: "dynamic", Floor: 20},
-			{Name: "guessed", CurrentMaxChildren: 20, WorkerBytes: 48 * mb,
+			{Name: "trusted", CurrentMaxChildren: 20, WorkerBytes: 100 * mb,
+				Measured: true, Reducible: true, ProcessManager: "dynamic", Floor: 20},
+			{Name: "untrusted", CurrentMaxChildren: 20, WorkerBytes: 48 * mb,
 				ProcessManager: "dynamic", Floor: 20},
 		},
 		Options{},
@@ -585,10 +590,10 @@ func TestTheMeasuredFirstBranchStillFits(t *testing.T) {
 	plan, err := Compute(
 		Budget{TotalBytes: 250 * mb},
 		[]Pool{
-			{Name: "big", CurrentMaxChildren: 100, WorkerBytes: 100 * mb, Measured: true,
-				ProcessManager: "dynamic", Floor: 100},
-			{Name: "small", CurrentMaxChildren: 1, WorkerBytes: 100 * mb, Measured: true,
-				ProcessManager: "dynamic", Floor: 1},
+			{Name: "big", CurrentMaxChildren: 100, WorkerBytes: 100 * mb,
+				Measured: true, Reducible: true, ProcessManager: "dynamic", Floor: 100},
+			{Name: "small", CurrentMaxChildren: 1, WorkerBytes: 100 * mb,
+				Measured: true, Reducible: true, ProcessManager: "dynamic", Floor: 1},
 		},
 		Options{},
 	)
@@ -609,5 +614,38 @@ func TestTheMeasuredFirstBranchStillFits(t *testing.T) {
 	if plan.FreeBytes < 0 {
 		t.Errorf("FreeBytes = %d: the plan knows it does not fit and reports it as a plan",
 			plan.FreeBytes)
+	}
+}
+
+// TestHavingAMeasurementIsNotPermissionToCut.
+//
+// The two were the same field, and separating the cost from the confidence made
+// that a fault rather than a shorthand: every pool with a measurement became
+// "reducible", so a pool whose baseline had explicitly not been trusted yet went
+// first in the queue to give way. The exact pools the confidence gate exists to
+// protect.
+func TestHavingAMeasurementIsNotPermissionToCut(t *testing.T) {
+	plan, err := Compute(
+		Budget{TotalBytes: 1200 * mb},
+		[]Pool{
+			// A real measurement, no trusted baseline. Its cost is believed; its
+			// size is not up for negotiation.
+			{Name: "new", CurrentMaxChildren: 10, WorkerBytes: 100 * mb,
+				Measured: true, Reducible: false, ProcessManager: "dynamic", Floor: 10},
+			{Name: "settled", CurrentMaxChildren: 20, WorkerBytes: 100 * mb,
+				Measured: true, Reducible: true, ProcessManager: "dynamic", Floor: 20},
+		},
+		Options{},
+	)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+
+	for _, pp := range plan.Pools {
+		if pp.Name == "new" && pp.MaxChildren < 10 {
+			t.Errorf("a pool with a measurement but no trusted baseline was cut from 10 "+
+				"to %d; having measured it is not evidence that it can spare workers",
+				pp.MaxChildren)
+		}
 	}
 }

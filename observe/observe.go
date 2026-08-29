@@ -172,6 +172,15 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 		view.QueueDepth = pool.ListenQueue
 		view.MaxChildrenReached = pool.MaxChildrenReached
 		view.CurrentMaxChildren, view.MaxChildrenKnown = configuredMaxChildren(pool)
+		if !view.MaxChildrenKnown && target.MaxChildren > 0 {
+			// Discovery parsed this out of the effective configuration and the
+			// scrape did not report it. Falling back was already done for a
+			// FAILED scrape and not for a successful one that simply lacked the
+			// key — so a pool actually configured for forty was accounted for at
+			// the default floor, its memory handed to a neighbour, and the
+			// neighbour written.
+			view.CurrentMaxChildren, view.MaxChildrenKnown = target.MaxChildren, true
+		}
 
 		view.Workers = make([]state.WorkerSample, 0, len(pool.Processes))
 		for _, proc := range pool.Processes {

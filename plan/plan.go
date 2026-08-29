@@ -133,12 +133,19 @@ func Build(in Input) (Result, error) {
 
 // poolFor decides what one pool costs and what it wants.
 //
-// This is the bootstrap-to-learned switch. A baseline is used only once it is
-// trusted — samples and elapsed time both — because sizing a pool DOWN on a
-// number that has not been watched through a real traffic pattern is how a tool
-// like this causes the outage it was installed to prevent. Until then the
-// profile's estimate stands, which is the same guess a hand-written config
-// makes, so bootstrapping is never worse than what it replaces.
+// This is the bootstrap-to-learned switch, and it turns on two separate
+// questions rather than one.
+//
+// The per-worker COST comes from any measurement there is. A number taken from
+// this pool's own workers beats a profile's guess whatever the confidence, and
+// gating it meant a measured 160MiB reverted to an estimated 48MiB — enough to
+// grow a pool into three times the memory it fits in.
+//
+// Whether the pool may be CUT is what confidence decides. Sizing a pool DOWN on
+// a baseline that has not been watched through a real traffic pattern is how a
+// tool like this causes the outage it was installed to prevent, so until then
+// its floor holds at whatever it is configured for and the first run can only
+// ever help.
 func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state.Options) (allocate.Pool, bool) {
 	pool := allocate.Pool{
 		Name:               view.Name,
@@ -168,13 +175,18 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 	// not been watched through a real traffic pattern is no basis for taking
 	// workers away, so until it has, the floor holds at what the pool is
 	// configured for and the first run can only ever help.
-	measured := ps != nil && ps.SizingBytes() > 0
-	if measured {
+	if ps != nil && ps.SizingBytes() > 0 {
 		pool.WorkerBytes = ps.SizingBytes()
 		pool.Measured = true
 	}
 
-	if (ps == nil || !ps.Trusted(opts)) && view.MaxChildrenKnown && pool.CurrentMaxChildren > 0 {
+	// Reducible is the OTHER question, and it travels separately. Handing
+	// "Measured" to the allocator as permission to cut put pools with a real
+	// measurement but no trusted baseline first in the queue to give way — which
+	// is the opposite of what the confidence gate is for.
+	pool.Reducible = ps != nil && ps.Trusted(opts)
+
+	if !pool.Reducible && view.MaxChildrenKnown && pool.CurrentMaxChildren > 0 {
 		pool.Floor = pool.CurrentMaxChildren
 	}
 

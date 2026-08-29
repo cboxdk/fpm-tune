@@ -101,13 +101,13 @@ type PoolState struct {
 	// and the baseline was fully trusted on the strength of the waiting.
 	LastBusyAt time.Time `json:"last_busy_at,omitempty"`
 
-	// LastPeakAt is when LastPeakBytes was taken, so a stale reading stops acting
-	// as a floor.
+	// LastPeakAt is when LastPeakBytes was taken.
 	//
-	// Without it, one anomalous scrape held the sizing high until another mature
-	// scrape happened to arrive — and on a pool that then went quiet, or whose
-	// workers were all young, that could be a very long time. It does not
-	// overcommit, since a high cost means fewer workers; it starves.
+	// Recorded but no longer used to expire the floor: expiring fell back to the
+	// smoothed estimate, which after a single new reading has moved only halfway,
+	// so a genuine deploy was sized well below what had just been measured. Kept
+	// because it says how old the number is, which is worth having when reading a
+	// state file by hand.
 	LastPeakAt time.Time `json:"last_peak_at,omitempty"`
 
 	// LastPeakBytes is the most recent per-scrape maximum from mature workers.
@@ -422,6 +422,17 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// much time has passed, not from how many times we happened to look.
 	since := at.Sub(ps.LastUpdated)
 
+	// Decided and recorded on EVERY scrape, before anything can return early.
+	//
+	// The counter used to advance only when a scrape produced mature workers, so
+	// the delta was measured against the last MATURE scrape rather than the last
+	// one — and a pool serving a request per scrape overnight with immature
+	// workers accumulated the whole night into one comparison. That is the
+	// running total this deliberately is not: it would let a quiet stretch buy
+	// itself permission to pull the estimate down.
+	worked := didWork(ps, obs, opts)
+	ps.LastAccepted = obs.Accepted
+
 	ps.Samples++
 	ps.LastUpdated = at
 
@@ -450,12 +461,9 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// Storing it first would compare the reading against itself, so the
 	// difference would always be zero and the estimate could never fall — the
 	// same shape of mistake as the ceiling counter that never fired.
-	worked := didWork(ps, obs, opts)
-
 	ps.LastBusyAt = at
 	ps.LastPeakBytes = peak
 	ps.LastPeakAt = at
-	ps.LastAccepted = obs.Accepted
 	if peak > ps.HighWaterBytes {
 		ps.HighWaterBytes = peak
 	}
