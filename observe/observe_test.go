@@ -80,3 +80,25 @@ func TestAPoolWithNoConfiguredCeilingIsStillMarkedUnknown(t *testing.T) {
 			"a resize would then be proposed against a number that does not exist")
 	}
 }
+
+// TestDiscoveryHonoursTheCallersDeadline.
+//
+// Discovery forks `php-fpm -tt` once per master. Unbounded, a binary that wedges
+// — an NFS-backed include, an operator's wrapper script, a host under memory
+// pressure — stops the loop above it for good, and a daemon that has stopped
+// observing is worse than one that has stopped: it looks alive.
+func TestDiscoveryHonoursTheCallersDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already dead
+
+	start := time.Now()
+	_, err := Discover(ctx, nil)
+	elapsed := time.Since(start)
+
+	// Whether it errors depends on the host — there may be no masters at all —
+	// but it must not sit there.
+	_ = err
+	if elapsed > 5*time.Second {
+		t.Errorf("discovery took %s against a cancelled context", elapsed)
+	}
+}

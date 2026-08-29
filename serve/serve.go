@@ -219,7 +219,7 @@ func (l *Loop) round(ctx context.Context) {
 	// alternative is being wrong about the one number everything is divided by.
 	l.forgetParsedConfig()
 
-	targets, err := observe.Discover(l.log)
+	targets, err := observe.Discover(roundCtx, l.log)
 	if err != nil {
 		l.log.Warn("Discovery failed; will retry", "error", err)
 

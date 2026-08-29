@@ -92,8 +92,12 @@ func (v PoolView) Observation() state.Observation {
 }
 
 // Discover finds the pools on this host.
-func Discover(log *slog.Logger) ([]phpfpm.Target, error) {
-	found, err := phpfpm.Discover(log)
+//
+// Bounded by the caller's context, because discovery forks `php-fpm -tt` once
+// per master: a binary that wedges — an NFS-backed include, an operator's
+// wrapper — would otherwise stop the loop above it for good.
+func Discover(ctx context.Context, log *slog.Logger) ([]phpfpm.Target, error) {
+	found, err := phpfpm.DiscoverContext(ctx, log)
 	if err != nil {
 		return nil, fmt.Errorf("cannot discover PHP-FPM pools: %w", err)
 	}

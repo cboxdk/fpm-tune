@@ -140,7 +140,7 @@ func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, 
 		}
 	}
 
-	targets, err := observe.Discover(log)
+	targets, err := observe.Discover(ctx, log)
 	if err != nil {
 		return plan.Result{}, nil, err
 	}
