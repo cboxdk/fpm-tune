@@ -760,3 +760,91 @@ func TestAQuietSpellDoesNotPullTheEstimateDown(t *testing.T) {
 			settled>>20, got>>20)
 	}
 }
+
+// TestConfidenceDoesNotAdvanceOnWaiting.
+//
+// The span exists to insist a baseline has been watched through a real traffic
+// pattern rather than a lunchtime. Measuring it to LastUpdated let idle scrapes
+// carry a pool over the line instead: twenty-five busy samples in ten minutes,
+// then two hours of nothing at all, and the baseline counted as watched — on the
+// strength of the waiting.
+func TestConfidenceDoesNotAdvanceOnWaiting(t *testing.T) {
+	st := New()
+	opts := Options{ConfidenceSamples: 20, ConfidenceSpan: 2 * time.Hour}.Defaults()
+	now := time.Now()
+
+	// Ten minutes of real evidence.
+	for i := range 25 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * 24 * time.Second),
+			ActiveNow: 8, Workers: []WorkerSample{
+				{RSSBytes: 60 << 20, Requests: 400},
+				{RSSBytes: 60 << 20, Requests: 400},
+			}}, opts)
+	}
+
+	// Then two hours of being looked at and teaching nothing.
+	idle := now.Add(15 * time.Minute)
+	for i := range 240 {
+		st.Learn(Observation{Pool: "shop", At: idle.Add(time.Duration(i) * 30 * time.Second)}, opts)
+	}
+
+	if c := st.Pools["shop"].Confidence(opts); c >= 1 {
+		t.Errorf("confidence = %.2f: two hours of idle scrapes carried a ten-minute "+
+			"baseline over a two-hour span", c)
+	}
+}
+
+// TestStatePredatingTheBusyFieldsIsNotTrustedOnSight: an upgrade must not
+// inherit the overconfidence the new fields exist to remove. A pool whose
+// recorded span was its own age starts again rather than arriving trusted.
+func TestStatePredatingTheBusyFieldsIsNotTrustedOnSight(t *testing.T) {
+	opts := Options{ConfidenceSamples: 20, ConfidenceSpan: 30 * time.Minute}.Defaults()
+
+	old := &PoolState{
+		Pool:             "legacy",
+		BusySamples:      500,
+		FirstSeen:        time.Now().Add(-72 * time.Hour),
+		LastUpdated:      time.Now(),
+		TypicalPeakBytes: 90 << 20,
+		// FirstBusyAt and LastBusyAt absent, as an older build left them.
+	}
+
+	if c := old.Confidence(opts); c != 0 {
+		t.Errorf("confidence = %.2f for state with no record of when the evidence "+
+			"arrived; the upgrade inherits exactly the overconfidence the fields "+
+			"were added to remove", c)
+	}
+}
+
+// TestAnOutlierDoesNotFloorTheSizingForever: one anomalous mature scrape held
+// the sizing high until another happened to arrive, which on a pool that has
+// gone quiet can be a very long time. It does not overcommit — a high cost means
+// fewer workers — but it starves the pool and its neighbours for no visible
+// reason.
+func TestAnOutlierDoesNotFloorTheSizingForever(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	for i := range 10 {
+		st.Learn(steadyAt("shop", 60<<20, now.Add(time.Duration(i)*time.Minute)), opts)
+	}
+
+	// One scrape catches something enormous.
+	st.Learn(Observation{Pool: "shop", At: now.Add(11 * time.Minute), ActiveNow: 8,
+		Workers: []WorkerSample{
+			{RSSBytes: 400 << 20, Requests: 500},
+			{RSSBytes: 400 << 20, Requests: 500},
+		}}, opts)
+
+	// The pool then goes quiet for an hour: seen, teaching nothing.
+	for i := range 60 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(12+i) * time.Minute)}, opts)
+	}
+
+	ps := st.Pools["shop"]
+	if ps.SizingBytes() >= 400<<20 {
+		t.Errorf("a single reading is still the floor an hour later (%dMiB); the pool "+
+			"and its neighbours are held short by one scrape", ps.SizingBytes()>>20)
+	}
+}

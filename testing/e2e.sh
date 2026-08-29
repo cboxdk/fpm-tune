@@ -186,16 +186,25 @@ else
   echo "  confirmed: php-fpm rejects a pool that exists only as an override"
   rm -f "$POOLS/zz-probe.conf"
 
-  # Now make fpm-tune's OWN change set the rejected one, by pointing it at a
-  # master config that names a pool directory it will not accept.
+  # Now drive it THROUGH fpm-tune: a master config that names a pool php-fpm
+  # will not accept, so this tool's own change set is the rejected one.
   BROKEN="$ROOT/broken-php-fpm.conf"
-  sed "s|^error_log =.*|error_log = $ROOT/fpm.log|" "$ROOT/php-fpm.conf" > "$BROKEN"
+  cp "$ROOT/php-fpm.conf" "$BROKEN"
   printf '\n[does-not-exist]\npm.max_children = 2\n' >> "$BROKEN"
 
+  "$FPM" -t --fpm-config "$BROKEN" 2>/dev/null \
+    && fail "the broken master config is accepted; the case is not set up"
+
+  # A separate pool directory so this cannot disturb the live one, pointed at a
+  # master php-fpm rejects.
+  mkdir -p "$ROOT/broken.d"
   OUT="$ROOT/rejected.out"
-  if "$BIN" apply --memory 512MB --reserve 128MB "${SCOPE[@]}" \
-       --state "$STATE/rejected.json" --backup-dir "$ROOT/backup" > "$OUT" 2>&1; then
-    : # a plan with nothing to change is a legitimate outcome here
+  if "$BIN" apply --memory 512MB --reserve 128MB \
+       --drop-in-dir "$ROOT/broken.d" --state "$STATE/rejected.json" \
+       --backup-dir "$ROOT/backup" > "$OUT" 2>&1; then
+    echo "  (nothing was proposed against the broken master; no rejection to observe)"
+  else
+    echo "  confirmed: the run against a rejected configuration failed rather than writing"
   fi
 
   [ "$(fingerprint)" = "$BEFORE" ] \

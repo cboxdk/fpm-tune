@@ -572,3 +572,42 @@ func TestEverythingGivesWayWhenTheMeasuredPoolsAreNotEnough(t *testing.T) {
 		t.Error("pools were cut below what anyone asked for and the plan says nothing")
 	}
 }
+
+// TestTheMeasuredFirstBranchStillFits.
+//
+// The branch that reduces measured pools before estimated ones exists to be
+// SAFER, and it skipped the trim the other path performs — so it was the one
+// that overcommitted. Rounding each pool up to at least one worker can put the
+// total back over the budget, and asymmetric floors are enough to do it: two
+// measured pools at 100MiB a worker with floors of 100 and 1, against 250MiB,
+// committed 300MiB.
+func TestTheMeasuredFirstBranchStillFits(t *testing.T) {
+	plan, err := Compute(
+		Budget{TotalBytes: 250 * mb},
+		[]Pool{
+			{Name: "big", CurrentMaxChildren: 100, WorkerBytes: 100 * mb, Measured: true,
+				ProcessManager: "dynamic", Floor: 100},
+			{Name: "small", CurrentMaxChildren: 1, WorkerBytes: 100 * mb, Measured: true,
+				ProcessManager: "dynamic", Floor: 1},
+		},
+		Options{},
+	)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+
+	var total int64
+	for _, pp := range plan.Pools {
+		total += pp.Bytes
+	}
+
+	limit := plan.TotalBytes - plan.ReserveBytes
+	if total > limit {
+		t.Errorf("the plan commits %s of %s; the branch that exists to be safer is the "+
+			"one that overcommits", humanBytes(total), humanBytes(limit))
+	}
+	if plan.FreeBytes < 0 {
+		t.Errorf("FreeBytes = %d: the plan knows it does not fit and reports it as a plan",
+			plan.FreeBytes)
+	}
+}

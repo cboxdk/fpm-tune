@@ -426,6 +426,18 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 			used += int64(n) * p.WorkerBytes
 		}
 
+		// The same trim the path below performs, and for the same reason:
+		// rounding each pool up to at least one worker can put the total back
+		// over the budget. Omitting it here made the branch that exists to be
+		// SAFER the one that overcommits — asymmetric floors are enough to do it,
+		// two measured pools at 100MiB with floors of 100 and 1 against 250MiB
+		// committing 300MiB.
+		//
+		// Only measured pools are trimmed, because only they were reduced.
+		used = trimToFit(pools, granted, used, allocatable, func(i int) bool {
+			return pools[i].Measured
+		})
+
 		return granted, allocatable - used, true, nil
 	}
 
@@ -446,10 +458,19 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 	}
 
 	// Rounding up to one worker each can push the total back over the budget.
-	// Trim from the pools with the most workers until it fits, so the damage is
-	// spread rather than falling entirely on the smallest site.
+	used = trimToFit(pools, granted, used, allocatable, nil)
+
+	return granted, allocatable - used, true, nil
+}
+
+// trimToFit takes workers back until the total fits.
+//
+// From the pools with the most workers first, so the damage is spread rather
+// than falling entirely on the smallest site. eligible limits which pools may be
+// trimmed; nil means all of them.
+func trimToFit(pools []Pool, granted []int, used, allocatable int64, eligible func(int) bool) int64 {
 	for used > allocatable {
-		i := largestGranted(granted)
+		i := largestGrantedAmong(granted, eligible)
 		if i < 0 || granted[i] <= 1 {
 			break
 		}
@@ -457,7 +478,7 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 		used -= pools[i].WorkerBytes
 	}
 
-	return granted, allocatable - used, true, nil
+	return used
 }
 
 // allocateDemand distributes what is left after floors, proportionally to each
@@ -650,15 +671,20 @@ func ceilRatio(n int, ratio float64) int {
 	return v
 }
 
-func largestGranted(granted []int) int {
-	best, bestIdx := 0, -1
-	for i, g := range granted {
-		if g > best {
-			best, bestIdx = g, i
+// largestGrantedAmong is largestGranted restricted to the pools a caller is
+// willing to take from.
+func largestGrantedAmong(granted []int, eligible func(int) bool) int {
+	best, bestN := -1, 0
+	for i, n := range granted {
+		if eligible != nil && !eligible(i) {
+			continue
+		}
+		if n > bestN {
+			best, bestN = i, n
 		}
 	}
 
-	return bestIdx
+	return best
 }
 
 // reason explains one pool's number, for the plan output.

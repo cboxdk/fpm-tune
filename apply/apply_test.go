@@ -140,7 +140,8 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 	}
 
 	existing := DropInPath(dir)
-	if err := os.WriteFile(existing, []byte("[shop]\npm.max_children = 5\n"), 0o644); err != nil {
+	original := Render([]allocate.PoolPlan{{Name: "shop", MaxChildren: 5}})
+	if err := os.WriteFile(existing, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,7 +172,7 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the previous fragment is gone: %v", err)
 	}
-	if string(got) != "[shop]\npm.max_children = 5\n" {
+	if string(got) != string(original) {
 		t.Errorf("the live fragment was modified by a rejected change:\n%s", got)
 	}
 
@@ -336,7 +337,8 @@ func TestBackupsAreKeptOutOfTheConfigDirectory(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
 	existing := DropInPath(dir)
-	if err := os.WriteFile(existing, []byte("[shop]\npm.max_children = 5\n"), 0o644); err != nil {
+	original := Render([]allocate.PoolPlan{{Name: "shop", MaxChildren: 5}})
+	if err := os.WriteFile(existing, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
 

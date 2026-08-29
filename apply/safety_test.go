@@ -26,7 +26,9 @@ import (
 func TestDryRunNeverTouchesTheLiveDirectory(t *testing.T) {
 	dir := t.TempDir()
 	existing := DropInPath(dir)
-	original := "[shop]\npm.max_children = 5\n"
+	// This tool's own file. An unmarked one is refused outright now, which is a
+	// different property with its own test.
+	original := string(Render([]allocate.PoolPlan{{Name: "shop", MaxChildren: 5}}))
 
 	if err := os.WriteFile(existing, []byte(original), 0o644); err != nil {
 		t.Fatal(err)

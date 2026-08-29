@@ -221,6 +221,9 @@ var ErrValidationFailed = errors.New("php-fpm rejected the rendered configuratio
 // declining to act.
 var ErrForeignDropIn = errors.New("the drop-in path is occupied by a file this tool did not write")
 
+// ErrUnreadableDropIn reports a drop-in this tool cannot safely rewrite.
+var ErrUnreadableDropIn = errors.New("the drop-in cannot be read back")
+
 // ErrNotIncluded reports that the fragments would be written somewhere the
 // master does not read.
 var ErrNotIncluded = errors.New("php-fpm does not include the files this would write")
@@ -306,19 +309,14 @@ func Apply(
 		return result, err
 	}
 
-	// Validated in a sandbox BEFORE anything is written live. The old order
-	// wrote the real fragments first and put them back if `-t` failed, which
-	// left unvalidated configuration in the directory PHP-FPM globs for as long
-	// as the fork took — adopted by anything that reloaded in that window, and
-	// left behind entirely if the process died there.
-	if err := validateSandboxed(ctx, master, changes); err != nil {
-		return result, err
-	}
-
-	if opts.DryRun {
-		return result, nil
-	}
-
+	// Built BEFORE validation, so what is rehearsed is the file that will be
+	// written. The change set alone is not that file: it omits the pools this
+	// tool already holds and is about to carry forward, and it cannot fail the
+	// way reading them back can. A dry run that validated only the changes
+	// reported success where the real apply would refuse — a foreign drop-in, a
+	// body this tool did not write — which is the one thing a rehearsal must not
+	// do.
+	//
 	// The file holds every pool this tool overrides, not just the ones changing
 	// now: it is replaced whole, so writing only the changes would drop the
 	// others' overrides.
@@ -327,6 +325,19 @@ func Apply(
 		return result, err
 	}
 	rendered := Render(pools)
+
+	// Validated in a sandbox BEFORE anything is written live. The old order
+	// wrote the real fragments first and put them back if `-t` failed, which
+	// left unvalidated configuration in the directory PHP-FPM globs for as long
+	// as the fork took — adopted by anything that reloaded in that window, and
+	// left behind entirely if the process died there.
+	if err := validateSandboxed(ctx, master, pools); err != nil {
+		return result, err
+	}
+
+	if opts.DryRun {
+		return result, nil
+	}
 
 	b, err := writeDropIn(master, pools, opts, log)
 	if err != nil {
@@ -1251,7 +1262,8 @@ func parseOurs(path string) (map[string]allocate.PoolPlan, error) {
 		// without the sections it holds, and every pool held below its own
 		// configuration would jump back on the next reload — the same silent
 		// release as losing the state file, reached from the other direction.
-		return nil, fmt.Errorf("cannot read %s to see what is already overridden: %w", path, err)
+		return nil, fmt.Errorf("%w: cannot read %s to see what is already overridden: %w",
+			ErrUnreadableDropIn, path, err)
 	}
 	if !isOurs(body) {
 		// Someone else's file under this name. Not ours to read back, and
@@ -1272,23 +1284,35 @@ func parseOurs(path string) (map[string]allocate.PoolPlan, error) {
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			current = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
-			if current != "" {
-				owned[current] = allocate.PoolPlan{Name: current}
+			if current == "" {
+				return nil, fmt.Errorf("%w: %s has an empty section header", errNotOurFormat, path)
 			}
+			// A pool cannot appear twice in a file this tool wrote. Accepting it
+			// meant the second header RESET the entry, so a duplicate without a
+			// ceiling silently deleted the override — and the next unrelated
+			// rewrite dropped the section, taking the pool back to its base
+			// configuration.
+			if _, seen := owned[current]; seen {
+				return nil, fmt.Errorf("%w: %s names pool %q twice",
+					errNotOurFormat, path, current)
+			}
+			owned[current] = allocate.PoolPlan{Name: current}
 
 			continue
 		}
 		if current == "" {
-			continue
+			return nil, fmt.Errorf("%w: %s has a setting before any section", errNotOurFormat, path)
 		}
 
 		key, value, found := strings.Cut(line, "=")
 		if !found {
-			continue
+			return nil, fmt.Errorf("%w: %s contains %q, which this tool does not write",
+				errNotOurFormat, path, line)
 		}
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || n < 0 {
-			continue
+			return nil, fmt.Errorf("%w: %s sets %s to %q", errNotOurFormat, path,
+				strings.TrimSpace(key), strings.TrimSpace(value))
 		}
 
 		pp := owned[current]
@@ -1302,7 +1326,11 @@ func parseOurs(path string) (map[string]allocate.PoolPlan, error) {
 		case "pm.max_spare_servers":
 			pp.MaxSpare = n
 		default:
-			continue
+			// Anything else means the body is not this tool's, whatever the
+			// header claims — a hand edit, or someone else's content pasted
+			// under a marker that was copied along with it.
+			return nil, fmt.Errorf("%w: %s sets %s, which this tool does not write",
+				errNotOurFormat, path, strings.TrimSpace(key))
 		}
 		owned[current] = pp
 	}
@@ -1310,12 +1338,22 @@ func parseOurs(path string) (map[string]allocate.PoolPlan, error) {
 	// A section with no ceiling is not an override this tool would have written.
 	for name, pp := range owned {
 		if pp.MaxChildren <= 0 {
-			delete(owned, name)
+			return nil, fmt.Errorf("%w: %s declares pool %q with no pm.max_children",
+				errNotOurFormat, path, name)
 		}
 	}
 
 	return owned, nil
 }
+
+// errNotOurFormat reports a file carrying this tool's marker whose contents it
+// would not have produced.
+//
+// Refused rather than salvaged. Every field read here is fed straight back into
+// the next version of the file, so a body this tool did not write is a body it
+// cannot safely rewrite — and guessing at it is how an override disappears
+// without anyone noticing.
+var errNotOurFormat = errors.New("the drop-in carries this tool's marker but not its contents")
 
 // generatedMarker identifies a file this tool wrote.
 //

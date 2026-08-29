@@ -86,6 +86,23 @@ type PoolState struct {
 	// evidence arrived. The span has to be over the evidence.
 	FirstBusyAt time.Time `json:"first_busy_at,omitempty"`
 
+	// LastBusyAt is when this pool last taught us something.
+	//
+	// The span is measured between the two, so it grows only while evidence is
+	// arriving. Measuring to LastUpdated let idle scrapes carry a pool over the
+	// line: twenty-five busy samples in ten minutes, then two hours of nothing,
+	// and the baseline was fully trusted on the strength of the waiting.
+	LastBusyAt time.Time `json:"last_busy_at,omitempty"`
+
+	// LastPeakAt is when LastPeakBytes was taken, so a stale reading stops acting
+	// as a floor.
+	//
+	// Without it, one anomalous scrape held the sizing high until another mature
+	// scrape happened to arrive — and on a pool that then went quiet, or whose
+	// workers were all young, that could be a very long time. It does not
+	// overcommit, since a high cost means fewer workers; it starves.
+	LastPeakAt time.Time `json:"last_peak_at,omitempty"`
+
 	// LastPeakBytes is the most recent per-scrape maximum from mature workers.
 	//
 	// Used as a FLOOR when sizing. The tracked estimate moves halfway towards a
@@ -401,7 +418,9 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if ps.FirstBusyAt.IsZero() {
 		ps.FirstBusyAt = at
 	}
+	ps.LastBusyAt = at
 	ps.LastPeakBytes = peak
+	ps.LastPeakAt = at
 	if peak > ps.HighWaterBytes {
 		ps.HighWaterBytes = peak
 	}
@@ -492,6 +511,11 @@ func decayAlpha(since, halfLife time.Duration) float64 {
 // against workers that no longer exist. Being slow to believe memory got CHEAPER
 // costs some unused headroom; being slow to believe it got more EXPENSIVE costs
 // the host.
+// peakFloorLifetime is how long the latest reading acts as a floor. Long enough
+// to cover a scrape or two of a busy pool; short enough that an outlier does not
+// outlive the traffic that produced it.
+const peakFloorLifetime = 15 * time.Minute
+
 func (ps *PoolState) SizingBytes() int64 {
 	if ps == nil {
 		return 0
@@ -501,7 +525,16 @@ func (ps *PoolState) SizingBytes() int64 {
 	if size == 0 {
 		size = ps.HighWaterBytes
 	}
-	if ps.LastPeakBytes > size {
+	// The floor expires. A single anomalous scrape otherwise held the sizing
+	// high until another mature scrape happened to arrive, which on a pool that
+	// has gone quiet can be a very long time. That does not overcommit — a high
+	// cost means fewer workers — but it starves the pool and its neighbours for
+	// no reason anyone can see.
+	// Measured against the last time the pool was SEEN, which is what LastUpdated
+	// records and is effectively now: the plan is built immediately after the
+	// scrape that produced it.
+	if ps.LastPeakBytes > size && !ps.LastPeakAt.IsZero() &&
+		ps.LastUpdated.Sub(ps.LastPeakAt) <= peakFloorLifetime {
 		size = ps.LastPeakBytes
 	}
 
@@ -528,16 +561,19 @@ func (ps *PoolState) Confidence(opts Options) float64 {
 	}
 
 	bySamples := float64(ps.BusySamples) / float64(opts.ConfidenceSamples)
-	// Measured from the first BUSY sample, not from first sight. A pool idle for
-	// days had its clock run out long before any evidence arrived, so twenty
-	// busy samples over ten minutes made it fully trusted — and the span exists
-	// precisely to insist that a baseline has been watched through a real traffic
-	// pattern rather than a lunchtime.
-	since := ps.FirstBusyAt
-	if since.IsZero() {
-		since = ps.FirstSeen
+	// Measured across the EVIDENCE: first busy sample to last busy sample. Not
+	// from first sight, which let a pool idle for days arrive pre-trusted, and
+	// not to LastUpdated, which let idle scrapes carry it over the line — twenty
+	// busy samples in ten minutes, then two hours of nothing, and the baseline
+	// counted as watched through a real traffic pattern.
+	//
+	// State written before these fields existed has neither, and is treated as
+	// having no span rather than as having satisfied it: inheriting the old
+	// overconfidence on upgrade would be the worst of both.
+	if ps.FirstBusyAt.IsZero() || ps.LastBusyAt.IsZero() {
+		return 0
 	}
-	bySpan := float64(ps.LastUpdated.Sub(since)) / float64(opts.ConfidenceSpan)
+	bySpan := float64(ps.LastBusyAt.Sub(ps.FirstBusyAt)) / float64(opts.ConfidenceSpan)
 
 	c := bySamples
 	if bySpan < c {
