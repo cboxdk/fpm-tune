@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -201,4 +203,85 @@ func exposes(t *testing.T, c *Collectors, want string) bool {
 
 func trimFloat(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// TestTheSurfaceCarriesWhatAnAlertNeeds.
+//
+// The log reports a persistent condition once rather than every interval, which
+// is right for reading and useless for alerting. Whether this process is even
+// acting on its plans was also unobservable: a tool that only watches looks
+// exactly like one that is acting, and telling them apart is the whole question
+// when a host is not being tuned.
+func TestTheSurfaceCarriesWhatAnAlertNeeds(t *testing.T) {
+	c := New()
+
+	c.SetApplyEnabled(true)
+	c.RecordApply(1700000000, true, false, nil)
+	c.RecordApply(1700000030, false, true, errors.New("php-fpm rejected it"))
+	c.RecordRepair()
+
+	for name, got := range map[string]float64{
+		"apply_enabled":  testutil.ToFloat64(c.applyEnabled),
+		"last_apply":     testutil.ToFloat64(c.lastApply),
+		"applies_failed": testutil.ToFloat64(c.appliesFailed),
+		"rollbacks":      testutil.ToFloat64(c.rollbacks),
+		"repairs":        testutil.ToFloat64(c.repairs),
+	} {
+		if got == 0 {
+			t.Errorf("fpm_tune_%s is zero after the event it counts", name)
+		}
+	}
+
+	if got := testutil.ToFloat64(c.lastApply); got != 1700000000 {
+		t.Errorf("last_apply = %v; a failed apply must not look like a successful one", got)
+	}
+	if got := testutil.ToFloat64(c.appliesFailed); got != 1 {
+		t.Errorf("applies_failed = %v, want 1", got)
+	}
+}
+
+// TestConfidenceSaysWhatItNowMeans: the help text said a pool below full
+// confidence is "sized from an estimate", which stopped being true when the
+// per-worker cost and the permission to shrink were separated. A wrong help
+// string is a lie in the part of the tool an operator reads.
+func TestConfidenceSaysWhatItNowMeans(t *testing.T) {
+	c := New()
+	// A vector with no observations is omitted from the registry entirely, so
+	// the help text only exists once something has been published.
+	c.confidence.WithLabelValues("shop").Set(0.5)
+
+	body := describe(t, c)
+
+	line := ""
+	for _, l := range strings.Split(body, "\n") {
+		if strings.HasPrefix(l, "# HELP fpm_tune_pool_baseline_confidence") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatal("the confidence series has no help text")
+	}
+	if strings.Contains(line, "sized from an estimate") {
+		t.Errorf("the help still claims an untrusted pool is sized from an estimate: %s", line)
+	}
+	if !strings.Contains(line, "will not be cut") {
+		t.Errorf("the help does not say what confidence actually governs: %s", line)
+	}
+}
+
+// describe renders the registry's help text, which is part of the surface an
+// operator reads and therefore part of what can be wrong.
+func describe(t *testing.T, c *Collectors) string {
+	t.Helper()
+
+	var b strings.Builder
+	families, err := c.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		fmt.Fprintf(&b, "# HELP %s %s\n", f.GetName(), f.GetHelp())
+	}
+
+	return b.String()
 }

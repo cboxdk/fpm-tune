@@ -165,6 +165,8 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 
+	l.metrics.SetApplyEnabled(l.cfg.Apply)
+
 	l.log.Info("fpm-tune running",
 		"interval", l.cfg.Interval,
 		"apply", l.cfg.Apply,
@@ -304,6 +306,8 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	opts.BackupDir = l.cfg.BackupDir
 
 	applied, err := apply.Apply(ctx, result.Plan, master, l.state, opts, l.log)
+	l.metrics.RecordApply(float64(now.Unix()), len(applied.Changed()) > 0, applied.RolledBack, err)
+
 	if err != nil {
 		l.log.Error("Apply failed", "error", err, "rolled_back", applied.RolledBack)
 
@@ -364,6 +368,7 @@ func (l *Loop) reconcile(ctx context.Context) {
 	}
 
 	if err := apply.Reconcile(ctx, master, opts, l.log); err != nil {
+		l.metrics.RecordRepair()
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
 

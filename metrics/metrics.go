@@ -32,6 +32,12 @@ type Collectors struct {
 	capacityExhausted prometheus.Gauge
 	poolsUnreachable  prometheus.Gauge
 	lastRun           prometheus.Gauge
+
+	applyEnabled  prometheus.Gauge
+	lastApply     prometheus.Gauge
+	appliesFailed prometheus.Counter
+	rollbacks     prometheus.Counter
+	repairs       prometheus.Counter
 }
 
 // New builds the collectors and registers them.
@@ -53,7 +59,11 @@ func New() *Collectors {
 			// asymmetric moving estimate.
 			"Learned per-worker memory. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen.", "pool", "estimate"),
 		confidence: gaugeVec(reg, "fpm_tune_pool_baseline_confidence",
-			"How far the learned baseline is trusted, 0 to 1. Below 1 the pool is sized from an estimate and will not be cut.", "pool"),
+			// Corrected: it used to say a pool below 1 is "sized from an
+			// estimate", which stopped being true when the cost and the
+			// permission to shrink were separated. A measurement is a
+			// measurement whatever the confidence.
+			"How far the learned baseline is trusted, 0 to 1. Below 1 the pool will not be cut below what it is configured for; its per-worker cost is still whatever has been measured. See fpm_tune_pool_measured.", "pool"),
 		demandUnmet: gaugeVec(reg, "fpm_tune_pool_demand_unmet",
 			"1 when a pool wants more workers than it was given. On its own this is routine — read it with fpm_tune_capacity_exhausted.", "pool"),
 		poolMeasured: gaugeVec(reg, "fpm_tune_pool_measured",
@@ -65,6 +75,24 @@ func New() *Collectors {
 		capacityExhausted: gauge(reg, "fpm_tune_capacity_exhausted",
 			"1 when a pool wants more workers and there is nowhere left to get them — no free budget and no neighbour holding memory it is not using. "+
 				"Unlike unmet demand alone, no configuration change will help: the host needs more memory or fewer pools."),
+		applyEnabled: gauge(reg, "fpm_tune_apply_enabled",
+			"1 when this process will act on its plan. A tool that only observes looks "+
+				"identical to one that is acting, and the difference is the whole question "+
+				"when a host is not being tuned."),
+		lastApply: gauge(reg, "fpm_tune_last_apply_timestamp_seconds",
+			"When a change was last written and adopted. Distinct from the evaluation "+
+				"timestamp: a loop can be running and deciding to do nothing, which is "+
+				"correct, or running and failing to act, which is not."),
+		appliesFailed: counter(reg, "fpm_tune_applies_failed_total",
+			"Applies that ended in an error. The log says what; this says how often, "+
+				"which is what an alert needs."),
+		rollbacks: counter(reg, "fpm_tune_rollbacks_total",
+			"Changes taken back out because php-fpm rejected them or its master did not "+
+				"survive the reload. Any value above zero deserves a look at the log."),
+		repairs: counter(reg, "fpm_tune_repairs_total",
+			"Times this tool had to undo or complete something a previous run left behind, "+
+				"or remove its own file to let php-fpm start."),
+
 		poolsUnreachable: gauge(reg, "fpm_tune_pools_unreachable",
 			"Pools that could not be scraped. Their allocation is left alone rather than handed to their neighbours."),
 		lastRun: gauge(reg, "fpm_tune_last_run_timestamp_seconds",
@@ -79,6 +107,13 @@ func gaugeVec(reg *prometheus.Registry, name, help string, labels ...string) *pr
 	reg.MustRegister(v)
 
 	return v
+}
+
+func counter(reg *prometheus.Registry, name, help string) prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: name, Help: help})
+	reg.MustRegister(c)
+
+	return c
 }
 
 func gauge(reg *prometheus.Registry, name, help string) prometheus.Gauge {
@@ -141,3 +176,32 @@ func boolValue(b bool) float64 {
 
 	return 0
 }
+
+// SetApplyEnabled records whether this process acts on its plans.
+func (c *Collectors) SetApplyEnabled(on bool) {
+	v := 0.0
+	if on {
+		v = 1
+	}
+	c.applyEnabled.Set(v)
+}
+
+// RecordApply notes the outcome of one apply.
+//
+// Counted rather than logged alone, because the log now reports a persistent
+// condition once rather than every interval — which is right for reading and
+// useless for alerting. A counter is the thing to alert on.
+func (c *Collectors) RecordApply(at float64, changed, rolledBack bool, err error) {
+	switch {
+	case err != nil:
+		c.appliesFailed.Inc()
+	case changed:
+		c.lastApply.Set(at)
+	}
+	if rolledBack {
+		c.rollbacks.Inc()
+	}
+}
+
+// RecordRepair notes that recovery had to act.
+func (c *Collectors) RecordRepair() { c.repairs.Inc() }

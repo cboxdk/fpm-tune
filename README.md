@@ -76,6 +76,17 @@ fpm_tune_pool_demand_unmet{pool}   # this pool wants more workers
 fpm_tune_capacity_exhausted        # ...and there is nowhere left to get them
 ```
 
+And the ones to alert on, because the log reports a persistent condition once
+rather than every interval:
+
+```
+fpm_tune_apply_enabled                    # 0 means this process only watches
+fpm_tune_last_apply_timestamp_seconds     # not advancing while changes are pending
+fpm_tune_applies_failed_total
+fpm_tune_rollbacks_total                  # above zero deserves a look at the log
+fpm_tune_repairs_total                    # it had to undo something a run left behind
+```
+
 Demand alone is routine — fpm-tune takes headroom from an idle pool and gives it
 to a busy one. Both together is the signal that no configuration change will
 help: the machine needs more RAM, or fewer sites. On a host in that state it
