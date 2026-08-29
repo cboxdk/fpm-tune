@@ -38,7 +38,11 @@ type WorkerSample struct {
 type Observation struct {
 	Pool    string
 	Workers []WorkerSample
-	At      time.Time
+
+	// ActiveNow is how many workers were busy at this instant. A smaller reading
+	// from a pool with nobody working is a quiet pool, not a cheaper one.
+	ActiveNow int
+	At        time.Time
 }
 
 // PoolState is what has been learned about one pool.
@@ -188,10 +192,31 @@ type Options struct {
 	// sized for many cheap workers, and the morning made them expensive again —
 	// measured at 147 workers × 100MiB configured on an 8GiB host.
 	//
-	// In time, the sampling rate cannot change the behaviour. Long enough to
-	// outlast a quiet night, short enough to follow a real change within a
-	// shift.
+	// In time, the sampling rate cannot change the behaviour.
+	//
+	// Six hours was chosen so a quiet night could not pull the estimate down,
+	// and it did that at a price: measured on a VM, the tool sat at 214MiB per
+	// worker while its workers had measured 93MiB for forty minutes and 595
+	// consecutive samples, reserving well over twice what the pool needed. On a
+	// fully committed host that is not caution — it is every other pool going
+	// short, for most of a working day.
+	//
+	// Shortening it alone would have reintroduced the failure it was guarding
+	// against, so the guard moved instead: the estimate only falls while the pool
+	// is actually BUSY (see Observation.ActiveNow). A quiet pool no longer
+	// teaches anything downward whatever the half-life says, which is what makes
+	// a shorter one safe.
 	HalfLifeDown time.Duration
+
+	// MinActiveToDecay is how many workers must be busy for a smaller reading to
+	// count as evidence.
+	//
+	// This is the distinction the half-life alone could not make. A pool that got
+	// CHEAPER and a pool that got QUIETER both show smaller workers — PHP returns
+	// large allocations to the operating system, so an idle survivor genuinely
+	// shrinks — and only one of them says anything about what the workload costs.
+	// Concurrency tells them apart.
+	MinActiveToDecay int
 
 	// ConfidenceSamples and ConfidenceSpan are what a baseline needs before it
 	// is trusted enough to size a pool DOWN.
@@ -214,6 +239,9 @@ func (o Options) Defaults() Options {
 	if o.MinRequestsPerWorker <= 0 {
 		o.MinRequestsPerWorker = 20
 	}
+	if o.MinActiveToDecay <= 0 {
+		o.MinActiveToDecay = 2
+	}
 	if o.MinMatureWorkers <= 0 {
 		o.MinMatureWorkers = 2
 	}
@@ -221,7 +249,7 @@ func (o Options) Defaults() Options {
 		o.AlphaUp = 0.5
 	}
 	if o.HalfLifeDown <= 0 {
-		o.HalfLifeDown = 6 * time.Hour
+		o.HalfLifeDown = 30 * time.Minute
 	}
 	if o.ConfidenceSamples <= 0 {
 		o.ConfidenceSamples = 20
@@ -382,8 +410,16 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		ps.TypicalPeakBytes = peak
 	} else {
 		alpha := decayAlpha(since, opts.HalfLifeDown)
-		if peak > ps.TypicalPeakBytes {
+		switch {
+		case peak > ps.TypicalPeakBytes:
 			alpha = opts.AlphaUp
+		case obs.ActiveNow < opts.MinActiveToDecay:
+			// Smaller, from a pool that is not working. That is what a quiet
+			// stretch looks like, and believing it is how a quiet night leaves
+			// the morning sized for workers that do not exist. The high-water
+			// mark and the sample count above still stand — only the estimate
+			// holds.
+			alpha = 0
 		}
 		ps.TypicalPeakBytes = int64(alpha*float64(peak) + (1-alpha)*float64(ps.TypicalPeakBytes))
 	}

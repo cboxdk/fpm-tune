@@ -117,8 +117,12 @@ func TestEstimateRisesFastAndFallsSlow(t *testing.T) {
 	opts := Options{}
 	now := time.Now()
 
+	// ActiveNow says the pool is working. A smaller reading from an IDLE pool is
+	// deliberately not believed — that is a lull, not a cheaper application —
+	// so a test about the estimate following the workload has to say the
+	// workload is there.
 	steady := func(rss int64, at time.Time) Observation {
-		return Observation{Pool: "app", At: at, Workers: []WorkerSample{
+		return Observation{Pool: "app", At: at, ActiveNow: 8, Workers: []WorkerSample{
 			{RSSBytes: rss, Requests: 300},
 			{RSSBytes: rss, Requests: 300},
 		}}
@@ -165,9 +169,13 @@ func TestEstimateRisesFastAndFallsSlow(t *testing.T) {
 		}
 	}
 
-	if afterFirstQuiet < 130*mb {
-		t.Errorf("one quiet reading dropped the estimate to %dMB; the next busy "+
-			"minute would find the pool over-provisioned with workers", afterFirstQuiet/mb)
+	// Smoothed, not instant: one reading is one reading, whatever it says. What
+	// stops a LULL pulling the estimate down is no longer the length of the
+	// half-life but the concurrency guard — a smaller reading from an idle pool
+	// is not believed at all — so this only has to check that a single busy
+	// observation does not become the answer outright.
+	if afterFirstQuiet <= 50*mb {
+		t.Errorf("one smaller reading became the estimate outright (%dMB)", afterFirstQuiet/mb)
 	}
 
 	// Over a full day of 50MB workers it comes all the way back down, so the
@@ -236,13 +244,21 @@ func TestDecayRateIsIndependentOfTheScrapeInterval(t *testing.T) {
 		t.Errorf("sampling every 5s took %s but every 5m took %s; the scrape rate "+
 			"is changing how fast the estimate falls", fast, slow)
 	}
-	if fast < time.Hour {
-		t.Errorf("halfway in %s is not a half-life that outlasts a quiet night", fast)
+	// The length is deliberately no longer asked to outlast a quiet night. That
+	// job moved to the concurrency guard, which refuses a smaller reading from an
+	// idle pool however long the half-life is — and leaving the length to do it
+	// cost the tool most of a working day at twice the memory a pool needed,
+	// measured on a VM. What matters here is that the rate is a property of TIME
+	// and not of how often anyone happens to look.
+	if fast < 5*time.Minute {
+		t.Errorf("halfway in %s is fast enough for one odd reading to matter", fast)
 	}
 }
 
+// steadyAt is a pool under steady load. ActiveNow matters: a smaller reading
+// from an idle pool is not evidence that the application got cheaper.
 func steadyAt(pool string, rss int64, at time.Time) Observation {
-	return Observation{Pool: pool, At: at, Workers: []WorkerSample{
+	return Observation{Pool: pool, At: at, ActiveNow: 8, Workers: []WorkerSample{
 		{RSSBytes: rss, Requests: 300},
 		{RSSBytes: rss, Requests: 300},
 	}}
@@ -658,5 +674,89 @@ func TestConfidenceIsMeasuredOverEvidence(t *testing.T) {
 	if c := st.Pools["quiet"].Confidence(opts); c >= 1 {
 		t.Errorf("confidence = %.2f after ten minutes of evidence against a two-hour "+
 			"span; the pool's age was standing in for having been watched", c)
+	}
+}
+
+// TestASustainedReductionIsBelievedWithinTheHour.
+//
+// The downward half-life was six hours, to stop a quiet period pulling the
+// estimate down. That reasoning is answered twice over already:
+// MinRequestsPerWorker excludes workers that have not loaded the application,
+// and PHP does not return memory to the OS — so a quiet pool produces readings
+// at or near its previous peak, or none at all, not small ones.
+//
+// So a reading below the estimate means the workload changed. Measured on a VM,
+// six hours of disbelieving it left the tool reserving 214MiB per worker while
+// its workers had measured 93MiB for forty minutes and 595 samples. On a fully
+// committed host that is every other pool going short.
+func TestASustainedReductionIsBelievedWithinTheHour(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	// Settled expensive.
+	for i := range 20 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * time.Minute), ActiveNow: 8,
+			Workers: []WorkerSample{
+				{RSSBytes: 240 << 20, Requests: 500},
+				{RSSBytes: 240 << 20, Requests: 500},
+			}}, opts)
+	}
+	if got := st.Pools["shop"].SizingBytes(); got < 230<<20 {
+		t.Fatalf("did not settle expensive: %d", got)
+	}
+
+	// A deploy makes it cheap, and it STAYS cheap for an hour.
+	cheap := now.Add(30 * time.Minute)
+	for i := range 60 {
+		st.Learn(Observation{Pool: "shop", At: cheap.Add(time.Duration(i) * time.Minute), ActiveNow: 8,
+			Workers: []WorkerSample{
+				{RSSBytes: 90 << 20, Requests: 500},
+				{RSSBytes: 90 << 20, Requests: 500},
+			}}, opts)
+	}
+
+	got := st.Pools["shop"].SizingBytes()
+	if got > 120<<20 {
+		t.Errorf("after an hour of measuring 90MiB the estimate is still %dMiB; the pool "+
+			"is reserving %.1fx what it needs, and on a committed host that is taken "+
+			"from its neighbours", got>>20, float64(got)/float64(90<<20))
+	}
+}
+
+// TestAQuietSpellDoesNotPullTheEstimateDown is the other half: the shorter
+// half-life must not reintroduce what the long one was for. A pool that goes
+// quiet teaches nothing — its workers keep their memory and its readings stop —
+// so the estimate should hold where it was.
+func TestAQuietSpellDoesNotPullTheEstimateDown(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	for i := range 20 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * time.Minute), ActiveNow: 8,
+			Workers: []WorkerSample{
+				{RSSBytes: 240 << 20, Requests: 500},
+				{RSSBytes: 240 << 20, Requests: 500},
+			}}, opts)
+	}
+	settled := st.Pools["shop"].SizingBytes()
+
+	// Eight quiet hours: workers exist but have served almost nothing, so they
+	// are excluded — and a fresh worker's small RSS must not be mistaken for the
+	// pool having become cheap.
+	quiet := now.Add(30 * time.Minute)
+	for i := range 96 {
+		st.Learn(Observation{Pool: "shop", At: quiet.Add(time.Duration(i) * 5 * time.Minute), ActiveNow: 8,
+			Workers: []WorkerSample{
+				{RSSBytes: 12 << 20, Requests: 2},
+				{RSSBytes: 11 << 20, Requests: 1},
+			}}, opts)
+	}
+
+	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
+		t.Errorf("a quiet night pulled the estimate from %dMiB to %dMiB; the morning "+
+			"would find the pool sized for workers that do not exist",
+			settled>>20, got>>20)
 	}
 }

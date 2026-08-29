@@ -49,6 +49,14 @@ type PoolView struct {
 	// had busy at once since it started.
 	ObservedPeak int
 
+	// ActiveNow is how many workers are busy at this instant.
+	//
+	// The difference between a pool that got CHEAPER and one that got QUIETER.
+	// Both show smaller workers — a quiet pool's surviving workers can have
+	// returned their memory to the operating system — and only one of them is
+	// evidence about what the workload costs.
+	ActiveNow int
+
 	// QueueDepth is the current listen queue, and MaxChildrenReached is how many
 	// times the pool has hit its ceiling. Together they separate "the ceiling is
 	// fine" from "the ceiling is what is hurting".
@@ -68,7 +76,7 @@ type PoolView struct {
 
 // Observation converts the view into something the learner can fold in.
 func (v PoolView) Observation() state.Observation {
-	return state.Observation{Pool: v.Name, Workers: v.Workers}
+	return state.Observation{Pool: v.Name, Workers: v.Workers, ActiveNow: v.ActiveNow}
 }
 
 // Discover finds the pools on this host.
@@ -147,6 +155,7 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 
 		view.ProcessManager = pool.ProcessManager
 		view.ObservedPeak = int(pool.MaxActiveProcesses)
+		view.ActiveNow = int(pool.ActiveProcesses)
 		view.QueueDepth = pool.ListenQueue
 		view.MaxChildrenReached = pool.MaxChildrenReached
 		view.CurrentMaxChildren, view.MaxChildrenKnown = configuredMaxChildren(pool)
