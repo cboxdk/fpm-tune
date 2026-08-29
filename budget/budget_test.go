@@ -192,7 +192,7 @@ func TestOverrideWins(t *testing.T) {
 // TestDetectOnThisMachine is a smoke test: whatever this is running on, it must
 // produce a usable budget rather than zero.
 func TestDetectOnThisMachine(t *testing.T) {
-	got := Detect()
+	got := DetectFor(0)
 
 	if got.MemoryBytes <= 0 {
 		t.Errorf("no memory detected on this host; Describe: %s", got.Describe())
@@ -343,9 +343,10 @@ func TestDetectForTakesTheTightestLimitInThePath(t *testing.T) {
 }
 
 // TestDetectForFallsBackWhenThereIsNoLimit: a bare VM with no slice cap must
-// still report the machine's memory rather than nothing.
+// still report the machine's memory rather than nothing. Pid zero is how that is
+// asked, and it is the only way to ask it.
 func TestDetectForFallsBackWhenThereIsNoLimit(t *testing.T) {
-	plain := Detect()
+	plain := DetectFor(0)
 	if plain.MemoryBytes <= 0 {
 		t.Skip("no memory reading available on this host")
 	}

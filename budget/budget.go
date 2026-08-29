@@ -86,18 +86,20 @@ var defaultPaths = sysPaths{
 // becomes a limit of about 8.8 exabytes and every derived setting scales off it.
 const implausibleLimit = int64(1) << 50
 
-// Detect reads the host's limits.
-func Detect() Limits {
-	return detectWith(defaultPaths)
-}
-
-// DetectFor reads the limits that apply to a PARTICULAR process, which on a VM
-// is not the same question.
+// DetectFor reads the limits that apply to a PARTICULAR process.
 //
-// Detect reads /sys/fs/cgroup/memory.max — an absolute path, which is the ROOT
-// of the hierarchy. Inside a container that is exactly right: the container's
-// own cgroup is what gets mounted there, so the root IS the container's limit.
-// On a VM it is the machine, and the machine is never limited.
+// A pid of zero asks about the host itself, which is the right question only
+// when there is no particular process in mind. There used to be a Detect() that
+// asked nothing else, and it was removed rather than kept beside this one: it is
+// the reading that caused the fault below, and a tool whose entire job is to
+// respect one process's ceiling should not have a convenient way to ask about
+// somebody else's.
+//
+// The bare reading looks at /sys/fs/cgroup/memory.max — an absolute path, which
+// is the ROOT of the hierarchy. Inside a container that is exactly right: the
+// container's own cgroup is what gets mounted there, so the root IS the
+// container's limit. On a VM it is the machine, and the machine is never
+// limited.
 //
 // So a php-fpm under a systemd slice with MemoryMax=3G was sized against the
 // host's 20GiB. Measured on a five-pool Ubuntu VM: fpm-tune reported "14.7GiB
