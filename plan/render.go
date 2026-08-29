@@ -56,8 +56,18 @@ func (r Result) Render(w io.Writer) error {
 			marker = " *"
 		}
 
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d%s\t%s\t%s\n",
-			p.Name, now, p.MaxChildren, marker, budget.HumanBytes(p.Bytes), p.Reason)
+		// A pool whose configuration could not be read is accounted for in the
+		// budget and cannot be WRITTEN: setting a ceiling means replacing a known
+		// one. Printing a plan number for it in the same column as the pools that
+		// will change reads as a promise, and the operator comes back to find that
+		// pool exactly as it was.
+		size := fmt.Sprintf("%d%s", p.MaxChildren, marker)
+		if p.Unknown {
+			size = "—"
+		}
+
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			p.Name, now, size, budget.HumanBytes(p.Bytes), p.Reason)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

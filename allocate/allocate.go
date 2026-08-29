@@ -891,6 +891,14 @@ func reason(p Pool, granted, want, floor int, exhausted bool) string {
 	case granted < p.CurrentMaxChildren:
 		return fmt.Sprintf("peak %d workers busy; %d is enough, %s %s/worker",
 			p.ObservedPeak, granted, source, humanBytes(p.WorkerBytes))
+	case !p.Reducible && granted == p.CurrentMaxChildren && p.ObservedPeak*2 < granted:
+		// The commonest "why is this pool not moving" question, and nothing
+		// answered it. A pool with plenty of headroom that is not being cut is
+		// being held by the confidence gate, and from outside that is
+		// indistinguishable from the tool ignoring it.
+		return fmt.Sprintf("peak %d workers busy, but not yet watched under load; held at "+
+			"its configured %d, %s %s/worker",
+			p.ObservedPeak, granted, source, humanBytes(p.WorkerBytes))
 	default:
 		return fmt.Sprintf("unchanged at %d; %s %s/worker",
 			granted, source, humanBytes(p.WorkerBytes))

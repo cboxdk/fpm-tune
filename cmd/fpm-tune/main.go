@@ -183,9 +183,7 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		return plan.Result{}, nil, err
 	}
 	if len(targets) == 0 {
-		return plan.Result{}, nil, fmt.Errorf("no PHP-FPM pools found. " +
-			"Discovery reads the process table and needs permission to inspect other users' " +
-			"processes, so this usually means it is not running as root")
+		return plan.Result{}, nil, noPoolsError()
 	}
 	log.Debug("Discovered pools", "count", len(targets))
 
@@ -435,6 +433,17 @@ func runApply(args []string) error {
 	return nil
 }
 
+// noPoolsError explains an empty discovery in the order the causes actually
+// occur. It used to name permissions and nothing else, which sends someone to
+// check their privileges when the answer is usually that php-fpm is not
+// running — and the two look identical from here.
+func noPoolsError() error {
+	return errors.New("no PHP-FPM pools found. " +
+		"Either no php-fpm master is running — check with `systemctl status php-fpm` " +
+		"or `pgrep -a php-fpm` — or this process cannot see it: discovery reads the " +
+		"process table, and inspecting another user's processes needs root")
+}
+
 func renderApplied(res apply.Result, dryRun bool, err error) {
 	if len(res.Outcomes) == 0 {
 		fmt.Println("No pools to consider.")
@@ -451,20 +460,36 @@ func renderApplied(res apply.Result, dryRun bool, err error) {
 
 	switch {
 	case len(res.RollbackFailed) > 0:
-		// The most important line this command can print. Nothing is broken yet
-		// — the master was never signalled — but the rejected configuration is
-		// on disk, and the next reload from any source will adopt it.
+		// The most important line this command can print, and it has to say
+		// which of the two states the host is in. The message used to assert
+		// "nothing is broken yet" unconditionally; that is only true when the
+		// change was rejected before the master was signalled. When the master
+		// was signalled and did not come back, php-fpm is already down.
+		files := strings.Join(res.RollbackFailed, "\n  ")
+		if errors.Is(err, apply.ErrMasterDidNotSurvive) {
+			fmt.Printf("\nPHP-FPM IS DOWN AND COULD NOT BE PUT BACK.\n"+
+				"The master did not survive the reload, and the configuration that killed\n"+
+				"it could not be removed:\n  %s\n"+
+				"Remove these files, then `systemctl reset-failed php-fpm && systemctl "+
+				"start php-fpm`.\n", files)
+
+			break
+		}
 		fmt.Printf("\nROLLBACK FAILED. The rejected configuration is still in place:\n  %s\n"+
 			"PHP-FPM has not been reloaded, so nothing is broken yet — but the next reload\n"+
 			"from any source will adopt it and the master will not come back. Remove these\n"+
-			"files before anything reloads php-fpm.\n",
-			strings.Join(res.RollbackFailed, "\n  "))
+			"files before anything reloads php-fpm.\n", files)
+	case res.RolledBack:
+		// Before the generic error, not after it. A rollback ALWAYS carries an
+		// error — that is what caused it — so this case could never be reached,
+		// and the one outcome an operator most needs to recognise was reported
+		// as "nothing was applied", which reads like nothing happened.
+		fmt.Printf("\nRolled back — the previous configuration has been restored.\nThe change "+
+			"was refused: %v\n", err)
 	case err != nil:
 		fmt.Printf("\nNothing was applied: %v\n", err)
 	case dryRun:
 		fmt.Println("\nDry run: the configuration was rendered and validated, then discarded.")
-	case res.RolledBack:
-		fmt.Println("\nRolled back — the previous configuration has been restored.")
 	case res.Reloaded:
 		fmt.Printf("\nReloaded PHP-FPM (%d pool(s) changed).\n", len(res.Changed()))
 	case len(res.Changed()) > 0:
