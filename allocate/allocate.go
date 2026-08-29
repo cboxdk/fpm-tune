@@ -623,14 +623,18 @@ func allocateDemand(pools []Pool, wants, granted []int, remaining int64) int64 {
 		// Pools that still want more and can still be afforded.
 		var totalGap int64
 		type candidate struct {
-			i   int
-			gap int
+			i      int
+			gap    int
+			urgent bool
 		}
 		var cands []candidate
 		for i, p := range pools {
 			gap := wants[i] - granted[i]
 			if gap > 0 && p.WorkerBytes <= remaining {
-				cands = append(cands, candidate{i: i, gap: gap})
+				cands = append(cands, candidate{
+					i: i, gap: gap,
+					urgent: p.HitMaxChildren || p.QueueDepth > 0,
+				})
 				totalGap += int64(gap)
 			}
 		}
@@ -638,14 +642,60 @@ func allocateDemand(pools []Pool, wants, granted []int, remaining int64) int64 {
 			return remaining
 		}
 
-		// Larger gaps are served first within a round, so a pool that is far
-		// short is not left behind by rounding.
-		sort.SliceStable(cands, func(a, b int) bool { return cands[a].gap > cands[b].gap })
+		// Pools that are actually HURTING come first, then larger gaps.
+		//
+		// The gap alone put the priority the wrong way round. A gap is how far a
+		// pool is from what it would like; a listen queue is requests waiting
+		// right now, and a pool at its ceiling is turning that queue into
+		// latency someone is measuring. Sorting on the gap gave a cheap pool
+		// wanting 399 more workers its pick of the budget ahead of a saturated
+		// one wanting 2 — measured, with 100MiB free: the cheap pool took 40
+		// workers and the queueing pool got one.
+		//
+		// This is also what QueueDepth is for. It was carried from the scrape,
+		// through the plan, into this struct, documented as the difference
+		// between "the ceiling is where it should be" and "the ceiling is what
+		// is hurting" — and then read by nothing.
+		sort.SliceStable(cands, func(a, b int) bool {
+			if cands[a].urgent != cands[b].urgent {
+				return cands[a].urgent
+			}
+			if cands[a].urgent {
+				// Among pools that are queueing, the SMALLEST gap first: it is
+				// the cheapest site to take out of the queue, and serving it
+				// first resolves the most pools with the budget available.
+				return cands[a].gap < cands[b].gap
+			}
+
+			return cands[a].gap > cands[b].gap
+		})
+
+		// Every share is computed against the budget as it stood at the START of
+		// the round, not against what the pools before it have left.
+		//
+		// remaining is mutated inside this loop, so measuring each share against
+		// it meant the first candidate took its proportion of the whole
+		// remainder and everyone after it divided the leftovers. Sorted
+		// largest-first, that is the first-come behaviour this pass exists to
+		// avoid, arrived at by the ordering that was supposed to prevent it.
+		pot := remaining
 
 		progressed := false
 		for _, c := range cands {
 			p := pools[c.i]
-			share := int(float64(remaining) * (float64(c.gap) / float64(totalGap)) / float64(p.WorkerBytes))
+
+			// A queueing pool gets what it is SHORT, not its proportion of it.
+			//
+			// The gap of a saturated pool is the number of workers between it
+			// and requests no longer waiting — a small, specific number bounded
+			// by the evidence cap in poolWant. Handing it a fraction of that,
+			// proportional to a gap that is small precisely because the need is
+			// modest, is how a pool two workers short of working spent round
+			// after round one worker short instead.
+			share := c.gap
+			if !c.urgent {
+				share = int(float64(pot) * (float64(c.gap) / float64(totalGap)) / float64(p.WorkerBytes))
+			}
 			if share < 1 {
 				share = 1
 			}

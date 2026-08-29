@@ -88,3 +88,48 @@ func TestGrowthStillOutrunsTheHeadroomFactorOnce(t *testing.T) {
 			saturated.Pools[0].MaxChildren, calm.Pools[0].MaxChildren)
 	}
 }
+
+// TestTheQueueingPoolIsServedBeforeTheHungryOne.
+//
+// A gap is how far a pool is from what it would LIKE. A listen queue is requests
+// waiting right now. Ordering the demand pass by the gap alone put those the
+// wrong way round: a cheap pool wanting hundreds more workers took its pick of
+// the budget ahead of an expensive pool that was actively turning its queue into
+// latency.
+//
+// Measured before the fix, with 100MiB free: cheap took 40 workers, and the
+// pool at its ceiling got one.
+func TestTheQueueingPoolIsServedBeforeTheHungryOne(t *testing.T) {
+	opts := Options{}.Defaults()
+
+	// Floors of one each, so everything above that comes from the demand pass.
+	plan, err := Compute(Budget{TotalBytes: 101 * mb, CPUs: 64}, []Pool{
+		{
+			Name: "cheap", WorkerBytes: 1 * mb, Floor: 1,
+			CurrentMaxChildren: 1, ObservedPeak: 320,
+			Measured: true, Reducible: true,
+		},
+		{
+			// Two workers short, and every request beyond them is queueing.
+			Name: "pricey", WorkerBytes: 20 * mb, Floor: 1,
+			CurrentMaxChildren: 1, ObservedPeak: 2,
+			HitMaxChildren: true, QueueDepth: 40,
+			Measured: true, Reducible: true,
+		},
+	}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byName := map[string]PoolPlan{}
+	for _, pp := range plan.Pools {
+		byName[pp.Name] = pp
+	}
+
+	if got := byName["pricey"]; got.MaxChildren < got.Want {
+		t.Errorf("the pool at its ceiling with 40 requests queued got %d of the %d workers "+
+			"it needs, while the pool that merely wants more got %d: the budget went to "+
+			"the larger gap rather than to the site that is actually down",
+			got.MaxChildren, got.Want, byName["cheap"].MaxChildren)
+	}
+}

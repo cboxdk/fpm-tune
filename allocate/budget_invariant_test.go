@@ -42,6 +42,13 @@ func TestAPlanNeverCommitsMoreThanTheBudget(t *testing.T) {
 				// The trigger. A pool whose php-fpm -tt could not be read is the
 				// ordinary case on a first run, not a corner.
 				Unknown: rng.Intn(4) == 0,
+				// The demand pass hands a QUEUEING pool its whole shortfall
+				// rather than a proportion of it, so the budget invariant has to
+				// be checked against that branch too — it is the one that spends
+				// without dividing.
+				ObservedPeak:   rng.Intn(60),
+				HitMaxChildren: rng.Intn(3) == 0,
+				QueueDepth:     int64(rng.Intn(50)),
 			}
 		}
 
