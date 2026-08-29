@@ -1459,3 +1459,51 @@ func TestItRefusesRatherThanGuessWhenItCannotReadItsOwnFile(t *testing.T) {
 		t.Errorf("err = %v, want it to name the unreadable file", err)
 	}
 }
+
+// TestSignalledWithNoMasterAliveIsNotTreatedAsProvisioning.
+//
+// The one combination that means a master was told to reload and never came
+// back: the record says signalled, and nothing is running.
+//
+// It was reported as "no master to adopt it" — the provisioning case — so the
+// record was discarded along with the only copy of the configuration that
+// worked. php-fpm then stayed down, the state file said the change had been
+// applied, and the daemon logged "no pools found" every round for ever. The
+// route in needs no operator: an apply whose settle window is cut short by the
+// round deadline returns success with the record already marked signalled.
+func TestSignalledWithNoMasterAliveIsNotTreatedAsProvisioning(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	before := string(Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 10}}))
+	if err := os.WriteFile(DropInPath(dir), []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := masterConfigAt(t, dir)
+	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir}
+
+	// A run that wrote, signalled, and did not survive to see the result.
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+	b := backup{path: DropInPath(dir), existed: true, saved: filepath.Join(backupDir, backupName(dir, DropInPath(dir)))}
+	markSignalled(backupDir, master, b, Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 40}}))
+
+	// Nothing running: PID stays zero.
+	_, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+
+	if !errors.Is(err, ErrUnreconciled) {
+		t.Fatalf("err = %v, want ErrUnreconciled: a signalled master that is gone was "+
+			"read as a host waiting to be provisioned", err)
+	}
+
+	got, readErr := os.ReadFile(DropInPath(dir))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != before {
+		t.Errorf("the configuration the master died on was left in place:\n%s", got)
+	}
+	if _, _, rerr := readTransaction(backupDir, dir); rerr != nil {
+		t.Logf("record state after: %v", rerr)
+	}
+}

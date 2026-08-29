@@ -93,11 +93,12 @@ type Loop struct {
 	metrics *metrics.Collectors
 	state   *state.State
 
-	lastSaved  time.Time
-	release    lock.Release
-	resource   lock.Release
-	reconciled bool
-	exhausted  bool
+	lastSaved   time.Time
+	release     lock.Release
+	resource    lock.Release
+	resourceDir string
+	reconciled  bool
+	exhausted   bool
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -136,7 +137,7 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 func (l *Loop) Close() {
 	if l.resource != nil {
 		l.resource()
-		l.resource = nil
+		l.resource, l.resourceDir = nil, ""
 	}
 	if l.release != nil {
 		l.release()
@@ -293,7 +294,12 @@ func (l *Loop) round(ctx context.Context) {
 				"fully committed. No configuration change will help — this host needs more "+
 				"memory, or fewer sites.", "free_bytes", result.Plan.FreeBytes)
 		} else {
-			l.log.Info("No longer at capacity: there is budget to give a pool that needs it")
+			// Warn to match its counterpart, so the log shows the condition
+			// ending as well as beginning. Logged at Info it was invisible at the
+			// default level, and the pair became a warning that never cleared —
+			// which reads at 3am as "still exhausted" for a problem solved hours
+			// ago, and is worse than logging neither.
+			l.log.Warn("No longer at capacity: there is budget to give a pool that needs it")
 		}
 	}
 
@@ -307,10 +313,12 @@ func (l *Loop) round(ctx context.Context) {
 func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time) {
 	master, err := MasterOnHost(l.cfg.DropInDir, l.log)
 	if err != nil {
+		l.metrics.SetApplyBlocked("no_master")
 		l.log.Warn("Cannot apply", "error", err)
 
 		return
 	}
+	l.metrics.SetApplyBlocked("")
 	l.state.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
 	opts := l.cfg.ApplyOptions
@@ -320,9 +328,24 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// Wrote, not Changed(): a run that only removes the section of a site that no
 	// longer exists writes and reloads while resizing nothing, and it reached the
 	// host just as much as a resize did.
-	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote, applied.RolledBack, err)
+	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote, applied.RolledBack,
+		len(applied.RollbackFailed), err)
 
 	if err != nil {
+		if len(applied.RollbackFailed) > 0 {
+			// The worst state this tool can reach, and it used to be reported as
+			// an ordinary failure with rolled_back=false, which reads as
+			// reassuring. Nothing is broken yet — the master was never signalled
+			// — but the next reload from any source adopts what is there.
+			l.log.Error("A REJECTED CONFIGURATION IS STILL IN PLACE and could not be "+
+				"removed. php-fpm has not been reloaded, so nothing is broken yet — but "+
+				"the next reload from any source will adopt it, and a master that fails "+
+				"to start does not come back. Remove these by hand.",
+				"paths", applied.RollbackFailed, "error", err)
+
+			return
+		}
+
 		l.log.Error("Apply failed", "error", err, "rolled_back", applied.RolledBack)
 
 		return
@@ -368,17 +391,31 @@ func (l *Loop) reconcile(ctx context.Context) {
 		master = apply.Master{DropInDir: l.cfg.DropInDir}
 	}
 
-	// Held for the life of the daemon. The state lock does not cover the pool
-	// directory: a run given a different --state path takes a different state
-	// lock and then writes the same fragments.
-	if l.resource == nil {
-		release, err := lock.Acquire(lock.ResourcePath(opts.BackupDir, master.DropInDir))
+	// Re-keyed when the directory changes, and released when the work fails.
+	//
+	// It used to be taken once and held for the life of the process. Two things
+	// went wrong with that. A daemon that could not repair a leftover change kept
+	// the lock while doing nothing with it, so the operator's manual `fpm-tune
+	// apply` — the obvious way to fix it — was refused, and the only way out was
+	// stopping the daemon, which the error text does not suggest. And a PHP
+	// upgrade in place moves the pool directory: the lock stayed keyed on the old
+	// one while writes went to the new, so a concurrent apply found the new key
+	// free and both wrote the same file.
+	if l.resourceDir != master.DropInDir {
+		if l.resource != nil {
+			l.resource()
+			l.resource = nil
+			l.reconciled = false // a tree this process has never reconciled
+		}
+
+		release, err := lock.Acquire(lock.ResourcePath(master.DropInDir))
 		if err != nil {
+			l.metrics.SetApplyBlocked("lock")
 			l.log.Error("Cannot take the pool-directory lock; not applying", "error", err)
 
 			return
 		}
-		l.resource = release
+		l.resource, l.resourceDir = release, master.DropInDir
 	}
 
 	acted, err := apply.Reconcile(ctx, master, opts, l.log)
@@ -389,6 +426,13 @@ func (l *Loop) reconcile(ctx context.Context) {
 		l.metrics.RecordRepair()
 	}
 	if err != nil {
+		// Released, so the operator's own `fpm-tune apply` is not refused by a
+		// daemon that has given up on the very thing they are trying to fix.
+		if l.resource != nil {
+			l.resource()
+			l.resource, l.resourceDir = nil, ""
+		}
+		l.metrics.SetApplyBlocked("unrepaired")
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
 

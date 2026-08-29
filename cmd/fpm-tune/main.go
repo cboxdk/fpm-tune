@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -119,9 +120,46 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 	}
 }
 
+// forMaster keeps the pools served by the master that includes dropInDir.
+//
+// With no directory named it keeps everything, and says so when that spans more
+// than one master — the numbers are then a mixture, and an operator reading them
+// should know before acting on them.
+func forMaster(targets []phpfpm.Target, dropInDir string, log *slog.Logger) []phpfpm.Target {
+	if dropInDir == "" {
+		configs := map[string]bool{}
+		for _, t := range targets {
+			configs[t.ConfigPath] = true
+		}
+		if len(configs) > 1 {
+			log.Warn("This host runs more than one PHP-FPM master and no --drop-in-dir was "+
+				"given, so these pools are planned together against one master's memory "+
+				"limit. Name a pool directory to plan for one of them.",
+				"masters", len(configs))
+		}
+
+		return targets
+	}
+
+	want := filepath.Clean(dropInDir)
+
+	var kept []phpfpm.Target
+	for _, t := range targets {
+		for _, pattern := range serve.IncludePatternsOf(t.ConfigPath) {
+			if filepath.Clean(filepath.Dir(pattern)) == want {
+				kept = append(kept, t)
+
+				break
+			}
+		}
+	}
+
+	return kept
+}
+
 // gather does everything both commands need: read the host, scrape the pools,
 // fold the observation into the store, and build the allocation.
-func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, *state.State, error) {
+func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logger) (plan.Result, *state.State, error) {
 	// Parsed before anything expensive, so a typo in a flag fails immediately
 	// rather than after a scrape.
 	var overrideBytes int64
@@ -150,6 +188,19 @@ func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, 
 			"processes, so this usually means it is not running as root")
 	}
 	log.Debug("Discovered pools", "count", len(targets))
+
+	// One master's pools, when one was named.
+	//
+	// Every pool on the host was planned together and then sized against ONE
+	// master's cgroup limit, which is incoherent on a host running two PHP
+	// versions: the budget belongs to one of them and the pools to both. `apply`
+	// already refuses that situation and tells the operator to name a directory;
+	// `plan` did not offer the flag at all, so there was nothing to answer with.
+	targets = forMaster(targets, dropInDir, log)
+	if len(targets) == 0 {
+		return plan.Result{}, nil, fmt.Errorf(
+			"no pools belong to a master that includes %s", dropInDir)
+	}
 
 	st, err := state.Load(*c.statePath)
 	if err != nil {
@@ -203,6 +254,9 @@ func gather(ctx context.Context, c commonFlags, log *slog.Logger) (plan.Result, 
 func runPlan(args []string) error {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	c := registerCommon(fs)
+	dropInDir := fs.String("drop-in-dir", "",
+		"plan for the master that includes this pool directory; without it a host "+
+			"running several masters is planned as one, against one of their memory limits")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "fpm-tune plan — propose pool sizes without changing "+
 			"any PHP-FPM configuration.\n\nIt does record what it observed, to the state file, so that "+
@@ -247,7 +301,7 @@ func runPlan(args []string) error {
 	ctx, cancelTimeout := context.WithTimeout(ctx, *c.timeout)
 	defer cancelTimeout()
 
-	result, _, err := gather(ctx, c, log)
+	result, _, err := gather(ctx, c, *dropInDir, log)
 	if err != nil {
 		return err
 	}
@@ -326,20 +380,34 @@ func runApply(args []string) error {
 	// A second lock, on the pool directory itself. The state lock above does not
 	// cover it: two runs given different --state paths take different state
 	// locks and then write the same fragments and the same backups.
-	releaseResource, err := lock.Acquire(lock.ResourcePath(opts.BackupDir, master.DropInDir))
+	releaseResource, err := lock.Acquire(lock.ResourcePath(master.DropInDir))
 	if err != nil {
 		return err
 	}
 	defer releaseResource()
 
-	if _, err := apply.Reconcile(ctx, master, opts, log); err != nil {
+	// Not on a dry run. Reconcile removes files, rewrites them from backups and
+	// signals the master — none of which a dry run may do, and the README
+	// promises it does not. The promise was false: this ran before the dry-run
+	// check and Reconcile never reads the flag.
+	//
+	// Skipped rather than made conditional inside Reconcile, because a rehearsal
+	// of a repair is not a thing anyone asked for: what the operator needs is to
+	// be told there is one waiting.
+	if *dryRun {
+		if path, found, _ := apply.PendingRepair(opts.BackupDir, master.DropInDir); found {
+			fmt.Fprintf(os.Stderr,
+				"fpm-tune: a previous run left an unfinished change to %s. "+
+					"Running without --dry-run resolves it first.\n", path)
+		}
+	} else if _, err := apply.Reconcile(ctx, master, opts, log); err != nil {
 		return err
 	}
 	// The parsed configuration is cached, so a repair the reconcile just made
 	// would otherwise be invisible to the scrape that follows.
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
-	result, st, err := gather(ctx, c, log)
+	result, st, err := gather(ctx, c, master.DropInDir, log)
 	if err != nil {
 		return err
 	}

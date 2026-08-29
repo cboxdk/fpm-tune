@@ -240,7 +240,7 @@ type Options struct {
 	// a shorter one safe.
 	HalfLifeDown time.Duration
 
-	// MinRequestsToDecay is how many requests a pool must have served since the
+	// MinRequestsPerSecondToDecay is how hard a pool must be working, since the
 	// last scrape for a smaller reading to count as evidence.
 	//
 	// This is the distinction the half-life alone could not make. A pool that got
@@ -255,13 +255,28 @@ type Options struct {
 	// the same fault as the one this gate exists to prevent, arrived at from the
 	// other side.
 	//
-	// Deliberately a RATE, per scrape, and not a running total. Accumulating
-	// would let a pool serving one request every five minutes reach the threshold
+	// A RATE, in requests per second, and not a running total. Accumulating would
+	// let a pool serving one request every five minutes reach the threshold
 	// overnight and take its estimate down with it — and that pool's small
 	// workers are idle workers, not cheap ones. Holding its estimate costs
 	// nothing while nothing is asking anything of it, and the alternative is the
 	// morning finding it sized for workers that do not exist.
-	MinRequestsToDecay int64
+	//
+	// It was a count of requests between two scrapes, which is a rate only if
+	// the scrape interval is fixed — so the same workload decayed or did not
+	// depending on how often it was looked at, which is precisely the fault the
+	// half-life was moved into TIME to remove. Five requests per thirty-second
+	// scrape is 0.17 requests a second: cron, uptime checks and crawlers clear
+	// it, so a night of nothing but bots pulled a pool from 400MiB a worker to
+	// 60MiB, and the morning sized it at 102 workers of 400MiB against a 6GiB
+	// budget.
+	MinRequestsPerSecondToDecay float64
+
+	// MaxDecayGap is how long a hole in the observations may be before a smaller
+	// reading is refused as evidence. A gap is missing information, not proof a
+	// pool got cheaper, and the rate above averaged across it cannot tell a busy
+	// hour followed by silence from steady work.
+	MaxDecayGap time.Duration
 
 	// ConfidenceSamples and ConfidenceSpan are what a baseline needs before it
 	// is trusted enough to size a pool DOWN.
@@ -284,8 +299,15 @@ func (o Options) Defaults() Options {
 	if o.MinRequestsPerWorker <= 0 {
 		o.MinRequestsPerWorker = 20
 	}
-	if o.MinRequestsToDecay <= 0 {
-		o.MinRequestsToDecay = 5
+	if o.MinRequestsPerSecondToDecay <= 0 {
+		// One request a second. Below this a pool is not being exercised: its
+		// workers are between requests rather than cheap, and what they measure
+		// is idle memory. High enough to exclude monitoring and crawler traffic,
+		// low enough that a genuinely small site still teaches this anything.
+		o.MinRequestsPerSecondToDecay = 1
+	}
+	if o.MaxDecayGap <= 0 {
+		o.MaxDecayGap = 12 * time.Hour
 	}
 	if o.MinMatureWorkers <= 0 {
 		o.MinMatureWorkers = 2
@@ -430,20 +452,32 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// workers accumulated the whole night into one comparison. That is the
 	// running total this deliberately is not: it would let a quiet stretch buy
 	// itself permission to pull the estimate down.
-	worked := didWork(ps, obs, opts)
+	worked := didWork(ps, obs, opts, since)
 	ps.LastAccepted = obs.Accepted
 
 	ps.Samples++
 	ps.LastUpdated = at
 
-	// Only workers that have done enough work to have loaded the application.
+	// The peak is taken over EVERY worker with a reading; maturity decides only
+	// whether the scrape counts at all.
+	//
+	// The maturity test used to filter the peak as well, and a maximum can only
+	// ever be lowered by dropping candidates — which is the one direction that
+	// ends in an OOM. A pool steady at 90MiB, scraped while three freshly
+	// recycled workers were part-way through an export at 700MiB each, recorded
+	// 90MiB and moved DOWN: 2.1GiB of live worker memory observed and discarded
+	// for being young. The reason for the filter is that a young worker has not
+	// loaded the application and reads small — and a small reading cannot move a
+	// maximum, so the filter was never doing that job here.
 	var peak int64
 	mature := 0
 	for _, w := range obs.Workers {
-		if w.Requests < opts.MinRequestsPerWorker || w.RSSBytes <= 0 {
+		if w.RSSBytes <= 0 {
 			continue
 		}
-		mature++
+		if w.Requests >= opts.MinRequestsPerWorker {
+			mature++
+		}
 		if w.RSSBytes > peak {
 			peak = w.RSSBytes
 		}
@@ -453,15 +487,31 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		return false
 	}
 
-	ps.BusySamples++
-	if ps.FirstBusyAt.IsZero() {
-		ps.FirstBusyAt = at
+	// Confidence is permission to size a pool DOWN, and the only thing that earns
+	// it is having watched the pool under load.
+	//
+	// This block used to run whenever two mature workers existed, so a pool left
+	// with two workers from a deploy smoke test reached full confidence over
+	// thirty minutes of zero traffic — and full confidence drops its floor from
+	// its configured ceiling to two, putting it first in the queue to be cut on
+	// the strength of sixty-one readings of nothing. The memory readings below
+	// are recorded either way; it is the confidence accounting that needs the
+	// traffic, and `worked` is the signal the decay branch already trusts for it.
+	if worked {
+		ps.BusySamples++
+		if ps.FirstBusyAt.IsZero() {
+			ps.FirstBusyAt = at
+		}
+		// LastBusyAt - FirstBusyAt is the confidence span, and a clock stepping
+		// backwards used to make it negative: confidence 1.00 to 0.00 on one
+		// sample, held there until wall time caught up. The rate gate in didWork
+		// now refuses a non-positive interval, which makes this unreachable —
+		// at > LastUpdated >= FirstBusyAt. Kept because the two live in
+		// different functions and the span must not be able to invert.
+		if at.After(ps.LastBusyAt) {
+			ps.LastBusyAt = at
+		}
 	}
-	// Whether the pool did any work is decided BEFORE the counter is advanced.
-	// Storing it first would compare the reading against itself, so the
-	// difference would always be zero and the estimate could never fall — the
-	// same shape of mistake as the ceiling counter that never fired.
-	ps.LastBusyAt = at
 	ps.LastPeakBytes = peak
 	ps.LastPeakAt = at
 	if peak > ps.HighWaterBytes {
@@ -691,13 +741,19 @@ func (s *State) Names() []string {
 // every reload — including the ones this tool performs. Unknown, not negative:
 // the reading is neither believed nor used to block, so the pool keeps whatever
 // estimate it had until the next scrape can compare properly.
-func didWork(ps *PoolState, obs Observation, opts Options) bool {
+func didWork(ps *PoolState, obs Observation, opts Options, since time.Duration) bool {
 	if obs.Accepted <= 0 || ps.LastAccepted <= 0 {
 		// No counter to compare against. Refused rather than guessed: the
 		// instantaneous busy count measures request duration as much as load, and
 		// a pool answering quickly reads idle whatever it is carrying. Declining
 		// to decay leaves the estimate where it is, which costs headroom on one
 		// pool — the alternative costs the host.
+		return false
+	}
+
+	if since > opts.MaxDecayGap {
+		// Nothing was watched across the hole, and the average rate over it says
+		// nothing about whether the pool was working when this reading was taken.
 		return false
 	}
 
@@ -721,5 +777,11 @@ func didWork(ps *PoolState, obs Observation, opts Options) bool {
 		return false
 	}
 
-	return served >= opts.MinRequestsToDecay
+	if since <= 0 {
+		// The first observation of a pool, or a clock that stepped backwards.
+		// Neither is a measured interval, so there is no rate to compare.
+		return false
+	}
+
+	return float64(served)/since.Seconds() >= opts.MinRequestsPerSecondToDecay
 }

@@ -245,8 +245,12 @@ func TestLearnFromSkipsUnreachablePools(t *testing.T) {
 	if _, exists := st.Pools["down"]; exists {
 		t.Error("an unreachable pool was recorded as a sample")
 	}
+	// Its measured cost, not its BusySamples. A single observation has no
+	// interval behind it, so there is no request RATE yet and nothing has been
+	// established about whether the pool was working — but its workers were read,
+	// and that reading is what the allocator sizes against.
 	up := st.Pools["up"]
-	if up == nil || up.BusySamples != 1 {
+	if up == nil || up.TypicalPeakBytes == 0 {
 		t.Fatalf("the healthy pool was not learned from: %+v", up)
 	}
 	if up.LastMaxChildrenReached != 12 {
@@ -328,9 +332,13 @@ func build(t *testing.T, st *state.State, views ...observe.PoolView) Result {
 	return res
 }
 
+// busy is a pool under load, and the request counter is what makes it so. A
+// smaller worker on a pool serving nothing is an idle worker, not a cheap one,
+// and the learner will not take a baseline down on it.
 func busy(pool string, rss int64, at time.Time) state.Observation {
 	return state.Observation{
-		Pool: pool, At: at,
+		Pool: pool, At: at, ActiveNow: 4,
+		Accepted: at.Unix() * 100,
 		Workers: []state.WorkerSample{
 			{RSSBytes: rss, Requests: 500},
 			{RSSBytes: rss, Requests: 500},

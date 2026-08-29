@@ -34,6 +34,8 @@ type Collectors struct {
 	lastRun           prometheus.Gauge
 
 	applyEnabled  prometheus.Gauge
+	applyBlocked  *prometheus.GaugeVec
+	rollbackFail  prometheus.Counter
 	lastApply     prometheus.Gauge
 	appliesFailed prometheus.Counter
 	rollbacks     prometheus.Counter
@@ -79,6 +81,16 @@ func New() *Collectors {
 			"1 when this process will act on its plan. A tool that only observes looks "+
 				"identical to one that is acting, and the difference is the whole question "+
 				"when a host is not being tuned."),
+		applyBlocked: gaugeVec(reg, "fpm_tune_apply_blocked",
+			"1 when a round declined to apply for a reason other than having nothing to "+
+				"do. fpm_tune_apply_enabled says what this process was ASKED to do and "+
+				"never changes; this says whether it can, which is the question when a "+
+				"host is not being tuned.", "reason"),
+		rollbackFail: counter(reg, "fpm_tune_rollback_failed_total",
+			"Changes php-fpm rejected that could NOT be taken back out. Strictly worse "+
+				"than a rollback and previously invisible: nothing is broken yet, because "+
+				"the master was never signalled, but the next reload from any source "+
+				"adopts what is on disk. Alert on any increase."),
 		lastApply: gauge(reg, "fpm_tune_last_apply_timestamp_seconds",
 			"When a change was last written and adopted. Distinct from the evaluation "+
 				"timestamp: a loop can be running and deciding to do nothing, which is "+
@@ -191,7 +203,7 @@ func (c *Collectors) SetApplyEnabled(on bool) {
 // Counted rather than logged alone, because the log now reports a persistent
 // condition once rather than every interval — which is right for reading and
 // useless for alerting. A counter is the thing to alert on.
-func (c *Collectors) RecordApply(at float64, changed, rolledBack bool, err error) {
+func (c *Collectors) RecordApply(at float64, changed, rolledBack bool, rollbackFailed int, err error) {
 	switch {
 	case err != nil:
 		c.appliesFailed.Inc()
@@ -200,6 +212,23 @@ func (c *Collectors) RecordApply(at float64, changed, rolledBack bool, err error
 	}
 	if rolledBack {
 		c.rollbacks.Inc()
+	}
+	if rollbackFailed > 0 {
+		c.rollbackFail.Inc()
+	}
+}
+
+// SetApplyBlocked records why a round could not apply, or clears it.
+//
+// Separate from SetApplyEnabled, which reflects the flag and never changes. A
+// daemon that cannot reconcile, cannot take the lock or cannot identify the
+// master applies nothing for the life of the process while reporting itself
+// enabled — answering the one question it exists to answer wrongly, in the
+// failure mode where it is asked.
+func (c *Collectors) SetApplyBlocked(reason string) {
+	c.applyBlocked.Reset()
+	if reason != "" {
+		c.applyBlocked.WithLabelValues(reason).Set(1)
 	}
 }
 

@@ -216,8 +216,8 @@ func TestTheSurfaceCarriesWhatAnAlertNeeds(t *testing.T) {
 	c := New()
 
 	c.SetApplyEnabled(true)
-	c.RecordApply(1700000000, true, false, nil)
-	c.RecordApply(1700000030, false, true, errors.New("php-fpm rejected it"))
+	c.RecordApply(1700000000, true, false, 0, nil)
+	c.RecordApply(1700000030, false, true, 0, errors.New("php-fpm rejected it"))
 	c.RecordRepair()
 
 	for name, got := range map[string]float64{

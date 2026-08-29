@@ -252,6 +252,11 @@ var ErrNoBudget = errors.New("no memory available to allocate")
 // would have to leave a pool with none — and a caller that wrote such a config
 // would take the site down to avoid an OOM that had not happened yet. Saying so
 // leaves the running configuration alone and puts the decision where it belongs.
+// maxPlausibleChildren bounds a worker count before the arithmetic that
+// multiplies it by a per-worker cost is reached. PHP-FPM will not run anything
+// near this; a number above it came from a misparse, and int64 wraps on it.
+const maxPlausibleChildren = 100_000
+
 var ErrCannotFit = errors.New("pools do not fit on this host")
 
 // Compute divides the budget between the pools.
@@ -284,6 +289,19 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	for _, p := range pools {
 		if p.WorkerBytes <= 0 {
 			return plan, fmt.Errorf("pool %q has no per-worker cost: nothing can be sized against zero", p.Name)
+		}
+		// Guarded here rather than only at the observation boundary, because this
+		// package is meant to be embedded and an embedder does not inherit that
+		// boundary's validation. `granted * WorkerBytes` is int64 and a worker
+		// count in the millions wraps it — to zero, in the case that was
+		// demonstrated, which reads as a free pool and passes every budget check
+		// below.
+		if p.Floor > maxPlausibleChildren || p.Ceiling > maxPlausibleChildren {
+			return plan, fmt.Errorf(
+				"pool %q asks for %d workers with a ceiling of %d: past %d this is a bad "+
+					"reading rather than a configuration, and multiplying it by a per-worker "+
+					"cost overflows",
+				p.Name, p.Floor, p.Ceiling, maxPlausibleChildren)
 		}
 	}
 
@@ -339,6 +357,18 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 
 	plan.AllocatedBytes = allocated
 	plan.FreeBytes = allocatable - allocated
+
+	// The one invariant this package exists to hold. Every branch above is
+	// supposed to guarantee it; one of them did not, and the plan was published
+	// with FreeBytes negative — 3.8GiB past the budget on an eight-pool host,
+	// eating the OS reserve whole. An error is a bad outcome; a plan that
+	// overcommits the machine is a worse one, and it looks like success.
+	if allocated > allocatable {
+		return Plan{}, fmt.Errorf(
+			"%w: the plan commits %s against %s available; this is a bug in the "+
+				"allocator and nothing should be written from it",
+			ErrCannotFit, humanBytes(allocated), humanBytes(allocatable))
+	}
 
 	// Unmet demand is only a capacity problem when there is nothing left to give
 	// it. With budget still free the next run rebalances; without, no
@@ -450,9 +480,15 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 		// committing 300MiB.
 		//
 		// Only reducible pools are trimmed, because only they were reduced.
-		used = trimToFit(pools, granted, used, allocatable, func(i int) bool {
+		used, ok := trimToFit(pools, granted, used, allocatable, func(i int) bool {
 			return pools[i].Reducible && !pools[i].Unknown
 		})
+		if !ok {
+			return nil, 0, false, fmt.Errorf(
+				"%w: after reducing every pool with a trusted baseline to one worker, "+
+					"%s is still committed against %s available",
+				ErrCannotFit, humanBytes(used), humanBytes(allocatable))
+		}
 
 		return granted, allocatable - used, true, nil
 	}
@@ -465,19 +501,35 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 	// on paper only: apply skips it, the bytes go to a pool that IS written, and
 	// the untouched pool comes back at the size it always had — leaving the host
 	// over its budget by exactly the fiction.
-	var unwritableNeed int64
+	var unwritableNeed, writableMinimum int64
 	for i, p := range pools {
 		if p.Unknown {
 			unwritableNeed += int64(floors[i]) * p.WorkerBytes
+
+			continue
 		}
+		writableMinimum += p.WorkerBytes
 	}
 
-	if unwritableNeed >= allocatable {
+	// The guard has to be the SAME shape as the one above: what cannot be cut,
+	// plus one worker for everything that can.
+	//
+	// It was `unwritableNeed >= allocatable` alone, and that is not the question.
+	// An unwritable pool is held at its FLOOR, not at one worker, so the global
+	// check at the top of Compute — one worker per pool — does not imply this
+	// one. With the floors of the unwritable pools taking almost the whole
+	// budget, scaling the rest and rounding each up to one worker produced a
+	// total the trim below could not bring down, and the plan was published over
+	// the budget with a negative FreeBytes. A randomised sweep put it at 3.5% of
+	// valid inputs, all of them with an unwritable pool — and a pool whose
+	// config could not be read is the ordinary case on a first run, not a corner.
+	if unwritableNeed+writableMinimum > allocatable {
 		return nil, 0, false, fmt.Errorf(
-			"%w: %s is needed by pools whose configuration could not be read, which is "+
-				"already more than the %s available — nothing can be written for them, so "+
-				"no plan here would help",
-			ErrCannotFit, humanBytes(unwritableNeed), humanBytes(allocatable))
+			"%w: %s is needed by pools whose configuration could not be read, and one "+
+				"worker each for the rest needs %s, against %s available — nothing can be "+
+				"written for the pools holding the memory, so no plan here would help",
+			ErrCannotFit, humanBytes(unwritableNeed), humanBytes(writableMinimum),
+			humanBytes(allocatable))
 	}
 
 	plan.Warnings = append(plan.Warnings, fmt.Sprintf(
@@ -504,9 +556,15 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 	}
 
 	// Rounding up to one worker each can push the total back over the budget.
-	used = trimToFit(pools, granted, used, allocatable, func(i int) bool {
+	used, ok := trimToFit(pools, granted, used, allocatable, func(i int) bool {
 		return !pools[i].Unknown
 	})
+	if !ok {
+		return nil, 0, false, fmt.Errorf(
+			"%w: after reducing every writable pool to one worker, %s is still "+
+				"committed against %s available",
+			ErrCannotFit, humanBytes(used), humanBytes(allocatable))
+	}
 
 	return granted, allocatable - used, true, nil
 }
@@ -516,17 +574,21 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 // From the pools with the most workers first, so the damage is spread rather
 // than falling entirely on the smallest site. eligible limits which pools may be
 // trimmed; nil means all of them.
-func trimToFit(pools []Pool, granted []int, used, allocatable int64, eligible func(int) bool) int64 {
+func trimToFit(pools []Pool, granted []int, used, allocatable int64, eligible func(int) bool) (int64, bool) {
 	for used > allocatable {
 		i := largestGrantedAmong(granted, eligible)
 		if i < 0 || granted[i] <= 1 {
-			break
+			// Everything eligible is down to a single worker and the total is
+			// still over. Returning the number anyway is how an over-budget plan
+			// used to escape: silence here reads at the call site exactly like a
+			// fit. The callers guard against reaching this, and say so if they do.
+			return used, false
 		}
 		granted[i]--
 		used -= pools[i].WorkerBytes
 	}
 
-	return used
+	return used, true
 }
 
 // allocateDemand distributes what is left after floors, proportionally to each

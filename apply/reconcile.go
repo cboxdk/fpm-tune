@@ -205,6 +205,24 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 	return true, nil
 }
 
+// PendingRepair reports whether a previous run left something unfinished,
+// without touching anything.
+//
+// For a dry run, which must not repair — it removes files, rewrites them from
+// backups and signals the master, and the whole promise of a dry run is that it
+// does none of that. Telling the operator one is waiting is the useful half.
+func PendingRepair(backupDir, dropInDir string) (path string, found bool, err error) {
+	txn, ok, err := readTransaction(backupDir, dropInDir)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+
+	return txn.Path, true, nil
+}
+
 // completedFrom fills in what the caller could not discover.
 func (m Master) completedFrom(txn transaction) Master {
 	if m.Binary == "" {
@@ -329,6 +347,36 @@ func finishReload(
 	log *slog.Logger,
 ) error {
 	if master.PID <= 0 {
+		if txn.Phase == PhaseSignalled {
+			// Signalled, and nothing is running. That combination has exactly one
+			// meaning: a master was told to reload and never came back.
+			//
+			// Reporting it as "nothing to adopt it" let the caller discard the
+			// record — deleting the only copy of the configuration that worked —
+			// and the host then sat with php-fpm down, the state file saying the
+			// change had been applied, and the daemon logging "no pools found"
+			// every round for ever. `php-fpm -t` passing says the file is
+			// acceptable, not that a master survived re-reading it.
+			log.Error("A previous run signalled the master and no master is running; "+
+				"putting the previous configuration back", "file", txn.Path)
+
+			previous, perr := previousContent(txn, opts.BackupDir)
+			if perr != nil {
+				return fmt.Errorf("%w: the master was signalled and is gone, and the "+
+					"previous configuration with it: %w", ErrUnreconciled, perr)
+			}
+			if perr := applyPrevious(txn, previous); perr != nil {
+				return fmt.Errorf("%w: the master was signalled and is gone, and the "+
+					"change could not be taken back out: %w", ErrUnreconciled, perr)
+			}
+
+			return fmt.Errorf("%w: the master was signalled by a previous run and is not "+
+				"running; its previous configuration has been restored, and it needs "+
+				"starting", ErrUnreconciled)
+		}
+
+		// Written but never signalled: the ordinary provisioning case, where the
+		// files are in place for whenever php-fpm starts.
 		log.Info("The configuration a previous run left is valid; no master is running to adopt it")
 
 		return nil

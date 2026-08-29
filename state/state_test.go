@@ -505,9 +505,13 @@ func TestNamesAreSorted(t *testing.T) {
 	}
 }
 
+// busyObs is a pool under load. The request counter is not decoration: what
+// makes a reading evidence is that the pool was WORKING when it was taken, and
+// a helper called busy that serves nothing is the same confusion the code had.
 func busyObs(pool string, at time.Time) Observation {
 	return Observation{
-		Pool: pool, At: at,
+		Pool: pool, At: at, ActiveNow: 4,
+		Accepted: acceptedAt(at),
 		Workers: []WorkerSample{
 			{RSSBytes: 64 * mb, Requests: 400},
 			{RSSBytes: 70 * mb, Requests: 350},

@@ -16,23 +16,49 @@ detection, and serves its own metrics — no other process required.
 ```bash
 fpm-tune plan     # what it would change, and why — writes nothing
 fpm-tune apply    # write the settings and reload once
-fpm-tune serve    # keep measuring and adjusting, with its own /metrics
+fpm-tune serve    # keep measuring; add --apply to act on what it finds
 ```
 
-On a host with five sites under load, capped at 3GiB, it measured this without
-being told anything:
+`serve` observes and publishes metrics without touching anything until you pass
+`--apply`. That is a reasonable way to run it permanently — but note that the
+self-repair below is part of applying, so a watch-only daemon will not fix a host
+either.
 
-| pool  | measured per worker | workers it allocated |
-|-------|--------------------:|---------------------:|
-| shop  |            98.7 MiB |                    7 |
-| forum |            62.1 MiB |                    8 |
-| api   |            42.3 MiB |                   20 |
-| blog  |            29.5 MiB |                    8 |
-| docs  |            24.5 MiB |                    6 |
+A unit to start from:
 
-`api` costs a third of what `shop` costs per worker, so it got nearly three times
-as many. That is the whole argument for dividing one budget across pools rather
-than sizing each one alone.
+```ini
+[Unit]
+Description=fpm-tune
+# Wants, not Requires: a supervisor that dies with the thing it supervises
+# cannot repair it.
+Wants=php-fpm.service
+After=php-fpm.service
+
+[Service]
+ExecStart=/usr/local/bin/fpm-tune serve --apply --metrics 127.0.0.1:9110
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+On a host with five sites under load, it measured what each one's workers cost
+without being told anything:
+
+| pool  | what the app holds | measured per worker |
+|-------|-------------------:|--------------------:|
+| shop  |              80 MB |            98.7 MiB |
+| forum |              45 MB |            62.1 MiB |
+| api   |              26 MB |            42.3 MiB |
+| blog  |              14 MB |            29.5 MiB |
+| docs  |               9 MB |            24.5 MiB |
+
+A worker on `shop` costs four times one on `docs`. Sizing every pool from one
+profile either starves the expensive sites or wastes the budget on the cheap
+ones, and no hand-written `pm.max_children` knows this ratio until something
+OOMs. That is the argument for dividing one budget across pools rather than
+sizing each alone.
 
 ## How it decides
 
@@ -76,16 +102,21 @@ fpm_tune_pool_demand_unmet{pool}   # this pool wants more workers
 fpm_tune_capacity_exhausted        # ...and there is nowhere left to get them
 ```
 
-And the ones to alert on, because the log reports a persistent condition once
-rather than every interval:
+And the ones to alert on. Capacity exhaustion is logged on the transition rather
+than every interval, so the log will not keep reminding you:
 
 ```
 fpm_tune_apply_enabled                    # 0 means this process only watches
+fpm_tune_apply_blocked{reason}            # asked to apply and cannot: lock, no_master, unrepaired
+fpm_tune_last_run_timestamp_seconds       # not advancing means the loop has stalled
 fpm_tune_last_apply_timestamp_seconds     # not advancing while changes are pending
 fpm_tune_applies_failed_total
 fpm_tune_rollbacks_total                  # above zero deserves a look at the log
+fpm_tune_rollback_failed_total            # worse: a rejected file is still on disk
 fpm_tune_repairs_total                    # it had to undo something a run left behind
 ```
+
+`/metrics` defaults to `:9110`; `/healthz` answers 200 while the process is up.
 
 Demand alone is routine — fpm-tune takes headroom from an idle pool and gives it
 to a busy one. Both together is the signal that no configuration change will
@@ -118,13 +149,16 @@ it supervises cannot repair it.
 
 It writes production configuration, so it is built to fail safe.
 
-- **Only `pm.*` keys**, in one file of its own. Your pool config is not edited,
-  and deleting that file returns everything to what you configured.
+- **Only `pm.*` keys**, in one file of its own — `zz-fpm-tune.conf`, in the
+  directory your master already includes. Your pool config is not edited, and
+  deleting that file returns everything to what you configured. The previous
+  version is kept under `/var/lib/fpm-tune/backup` while a change is in flight.
 - **One file, one atomic rename.** The change set is indivisible: a growth and the
   reduction that funds it reach the host together or not at all.
 - **Validated against a sandboxed copy first**, so a configuration php-fpm would
   reject never reaches the directory it globs — not even for the length of a fork.
-  `--dry-run` therefore changes nothing at all, mtimes included.
+  `--dry-run` writes no PHP-FPM configuration and reloads nothing; it does record
+  what it observed, unless you pass `--no-learn`.
 - **SIGUSR2, never a restart.** PHP-FPM cycles its own workers gracefully and
   carries its listening sockets across, so no request is dropped. A daemonized
   master comes back under a new pid, which is followed rather than mistaken for a
@@ -136,9 +170,11 @@ It writes production configuration, so it is built to fail safe.
 - **It repairs the host if its own file is the problem.** Remove a site and reload
   php-fpm and the override for the pool that no longer exists would stop the master
   from starting; fpm-tune takes its file out so it can.
-- **Hysteresis, asymmetric.** Shrinking needs a larger change held for longer than
-  growing, because growing too eagerly costs unused memory and shrinking too
-  eagerly costs queued requests.
+- **Hysteresis, asymmetric.** Growing needs a 15% change and 5 minutes since the
+  last one; shrinking needs 30% and 20 minutes. Growing too eagerly costs unused
+  memory; shrinking too eagerly costs queued requests, so the two are not worth
+  the same caution. If a pool is not moving when you think it should, this is
+  usually why — `plan` shows the proposal, `apply` shows which rule held it back.
 - **One writer at a time**, enforced with a lock on the pool directory as well as
   on the state file.
 

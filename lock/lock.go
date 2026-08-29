@@ -83,11 +83,33 @@ func DefaultPath(statePath string) string {
 // exact interleaving the locking was added to prevent, reachable by passing a
 // flag. This one is keyed on what is actually being written.
 //
-// It lives in the backup directory rather than the pool directory: php-fpm
-// includes that directory by glob, and a lock file that happened to match the
-// pattern would be read as configuration.
-func ResourcePath(backupDir, dropInDir string) string {
+// It lives in a fixed directory, NOT in the backup directory. Keying it there
+// made the lock defeatable by a flag: a daemon running with the defaults and an
+// operator running `apply --backup-dir /tmp/b` computed different paths, both
+// acquired cleanly, and both wrote the same pool file — the exact interleaving
+// this exists to prevent, one flag over from the one it fixed.
+//
+// Not the pool directory either: php-fpm includes that by glob, and a lock file
+// that happened to match the pattern would be read as configuration.
+func ResourcePath(dropInDir string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(dropInDir)))
 
-	return filepath.Join(backupDir, hex.EncodeToString(sum[:4])+"-apply.lock")
+	return filepath.Join(resourceLockDir(), hex.EncodeToString(sum[:4])+"-apply.lock")
+}
+
+// resourceLockDir prefers /run, which is a tmpfs cleared on boot and the
+// conventional home for this. It falls back to the temporary directory so an
+// unprivileged run — a test, an operator trying something — still serialises
+// against another unprivileged run.
+func resourceLockDir() string {
+	for _, dir := range []string{"/run", "/var/run"} {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			locks := filepath.Join(dir, "fpm-tune")
+			if err := os.MkdirAll(locks, 0o755); err == nil {
+				return locks
+			}
+		}
+	}
+
+	return filepath.Join(os.TempDir(), "fpm-tune")
 }

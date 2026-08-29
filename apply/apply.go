@@ -341,6 +341,17 @@ func Apply(
 	// as the fork took — adopted by anything that reloaded in that window, and
 	// left behind entirely if the process died there.
 	if err := validateSandboxed(ctx, master, pools); err != nil {
+		// A cancelled context kills the fork and returns an error like any
+		// other. Reported as a rejection it is a lie with consequences: on a host
+		// where discovery and scraping have already eaten the round's budget it
+		// happens EVERY round, so the operator watches applies_failed_total climb
+		// and reads "php-fpm rejected the rendered configuration" about a
+		// configuration php-fpm never saw.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, fmt.Errorf("ran out of time before the configuration could be "+
+				"checked; nothing was written: %w", ctxErr)
+		}
+
 		return result, err
 	}
 
@@ -358,6 +369,23 @@ func Apply(
 	// that only resolves in place. Cheap insurance on the one path that can take
 	// the host down.
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
+		// Cancelled rather than rejected. The file still has to come back out —
+		// it has not been checked — but calling it a rollback would count a
+		// change nothing refused against a counter whose documentation says any
+		// value above zero deserves a look at the log.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if rerr := restore(b, log); rerr != nil {
+				result.RollbackFailed = []string{b.path}
+
+				return result, fmt.Errorf("ran out of time before the configuration could "+
+					"be checked, and it could not be taken back out of %s: %w", b.path, ctxErr)
+			}
+			commit(opts.BackupDir, master.DropInDir, b, log)
+
+			return result, fmt.Errorf("ran out of time before the configuration could be "+
+				"checked; it has been taken back out: %w", ctxErr)
+		}
+
 		// Nothing has been signalled yet, so restoring here means the running
 		// master never saw any of this.
 		if rerr := restore(b, log); rerr != nil {
