@@ -375,31 +375,46 @@ func finishReload(
 ) error {
 	if master.PID <= 0 {
 		if txn.Phase == PhaseSignalled {
-			// Signalled, and nothing is running. That combination has exactly one
-			// meaning: a master was told to reload and never came back.
+			// Signalled, and nothing is running. Reported, and the record kept —
+			// but the file is LEFT ALONE.
 			//
 			// Reporting it as "nothing to adopt it" let the caller discard the
-			// record — deleting the only copy of the configuration that worked —
-			// and the host then sat with php-fpm down, the state file saying the
-			// change had been applied, and the daemon logging "no pools found"
-			// every round for ever. `php-fpm -t` passing says the file is
-			// acceptable, not that a master survived re-reading it.
-			log.Error("A previous run signalled the master and no master is running; "+
-				"putting the previous configuration back", "file", txn.Path)
-
-			previous, perr := previousContent(txn, opts.BackupDir)
-			if perr != nil {
-				return fmt.Errorf("%w: the master was signalled and is gone, and the "+
-					"previous configuration with it: %w", ErrUnreconciled, perr)
+			// record, deleting the only copy of the previous configuration, and
+			// the host then sat with php-fpm down and the daemon logging "no
+			// pools found" every round for ever. So the error stays.
+			//
+			// Undoing the change was the other half, and it was wrong. This
+			// branch is only reached AFTER php-fpm has been asked and has said
+			// it accepts the file. This tool writes nothing but pm.* keys, so a
+			// file php-fpm validates does not stop a master initialising on it —
+			// and restoring cannot help a master that is down for any other
+			// reason, which after a reboot is most of them.
+			//
+			// What it did instead, measured: on a host where this was the FIRST
+			// apply there is no previous version, so "restoring" removed the
+			// drop-in entirely and returned every pool to its own
+			// pm.max_children. That is the overcommit this tool exists to
+			// prevent, performed by its own recovery. And it needs no crash to
+			// reach — a SIGTERM inside the settle window leaves the record open
+			// deliberately, and a reboot that starts fpm-tune before php-fpm
+			// does the rest.
+			//
+			// If the master comes up, the next Reconcile finds a pid, finishes
+			// the reload and closes the record. If it never comes up, the
+			// operator gets this every start, and the saved copy is still there.
+			saved := "(none: this was the first apply)"
+			if txn.Saved != "" {
+				saved = filepath.Join(opts.BackupDir, txn.Saved)
 			}
-			if perr := applyPrevious(txn, previous); perr != nil {
-				return fmt.Errorf("%w: the master was signalled and is gone, and the "+
-					"change could not be taken back out: %w", ErrUnreconciled, perr)
-			}
+			log.Error("A previous run signalled the master and no master is running. "+
+				"php-fpm accepts what is on disk, so it is left in place; start php-fpm "+
+				"and the next run will finish the change.",
+				"file", txn.Path, "previous", saved)
 
 			return fmt.Errorf("%w: the master was signalled by a previous run and is not "+
-				"running; its previous configuration has been restored, and it needs "+
-				"starting", ErrUnreconciled)
+				"running. php-fpm accepts the configuration on disk, so it has been left "+
+				"there; the previous version is at %s if it needs putting back by hand",
+				ErrUnreconciled, saved)
 		}
 
 		// Written but never signalled: the ordinary provisioning case, where the

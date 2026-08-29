@@ -1563,14 +1563,32 @@ func TestSignalledWithNoMasterAliveIsNotTreatedAsProvisioning(t *testing.T) {
 			"read as a host waiting to be provisioned", err)
 	}
 
+	// The file is LEFT ALONE, and this is the half that changed.
+	//
+	// This branch is only reached after php-fpm has been asked and has said it
+	// accepts what is on disk, and this tool writes nothing but pm.* keys — so
+	// the file is not what is stopping a master from starting, and putting an
+	// older one back cannot help. It used to revert anyway, which on a host
+	// where this was the FIRST apply meant removing the drop-in entirely and
+	// returning every pool to its own pm.max_children: the overcommit this tool
+	// exists to prevent, performed by its own recovery.
 	got, readErr := os.ReadFile(DropInPath(dir))
 	if readErr != nil {
-		t.Fatal(readErr)
+		t.Fatalf("the drop-in was removed by recovery: %v", readErr)
 	}
-	if string(got) != before {
-		t.Errorf("the configuration the master died on was left in place:\n%s", got)
+	if !strings.Contains(string(got), "pm.max_children = 40") {
+		t.Errorf("a configuration php-fpm accepts was reverted; the pools are now back at "+
+			"whatever their own files say, which is what this tool was lowering them "+
+			"from:\n%s", got)
 	}
+
+	// And the record stays, so the next start finishes the job rather than
+	// starting from nothing.
 	if _, _, rerr := readTransaction(backupDir, dir); rerr != nil {
-		t.Logf("record state after: %v", rerr)
+		t.Errorf("the recovery record was discarded: %v", rerr)
 	}
+	if !strings.Contains(err.Error(), "left") && !strings.Contains(err.Error(), "accepts") {
+		t.Errorf("the error does not tell the operator the file was kept:\n%v", err)
+	}
+	_ = before
 }

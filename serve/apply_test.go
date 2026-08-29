@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -223,4 +224,76 @@ func trueBinary(t *testing.T) string {
 	}
 
 	return path
+}
+
+// TestTheLockFollowsTheDirectoryBeingWritten.
+//
+// A PHP upgrade in place moves the pool directory. Re-keying the resource lock
+// lived only inside reconcile, which runs once per process — so the daemon went
+// on holding the lock for the OLD directory while applyPlan wrote to the new
+// one. A concurrent `fpm-tune apply` found the new key free and both wrote the
+// same file, and the daemon never reconciled the new tree, so a record left by
+// an unfinished run there would be written over unread.
+func TestTheLockFollowsTheDirectoryBeingWritten(t *testing.T) {
+	old := poolTree(t, "8.2")
+	upgraded := poolTree(t, "8.5")
+
+	current := old
+	restore := swapDiscoveryFunc(func() []phpfpm.Master { return []phpfpm.Master{current.master(t)} })
+	defer restore()
+
+	loop := applyingLoop(t, "")
+	loop.round(context.Background())
+
+	if loop.resourceDir != old.poolDir {
+		t.Fatalf("setup: the lock is on %q, want the original pool directory %q",
+			loop.resourceDir, old.poolDir)
+	}
+
+	// The upgrade.
+	current = upgraded
+	loop.round(context.Background())
+
+	if loop.resourceDir != upgraded.poolDir {
+		t.Errorf("after the pool directory moved to %q the lock is still on %q; a "+
+			"concurrent apply on the new directory is not excluded, and this process "+
+			"has never reconciled it", upgraded.poolDir, loop.resourceDir)
+	}
+}
+
+type tree struct {
+	poolDir, configPath string
+}
+
+func poolTree(t *testing.T, version string) tree {
+	t.Helper()
+
+	root := filepath.Join(t.TempDir(), version)
+	poolDir := filepath.Join(root, "pool.d")
+	if err := os.MkdirAll(poolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "php-fpm.conf")
+	if err := os.WriteFile(configPath,
+		[]byte("[global]\ninclude = "+filepath.Join(poolDir, "*.conf")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	return tree{poolDir: poolDir, configPath: configPath}
+}
+
+func (tr tree) master(t *testing.T) phpfpm.Master {
+	t.Helper()
+
+	return phpfpm.Master{
+		PID: livingMaster(t, tr.configPath), ConfigPath: tr.configPath, Binary: trueBinary(t),
+	}
+}
+
+// swapDiscoveryFunc is swapDiscovery for a list that changes between rounds.
+func swapDiscoveryFunc(fn func() []phpfpm.Master) func() {
+	saved := discoverMasters
+	discoverMasters = func(*slog.Logger) ([]phpfpm.Master, error) { return fn(), nil }
+
+	return func() { discoverMasters = saved }
 }

@@ -585,3 +585,43 @@ func TestTheRecordIsDurableOrTheReloadDoesNotHappen(t *testing.T) {
 			"written; the reload then goes ahead on a promise the kernel has not made")
 	}
 }
+
+// TestRecoveryDoesNotUndoTheFirstApplyOnAHostWithNoMaster.
+//
+// The measured case. On a host where this was the FIRST apply there is no
+// previous version of the file, so "restoring the previous configuration" meant
+// removing the drop-in outright — and every pool went back to its own
+// pm.max_children, which is the overcommit this tool exists to prevent,
+// performed by its own recovery.
+//
+// It needs no crash to reach. A SIGTERM inside the settle window leaves the
+// record open on purpose, and a reboot that starts fpm-tune before php-fpm does
+// the rest.
+func TestRecoveryDoesNotUndoTheFirstApplyOnAHostWithNoMaster(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	configPath := masterConfigAt(t, dir)
+	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir}
+
+	// Nothing there before: the first apply this host ever had.
+	if _, err := os.Stat(DropInPath(dir)); !os.IsNotExist(err) {
+		t.Fatal("setup: the drop-in should not exist yet")
+	}
+
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+	if err := markSignalled(backupDir, master,
+		backup{path: DropInPath(dir), existed: false},
+		Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 40}})); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)
+	if !errors.Is(err, ErrUnreconciled) {
+		t.Fatalf("err = %v, want ErrUnreconciled", err)
+	}
+
+	if _, serr := os.Stat(DropInPath(dir)); serr != nil {
+		t.Fatalf("recovery removed the whole override file, so every pool is back at its "+
+			"own ceiling and nothing on this host is budgeted: %v", serr)
+	}
+}

@@ -330,6 +330,27 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 
 		return
 	}
+
+	// The lock is taken on the directory THIS call is about to write, not on
+	// whatever was current when the process last reconciled.
+	//
+	// Re-keying lived only inside reconcile, which runs once per process — so
+	// after a PHP upgrade moved the pool directory the daemon held the lock on
+	// the old one and wrote to the new. A concurrent `fpm-tune apply` found the
+	// new key free and both wrote the same file; and the daemon never
+	// reconciled the new tree, so a leftover record there was written over
+	// unread. holdResource clears the reconciled flag when the directory
+	// changes, which sends the next round through recovery first.
+	if !l.holdResource(master.DropInDir) {
+		return
+	}
+	if !l.reconciled {
+		l.log.Warn("The pool directory changed under this process; reconciling before "+
+			"writing to it", "dir", master.DropInDir)
+
+		return
+	}
+
 	l.metrics.SetApplyBlocked("")
 	l.state.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
@@ -434,21 +455,8 @@ func (l *Loop) reconcile(ctx context.Context) {
 	// upgrade in place moves the pool directory: the lock stayed keyed on the old
 	// one while writes went to the new, so a concurrent apply found the new key
 	// free and both wrote the same file.
-	if l.resourceDir != master.DropInDir {
-		if l.resource != nil {
-			l.resource()
-			l.resource = nil
-			l.reconciled = false // a tree this process has never reconciled
-		}
-
-		release, err := lock.Acquire(lock.ResourcePath(master.DropInDir))
-		if err != nil {
-			l.metrics.SetApplyBlocked("lock")
-			l.log.Error("Cannot take the pool-directory lock; not applying", "error", err)
-
-			return
-		}
-		l.resource, l.resourceDir = release, master.DropInDir
+	if !l.holdResource(master.DropInDir) {
+		return
 	}
 
 	acted, err := apply.Reconcile(ctx, master, opts, l.log)
@@ -515,6 +523,35 @@ func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.Po
 	}
 
 	return observe.Sample(ctx, targets, l.log)
+}
+
+// holdResource takes the pool-directory lock, re-keying it when the directory
+// has changed. It reports whether the lock is held.
+//
+// A directory change clears the reconciled flag, because a tree this process has
+// never looked at may be carrying a record from a run that did not finish.
+func (l *Loop) holdResource(dropInDir string) bool {
+	if l.resourceDir == dropInDir && l.resource != nil {
+		return true
+	}
+
+	if l.resource != nil {
+		l.resource()
+		l.resource = nil
+	}
+	l.reconciled = false
+
+	release, err := lock.Acquire(lock.ResourcePath(dropInDir))
+	if err != nil {
+		l.metrics.SetApplyBlocked("lock")
+		l.log.Error("Cannot take the pool-directory lock; not applying",
+			"dir", dropInDir, "error", err)
+
+		return false
+	}
+	l.resource, l.resourceDir = release, dropInDir
+
+	return true
 }
 
 func (l *Loop) startMetrics() (*http.Server, error) {
