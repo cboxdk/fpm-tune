@@ -10,6 +10,7 @@ import (
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/state"
+	"github.com/cboxdk/phpfpm"
 )
 
 const (
@@ -823,4 +824,58 @@ func TestAnUnreachablePoolIsReservedWhatIsRememberedOfIt(t *testing.T) {
 		return
 	}
 	t.Fatal("the unreachable pool is missing from the plan")
+}
+
+// TestOneOldRecordIsNotReservedTwice.
+//
+// A state file written before pools carried a master has one unscoped record
+// per pool name. On a host running two PHP versions — both of which call their
+// pool `www` — that record belongs to at most one of them, and the fallback
+// that exists so an upgrade does not throw away every baseline handed it to
+// both.
+//
+// Neither adopts it while both are unreachable, so it stays unscoped and both
+// keep reading it: one pool's remembered thirty workers at 200MiB reserved
+// twice, 12GiB of floor out of a single stale entry, on a host that has 12GiB.
+func TestOneOldRecordIsNotReservedTwice(t *testing.T) {
+	st := state.New()
+	base := time.Now().Add(-time.Hour)
+
+	// The legacy shape: no master on the record, keyed by the bare name.
+	var accepted int64
+	for i := 0; i < 30; i++ {
+		accepted += 6000
+		st.Learn(state.Observation{
+			Pool: "www", At: base.Add(time.Duration(i) * 2 * time.Minute),
+			ActiveNow: 30, Accepted: accepted,
+			Workers: []state.WorkerSample{
+				{RSSBytes: 200 * mb, Requests: 500}, {RSSBytes: 200 * mb, Requests: 500},
+			},
+		}, state.Options{})
+	}
+	st.Pools["www"].ObservePeak(30, time.Now(), state.Options{}.Defaults())
+
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 12 * gb, CPUs: 16, Source: budget.SourceMemInfo},
+		State:  st,
+		Views: []observe.PoolView{
+			{Name: "www", Target: phpfpm.Target{ConfigPath: "/etc/php/8.2/php-fpm.conf"},
+				Err: errors.New("refused")},
+			{Name: "www", Target: phpfpm.Target{ConfigPath: "/etc/php/8.3/php-fpm.conf"},
+				Err: errors.New("refused")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var reserved int64
+	for _, pp := range res.Plan.Pools {
+		reserved += pp.Bytes
+	}
+	if reserved > 2*gb {
+		t.Errorf("two pools called www reserved %dMiB between them out of one old record "+
+			"of thirty 200MiB workers; that history belongs to at most one of them, and "+
+			"the other has just been given it too", reserved/mb)
+	}
 }

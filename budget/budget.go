@@ -152,6 +152,15 @@ func DetectFor(pid int) Limits {
 // cgroupLimitOf walks the cgroups a process belongs to and returns the tightest
 // memory limit found.
 func cgroupLimitOf(pid int) (int64, bool, error) {
+	if _, err := os.Stat(procRoot); err != nil {
+		// No /proc at all: this is macOS, or a Linux host with it unmounted.
+		// Cgroups are not a thing here, so the machine's memory is not a
+		// fallback from a failed reading — it is the answer. Reporting an error
+		// made the daemon refuse to write on every non-Linux host, which is
+		// where it is developed.
+		return 0, false, nil
+	}
+
 	data, err := os.ReadFile(fmt.Sprintf("%s/%d/cgroup", procRoot, pid))
 	if err != nil {
 		// COULD NOT LOOK is not the same as FOUND NO LIMIT, and returning the

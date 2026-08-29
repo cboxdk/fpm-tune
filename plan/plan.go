@@ -118,13 +118,18 @@ func Build(in Input) (Result, error) {
 		ReserveReason: reason,
 	}
 
+	// Pool names that appear more than once this round, because two masters can
+	// each have a `www` and the store's legacy fallback would hand both the same
+	// old record.
+	ambiguous := ambiguousNames(in.Views)
+
 	pools := make([]allocate.Pool, 0, len(in.Views))
 	for _, view := range in.Views {
 		if view.Err != nil {
 			result.Unreachable = append(result.Unreachable, view.Name)
 		}
 
-		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at)
+		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name])
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -150,11 +155,35 @@ func Build(in Input) (Result, error) {
 	return result, nil
 }
 
+// ambiguousNames reports which pool names appear more than once in a round.
+//
+// Only possible unscoped, on a host running several masters — which is warned
+// about loudly and cannot be applied — but the reporting and the legacy
+// fallback both key on the name, and both are wrong when it is not unique.
+func ambiguousNames(views []observe.PoolView) map[string]bool {
+	seen := make(map[string]string, len(views))
+	dup := map[string]bool{}
+	for _, v := range views {
+		if first, ok := seen[v.Name]; ok && first != v.Target.ConfigPath {
+			dup[v.Name] = true
+
+			continue
+		}
+		seen[v.Name] = v.Target.ConfigPath
+	}
+
+	return dup
+}
+
 // mastersOf maps each pool to the configuration it belongs to, so a lookup by
 // name alone cannot reach another master's record.
 func mastersOf(views []observe.PoolView) map[string]string {
 	out := make(map[string]string, len(views))
+	dup := ambiguousNames(views)
 	for _, v := range views {
+		if dup[v.Name] {
+			continue
+		}
 		out[v.Name] = v.Target.ConfigPath
 	}
 
@@ -181,8 +210,14 @@ func worstCase(p allocate.Plan, st *state.State, masters map[string]string) int6
 	var total int64
 	for _, pp := range p.Pools {
 		cost := pp.WorkerBytes
-		if ps := st.Lookup(masters[pp.Name], pp.Name); ps != nil && ps.HighWaterBytes > cost {
-			cost = ps.HighWaterBytes
+		// Scoped, and skipped entirely when the name is not unique: a
+		// worst-case figure attributed to the wrong master is worse than one
+		// that is missing, because the number is only ever read when something
+		// has already gone wrong.
+		if master, ok := masters[pp.Name]; ok {
+			if ps := st.LookupScoped(master, pp.Name); ps != nil && ps.HighWaterBytes > cost {
+				cost = ps.HighWaterBytes
+			}
 		}
 		total += int64(pp.MaxChildren) * cost
 	}
@@ -205,7 +240,14 @@ func worstCase(p allocate.Plan, st *state.State, masters map[string]string) int6
 // tool like this causes the outage it was installed to prevent, so until then
 // its floor holds at whatever it is configured for and the first run can only
 // ever help.
-func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state.Options, at time.Time) (allocate.Pool, bool) {
+func poolFor(
+	view observe.PoolView,
+	st *state.State,
+	profile Profile,
+	opts state.Options,
+	at time.Time,
+	ambiguous bool,
+) (allocate.Pool, bool) {
 	pool := allocate.Pool{
 		Name:               view.Name,
 		CurrentMaxChildren: view.CurrentMaxChildren,
@@ -217,7 +259,14 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 
 	var ps *state.PoolState
 	if st != nil {
-		ps = st.Lookup(view.Target.ConfigPath, view.Name)
+		if ambiguous {
+			// No legacy fallback: the old unscoped record belongs to at most one
+			// of the pools sharing this name, and giving it to both reserves the
+			// same history twice.
+			ps = st.LookupScoped(view.Target.ConfigPath, view.Name)
+		} else {
+			ps = st.Lookup(view.Target.ConfigPath, view.Name)
+		}
 	}
 
 	// Two separate questions, and conflating them was a way to overcommit.

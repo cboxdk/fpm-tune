@@ -689,10 +689,18 @@ func allocateDemand(pools []Pool, wants, granted []int, remaining int64) int64 {
 				return cands[a].urgent
 			}
 			if cands[a].urgent {
-				// Among pools that are queueing, the SMALLEST gap first: it is
-				// the cheapest site to take out of the queue, and serving it
-				// first resolves the most pools with the budget available.
-				return cands[a].gap < cands[b].gap
+				// Among pools that are queueing, the one that is CHEAPEST TO
+				// FIX first — the shortfall in bytes, not in workers.
+				//
+				// It used to compare worker counts, which is not the same thing
+				// and is wrong whenever the pools differ in cost. With 100MiB
+				// spare, a pool two workers short at 100MiB each sorted ahead of
+				// one five workers short at 20MiB: the first took one worker and
+				// stayed queued, the second got nothing, and the same 100MiB
+				// would have taken the second entirely out of the queue. Two
+				// sites down instead of one.
+				return int64(cands[a].gap)*pools[cands[a].i].WorkerBytes <
+					int64(cands[b].gap)*pools[cands[b].i].WorkerBytes
 			}
 
 			return cands[a].gap > cands[b].gap

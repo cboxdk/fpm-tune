@@ -42,6 +42,15 @@ type Config struct {
 	// without disturbing a baseline was disturbing it.
 	NoLearn bool
 
+	// DetectBudget replaces the memory-limit reading, the third of the loop's
+	// views of the outside world.
+	//
+	// Nil in production, where it is the master's cgroup. Indirected for the
+	// same reason as the other two: whether this loop WRITES from a budget it
+	// could not confirm is a correctness rule, and it was reachable only by
+	// arranging an unreadable cgroup on the machine running the tests.
+	DetectBudget func(pid int) budget.Limits
+
 	// Discover and Sample replace the loop's two views of the outside world.
 	//
 	// Nil in production, where they are php-fpm itself. A test sets them to hold
@@ -281,7 +290,11 @@ func (l *Loop) round(ctx context.Context) {
 
 	// The MASTER's limit, not this process's. On a VM the cap lives on php-fpm's
 	// own systemd slice, and reading the root cgroup finds nothing at all.
-	limits := budget.DetectFor(MasterPIDOf(views))
+	detect := budget.DetectFor
+	if l.cfg.DetectBudget != nil {
+		detect = l.cfg.DetectBudget
+	}
+	limits := detect(MasterPIDOf(views))
 	if l.cfg.MemoryOverride > 0 {
 		limits = limits.WithOverride(l.cfg.MemoryOverride)
 	}
@@ -373,10 +386,19 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// has quietly stopped applying looks exactly like one that has nothing to do.
 	if result.Budget.LookupErr != nil {
 		l.metrics.SetApplyBlocked("budget_unconfirmed")
+
+		// The lock goes back, because this process is holding it for work it
+		// has just decided not to do — and the way out of this state is a
+		// one-shot apply, which the lock would refuse. A daemon that blocks the
+		// remedy it recommends is worse than one that simply stops.
+		l.releaseResource()
+
 		l.log.Error("Not applying: php-fpm's own memory limit could not be read, so the "+
-			"only budget available is the machine's. Pass --memory with the real limit, "+
-			"or make the master's cgroup readable.",
-			"budget", result.Budget.MemoryBytes, "error", result.Budget.LookupErr)
+			"only budget available is the machine's — and if php-fpm is capped below "+
+			"that, sizing to it grows the pools into a ceiling they never see. Restart "+
+			"this daemon with --memory set to the real limit, or make the master's "+
+			"cgroup readable to this user. It keeps measuring and publishing meanwhile.",
+			"machine_budget", result.Budget.MemoryBytes, "error", result.Budget.LookupErr)
 
 		return
 	}
@@ -612,6 +634,16 @@ func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.Po
 //
 // A directory change clears the reconciled flag, because a tree this process has
 // never looked at may be carrying a record from a run that did not finish.
+// releaseResource gives the pool-directory lock back, so an operator's one-shot
+// run is not refused by a daemon that has stopped writing.
+func (l *Loop) releaseResource() {
+	if l.resource == nil {
+		return
+	}
+	l.resource()
+	l.resource, l.resourceDir = nil, ""
+}
+
 func (l *Loop) holdResource(dropInDir string) bool {
 	if l.resourceDir == dropInDir && l.resource != nil {
 		return true

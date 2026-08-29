@@ -125,6 +125,32 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 // With no directory named it keeps everything, and says so when that spans more
 // than one master — the numbers are then a mixture, and an operator reading them
 // should know before acting on them.
+// refuseUnconfirmedBudget stops a write from a budget nobody could confirm.
+//
+// The detection falls back to the machine when php-fpm's own limit cannot be
+// read, and the two numbers are indistinguishable — so a service capped at 3GiB
+// gets sized against 32GiB and grown into a ceiling it never sees. Reading it
+// and reporting it is right; ACTING on it is not, and --memory is how an
+// operator says what the real number is.
+//
+// Its own function so it can be tested: it is one branch, and the branch is the
+// difference between a refusal and an outage.
+func refuseUnconfirmedBudget(limits budget.Limits) error {
+	if limits.LookupErr == nil {
+		return nil
+	}
+
+	// The error names the file it could not read, so "make it readable" is an
+	// instruction rather than a direction. It used to say /proc/<pid>/cgroup,
+	// which was the only case at the time and is now one of two — the other is a
+	// limit file under /sys/fs/cgroup that exists and refuses.
+	return fmt.Errorf("refusing to write: php-fpm's own memory limit could not be read, "+
+		"so the only budget available is the machine's %s — and if php-fpm is capped "+
+		"below that, sizing to it grows the pools into a ceiling they never see. Either "+
+		"pass --memory with the real limit, or make the file below readable to this "+
+		"user: %w", budget.HumanBytes(limits.MemoryBytes), limits.LookupErr)
+}
+
 // noPositionalArgs refuses a stray word on the command line.
 //
 // Go's flag package stops parsing at the first non-flag token and silently
@@ -432,12 +458,8 @@ func runApply(args []string) error {
 	// at 3GiB gets sized against 32GiB and grown into a ceiling it never sees.
 	// Reading it and reporting it is right; ACTING on it is not, and --memory is
 	// how an operator says what the real number is.
-	if lerr := result.Budget.LookupErr; lerr != nil {
-		return fmt.Errorf("refusing to write: php-fpm's own memory limit could not be "+
-			"read (%w), so the only budget available is the machine's %s. If php-fpm is "+
-			"capped below that, sizing to it grows the pools into a ceiling they never "+
-			"see. Pass --memory with the real limit, or make /proc/<pid>/cgroup readable",
-			lerr, budget.HumanBytes(result.Budget.MemoryBytes))
+	if err := refuseUnconfirmedBudget(result.Budget); err != nil {
+		return err
 	}
 
 	st.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)

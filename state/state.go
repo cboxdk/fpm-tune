@@ -567,11 +567,26 @@ func (s *State) Save(path string) error {
 // legacy record has none, and refusing it would throw away every baseline on
 // the first run after an upgrade.
 func (s *State) Lookup(master, pool string) *PoolState {
-	if ps, ok := s.Pools[PoolKey(master, pool)]; ok {
+	if ps := s.LookupScoped(master, pool); ps != nil {
 		return ps
 	}
 	if legacy, ok := s.Pools[pool]; ok && legacy.MasterConfig == "" {
 		return legacy
+	}
+
+	return nil
+}
+
+// LookupScoped is Lookup without the legacy fallback.
+//
+// For callers that know the pool NAME is ambiguous this round — two masters,
+// both with a pool called `www`, both unreachable so neither has adopted the
+// old record. The fallback would hand the same history to both, and one pool's
+// remembered thirty workers at 200MiB would be reserved twice: 12GiB of floor
+// from a single stale entry.
+func (s *State) LookupScoped(master, pool string) *PoolState {
+	if ps, ok := s.Pools[PoolKey(master, pool)]; ok {
+		return ps
 	}
 
 	return nil

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cboxdk/fpm-tune/apply"
+	"github.com/cboxdk/fpm-tune/budget"
 )
 
 // TestTheOutcomeAnOperatorHasToActOnIsPrinted.
@@ -204,5 +205,40 @@ func TestAFailedApplyDoesNotPrintATableOfThingsItDid(t *testing.T) {
 	})
 	if !strings.Contains(succeeded, "DONE") {
 		t.Errorf("a successful apply does not say so:\n%s", succeeded)
+	}
+}
+
+// TestAWriteIsRefusedFromABudgetNobodyConfirmed.
+//
+// The detection falls back to the machine's memory when php-fpm's own limit
+// cannot be read, and the two numbers are indistinguishable. A service capped
+// at 3GiB on a 32GiB host would be sized against 32GiB and grown into a ceiling
+// it never sees.
+//
+// The message has to name the FILE, because "make it readable" is otherwise a
+// direction rather than an instruction — and there are now two files it can be:
+// /proc/<pid>/cgroup, and a limit under /sys/fs/cgroup that exists and refuses.
+func TestAWriteIsRefusedFromABudgetNobodyConfirmed(t *testing.T) {
+	err := refuseUnconfirmedBudget(budget.Limits{
+		MemoryBytes: 32 * 1024 * 1024 * 1024,
+		Source:      budget.SourceMemInfo,
+		LookupErr: fmt.Errorf("cannot read the memory limit at %s: %w",
+			"/sys/fs/cgroup/system.slice/php-fpm.service/memory.max", os.ErrPermission),
+	})
+	if err == nil {
+		t.Fatal("a write was allowed from a budget nobody could confirm")
+	}
+	for _, want := range []string{"memory.max", "--memory", "32.0GiB"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q, so an operator cannot act on it:\n%v",
+				want, err)
+		}
+	}
+
+	// A confirmed budget is not refused, or the tool never writes at all.
+	if err := refuseUnconfirmedBudget(budget.Limits{
+		MemoryBytes: 3 << 30, Source: budget.SourceCgroupProcess,
+	}); err != nil {
+		t.Errorf("a budget read straight from php-fpm's own cgroup was refused: %v", err)
 	}
 }

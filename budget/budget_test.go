@@ -675,3 +675,30 @@ func TestALimitThatCannotBeReadIsNotAnAbsentLimit(t *testing.T) {
 			"write from it", HumanBytes(got.MemoryBytes))
 	}
 }
+
+// TestAHostWithNoProcIsNotAFailedLookup.
+//
+// Reporting a failed lookup when php-fpm's own limit cannot be read is right on
+// Linux, where /proc/<pid>/cgroup missing means the process is gone or hidden.
+// It is wrong everywhere /proc does not exist at all — macOS, or a Linux host
+// with it unmounted — because there are no cgroups there and the machine's
+// memory is not a fallback from a failed reading, it is the answer.
+//
+// Caught by the end-to-end suite rather than by a unit test: the daemon refused
+// to apply on every run, on the machine this is developed on.
+func TestAHostWithNoProcIsNotAFailedLookup(t *testing.T) {
+	root := t.TempDir()
+	// A cgroup root that exists, and no /proc beside it.
+	cg := filepath.Join(root, "cgroup")
+	if err := os.MkdirAll(cg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	defer swapRoots(cg, filepath.Join(root, "does-not-exist"))()
+
+	if got := DetectFor(4242); got.LookupErr != nil {
+		t.Errorf("a host with no /proc reported a failed lookup (%v); there are no "+
+			"cgroups to read there, and the tool now refuses to write on every such host",
+			got.LookupErr)
+	}
+}

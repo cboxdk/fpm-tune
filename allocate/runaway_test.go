@@ -226,3 +226,54 @@ func TestAmongQueueingPoolsTheCheapestFixGoesFirst(t *testing.T) {
 			near.MaxChildren, near.Want, byName["far"].MaxChildren, byName["far"].Want)
 	}
 }
+
+// TestTheCheapestFixIsMeasuredInBytesNotWorkers.
+//
+// "Cheapest to fix" is a cost, and the ordering compared worker COUNTS. That is
+// the same thing only when the pools cost the same, which is exactly what this
+// tool exists because they do not.
+//
+// With 100MiB spare: a pool two workers short at 100MiB each, and one five
+// workers short at 20MiB each. By count the first sorts ahead, takes a single
+// worker and stays queued, and the second gets nothing — while the same 100MiB
+// would have taken the second entirely out of the queue. Two sites down instead
+// of one.
+func TestTheCheapestFixIsMeasuredInBytesNotWorkers(t *testing.T) {
+	opts := Options{}.Defaults()
+
+	// Floors of one each: 120MiB, leaving 100MiB of the 220MiB budget. Both are
+	// urgent by their listen queue rather than by having hit the ceiling, so the
+	// want is the headroom factor alone and the arithmetic is legible.
+	//
+	// `cheap` is five workers short at 20MiB: exactly the 100MiB available.
+	// `dear` is two short at 100MiB: 200MiB, which does not fit at all.
+	plan, err := Compute(Budget{TotalBytes: 220 * mb, CPUs: 64}, []Pool{
+		{
+			Name: "dear", WorkerBytes: 100 * mb, Floor: 1, CurrentMaxChildren: 1,
+			ObservedPeak: 3, QueueDepth: 10,
+			Measured: true, Reducible: true,
+		},
+		{
+			Name: "cheap", WorkerBytes: 20 * mb, Floor: 1, CurrentMaxChildren: 1,
+			ObservedPeak: 5, QueueDepth: 10,
+			Measured: true, Reducible: true,
+		},
+	}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byName := map[string]PoolPlan{}
+	for _, pp := range plan.Pools {
+		byName[pp.Name] = pp
+	}
+
+	cheap := byName["cheap"]
+	if cheap.MaxChildren < cheap.Want {
+		t.Errorf("the pool that could have been taken out of the queue entirely for the "+
+			"memory available got %d of the %d it needs, while the expensive one got %d "+
+			"of %d and is still queueing: the ordering counted workers where it meant "+
+			"cost, so neither site came back",
+			cheap.MaxChildren, cheap.Want, byName["dear"].MaxChildren, byName["dear"].Want)
+	}
+}

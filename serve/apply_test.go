@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cboxdk/fpm-tune/apply"
+	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/state"
 	"github.com/cboxdk/phpfpm"
@@ -434,5 +436,50 @@ func TestNoLearnDoesNotForgetOrSaveOnTheWayOut(t *testing.T) {
 	}
 	if _, err := os.Stat(statePath); err == nil {
 		t.Error("a run told to record nothing wrote a state file on its way out")
+	}
+}
+
+// TestTheDaemonWillNotWriteFromABudgetItCouldNotConfirm.
+//
+// The detection falls back to the machine's memory when php-fpm's own limit
+// cannot be read, and the two numbers are indistinguishable. A service capped
+// at 3GiB on a 32GiB host would be sized against 32GiB and grown into a ceiling
+// it never sees — so reading it is right and writing from it is not.
+//
+// Published as well as logged, because a daemon that has quietly stopped
+// applying looks exactly like one with nothing to do. And the pool-directory
+// lock goes back: the way out of this state is a one-shot apply with --memory,
+// and a daemon that blocks the remedy it recommends is worse than one that
+// simply stops.
+func TestTheDaemonWillNotWriteFromABudgetItCouldNotConfirm(t *testing.T) {
+	tr := poolTree(t, "8.5")
+	defer swapDiscovery([]phpfpm.Master{
+		{PID: livingMaster(t, tr.configPath), ConfigPath: tr.configPath, Binary: trueBinary(t)},
+	})()
+
+	loop := applyingLoop(t, tr.poolDir, tr.configPath)
+	loop.cfg.MemoryOverride = 0
+	loop.cfg.DetectBudget = func(int) budget.Limits {
+		return budget.Limits{
+			MemoryBytes: 32 * 1024 * mb, CPUs: 8, Source: budget.SourceMemInfo,
+			LookupErr: errors.New("permission denied"),
+		}
+	}
+
+	loop.round(context.Background())
+
+	if _, err := os.Stat(apply.DropInPath(tr.poolDir)); err == nil {
+		t.Error("the daemon wrote pool configuration from the machine's memory after " +
+			"failing to read php-fpm's own limit; if php-fpm is capped below it, those " +
+			"pools have just been grown into a ceiling they never see")
+	}
+	if got := blockedReason(t, loop); got != "budget_unconfirmed" {
+		t.Errorf("apply_blocked = %q, want budget_unconfirmed: a daemon that has stopped "+
+			"applying looks exactly like one with nothing to do", got)
+	}
+	if loop.resource != nil {
+		t.Error("the daemon is still holding the pool-directory lock for work it has " +
+			"decided not to do; the way out is a one-shot apply with --memory, and that " +
+			"lock refuses it")
 	}
 }
