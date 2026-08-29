@@ -176,7 +176,29 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 	// workers away, so until it has, the floor holds at what the pool is
 	// configured for and the first run can only ever help.
 	if ps != nil && ps.SizingBytes() > 0 {
-		pool.WorkerBytes = ps.SizingBytes()
+		measured := ps.SizingBytes()
+
+		// An unproven measurement may RAISE the cost, never lower it below the
+		// profile's guess.
+		//
+		// A pool's workers shrink when it is idle — PHP returns large
+		// allocations to the operating system — so a pool first observed at
+		// three in the morning reads at 12MiB a worker when its busy cost is
+		// 120MiB. That number is then divided into the budget: forty workers
+		// accounted for at 480MiB, the neighbours grown into the difference, and
+		// the host committed past its memory the moment the site wakes up.
+		//
+		// The learner already refuses to LOWER an established estimate on an
+		// idle reading. It could not refuse to establish one, because there was
+		// nothing to compare against — so the floor has to come from here. Once
+		// the pool has been seen working the measurement stands on its own,
+		// however small: a genuinely cheap application is exactly what this tool
+		// exists to notice.
+		if ps.BusySamples == 0 && measured < profile.WorkerBytes {
+			measured = profile.WorkerBytes
+		}
+
+		pool.WorkerBytes = measured
 		pool.Measured = true
 	}
 

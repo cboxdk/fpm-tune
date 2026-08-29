@@ -659,3 +659,99 @@ func TestAnUnreachablePoolIsNotReducibleEvenWhenTrusted(t *testing.T) {
 			"the pool comes back at 20 regardless", down.MaxChildren)
 	}
 }
+
+// TestAnIdleFirstSightingDoesNotUnderpriceThePool.
+//
+// PHP workers give large allocations back to the operating system, so a pool
+// that has been quiet for an hour reads far smaller than it costs under load. If
+// the first time this tool ever sees a pool is at three in the morning, that
+// small reading is what it establishes — the learner has nothing to compare it
+// against, so its refusal to LOWER an estimate on idle evidence cannot help.
+//
+// The reading is then divided into the budget. A pool configured for 40 workers
+// accounted for at 12MiB each reserves 480MiB; its real cost is 4.7GiB. The
+// difference is handed to the neighbours, who are grown into it and reloaded,
+// and the host is committed past its memory the moment the site wakes up.
+func TestAnIdleFirstSightingDoesNotUnderpriceThePool(t *testing.T) {
+	st := state.New()
+
+	// Two mature workers — they served traffic earlier in the day — read while
+	// the pool is serving nothing at all.
+	base := time.Now().Add(-30 * time.Minute)
+	for i := 0; i < 30; i++ {
+		st.Learn(state.Observation{
+			Pool: "shop", At: base.Add(time.Duration(i) * time.Minute),
+			ActiveNow: 0,
+			Accepted:  500, // frozen
+			Workers: []state.WorkerSample{
+				{RSSBytes: 12 * mb, Requests: 400},
+				{RSSBytes: 12 * mb, Requests: 380},
+			},
+		}, state.Options{})
+	}
+
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 8 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		State:  st,
+		Views: []observe.PoolView{
+			{
+				Name: "shop", ProcessManager: "dynamic",
+				CurrentMaxChildren: 40, MaxChildrenKnown: true,
+				Workers: []state.WorkerSample{{RSSBytes: 12 * mb, Requests: 400}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := res.Plan.Pools[0].WorkerBytes
+	if got <= 12*mb {
+		t.Errorf("the pool is accounted for at %dMiB a worker on evidence gathered while "+
+			"it served nothing; its busy workers cost ten times that, and the difference "+
+			"has just been given to its neighbours", got/mb)
+	}
+}
+
+// TestAMeasuredCheapPoolIsStillBelieved: the floor above must not swallow the
+// thing this tool exists for. Once a pool has been watched WORKING, a small
+// measurement is a real one — a genuinely cheap application is exactly what
+// makes dividing one budget across pools worth doing.
+func TestAMeasuredCheapPoolIsStillBelieved(t *testing.T) {
+	st := state.New()
+	base := time.Now().Add(-time.Hour)
+
+	var accepted int64
+	for i := 0; i < 30; i++ {
+		accepted += 6000 // 100 req/s across a two-minute interval
+		st.Learn(state.Observation{
+			Pool: "docs", At: base.Add(time.Duration(i) * 2 * time.Minute),
+			ActiveNow: 6, Accepted: accepted,
+			Workers: []state.WorkerSample{
+				{RSSBytes: 12 * mb, Requests: 400},
+				{RSSBytes: 12 * mb, Requests: 380},
+			},
+		}, state.Options{})
+	}
+
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 8 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		State:  st,
+		Views: []observe.PoolView{
+			{
+				Name: "docs", ProcessManager: "dynamic",
+				CurrentMaxChildren: 40, MaxChildrenKnown: true,
+				Workers: []state.WorkerSample{{RSSBytes: 12 * mb, Requests: 400}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := res.Plan.Pools[0].WorkerBytes; got > 16*mb {
+		t.Errorf("a pool measured at 12MiB a worker across an hour of real traffic is "+
+			"accounted for at %dMiB; the profile's guess has overridden a measurement, "+
+			"which is the whole thing this tool is for", got/mb)
+	}
+}
