@@ -363,3 +363,35 @@ func TestTheLoopItselfScopesToItsMaster(t *testing.T) {
 		t.Error("the daemon learned nothing at all; the filter has removed its own pools")
 	}
 }
+
+// TestNoLearnRecordsNothing.
+//
+// The flag was registered for `serve` and read by nothing. A daemon started
+// with -no-learn wrote a state file with a sample count per pool, while its own
+// help said "do not record this scrape" — so someone using it to watch a host
+// without disturbing a baseline was disturbing it, silently.
+func TestNoLearnRecordsNothing(t *testing.T) {
+	tr := poolTree(t, "8.5")
+	defer swapDiscovery([]phpfpm.Master{
+		{PID: livingMaster(t, tr.configPath), ConfigPath: tr.configPath, Binary: trueBinary(t)},
+	})()
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	loop := applyingLoop(t, tr.poolDir, tr.configPath)
+	// Watching, not acting: the two are refused together by the CLI, because
+	// applying has to record what it wrote.
+	loop.cfg.Apply = false
+	loop.cfg.NoLearn = true
+	loop.cfg.StatePath = statePath
+
+	loop.round(context.Background())
+	loop.save(time.Now(), true)
+
+	if n := len(loop.State().Pools); n != 0 {
+		t.Errorf("%d pools were recorded by a run told not to record anything", n)
+	}
+	if _, err := os.Stat(statePath); err == nil {
+		t.Error("a state file was written by a run told not to record anything; whatever " +
+			"a previous run learned has just been replaced by a file that learned nothing")
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -165,5 +166,43 @@ func TestAStrayWordIsRefusedRatherThanIgnored(t *testing.T) {
 				t.Errorf("the error does not say what happened to the other flags: %v", err)
 			}
 		})
+	}
+}
+
+// TestAFailedApplyDoesNotPrintATableOfThingsItDid.
+//
+// The actions are decided before anything is written, and nothing downgrades
+// them when the write, the validation or the reload fails. So a run against a
+// read-only pool directory printed
+//
+//	POOL  ACTION   DETAIL
+//	shop  applied  12 to 5
+//
+// four lines above "Nothing was applied: permission denied" — two contradictory
+// statements on one screen, and the tabular half, the one people read first, was
+// the wrong one.
+func TestAFailedApplyDoesNotPrintATableOfThingsItDid(t *testing.T) {
+	res := apply.Result{Outcomes: []apply.Outcome{
+		{Pool: "shop", Action: "applied", Reason: "12 to 5"},
+	}}
+
+	failed := capture(t, func() {
+		renderApplied(res, false, errors.New("permission denied"))
+	})
+	if strings.Contains(failed, "DONE") {
+		t.Errorf("a run that applied nothing headed its table as things done:\n%s", failed)
+	}
+	if !strings.Contains(failed, "WOULD") {
+		t.Errorf("the table does not say these are proposals:\n%s", failed)
+	}
+
+	succeeded := capture(t, func() {
+		renderApplied(apply.Result{
+			Outcomes: res.Outcomes,
+			Reloaded: true,
+		}, false, nil)
+	})
+	if !strings.Contains(succeeded, "DONE") {
+		t.Errorf("a successful apply does not say so:\n%s", succeeded)
 	}
 }

@@ -452,8 +452,19 @@ func renderApplied(res apply.Result, dryRun bool, err error) {
 		return
 	}
 
+	// The heading says whether this is what HAPPENED or what was going to.
+	//
+	// The actions are decided before anything is written, and nothing downgrades
+	// them when the write, the validation or the reload fails — so a run that
+	// could not write printed "shop applied 12 to 5" four lines above "Nothing
+	// was applied", and the machine-readable half was the wrong one.
+	heading := "DONE"
+	if err != nil || res.RolledBack || dryRun {
+		heading = "WOULD"
+	}
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "POOL\tACTION\tDETAIL")
+	_, _ = fmt.Fprintf(tw, "POOL\t%s\tDETAIL\n", heading)
 	for _, o := range res.Outcomes {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", o.Pool, o.Action, o.Reason)
 	}
@@ -594,6 +605,18 @@ func runServe(args []string) error {
 		return err
 	}
 
+	// Contradictory, and silently resolving it either way is worse than saying
+	// so. -no-learn means "record nothing about what you see"; -apply has to
+	// record what it WROTE, because the reload damping reads it back and a
+	// daemon that forgets its own changes reloads a pool it reloaded a minute
+	// ago. Watching without recording is a real thing to want; acting without
+	// recording is not.
+	if *doApply && *c.noLearn {
+		return errors.New("-apply and -no-learn contradict each other: applying has to " +
+			"record what it wrote, or the next round reloads the pool it just reloaded. " +
+			"Drop -no-learn to act, or drop -apply to watch")
+	}
+
 	log := newLogger(*c.verbose)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -614,10 +637,12 @@ func runServe(args []string) error {
 	}
 
 	loop, err := serve.New(serve.Config{
-		Interval:       *interval,
-		StatePath:      *c.statePath,
-		SaveEvery:      *saveEvery,
-		Apply:          *doApply,
+		Interval:  *interval,
+		StatePath: *c.statePath,
+		SaveEvery: *saveEvery,
+		Apply:     *doApply,
+		NoLearn:   *c.noLearn,
+
 		MetricsAddr:    *metricsAddr,
 		DropInDir:      *dropInDir,
 		BackupDir:      *backupDir,

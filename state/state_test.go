@@ -335,7 +335,12 @@ func TestSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 	opts := Options{}.Defaults()
-	base := time.Now()
+	// Dated in the PAST, as real observations are. Load discards timestamps that
+	// have not happened yet, because a state file claiming the future gives a
+	// pool permanent confidence no live observation can shorten — and a fixture
+	// that learns fifty minutes ahead of the clock is not a restart, it is that
+	// bug wearing a test's name.
+	base := time.Now().Add(-time.Hour)
 
 	before := New()
 	for i := 0; i < 25; i++ {

@@ -401,11 +401,38 @@ func Load(path string) (*State, error) {
 	}
 	s.Version = formatVersion
 
+	now := time.Now()
 	for _, ps := range s.Pools {
 		ps.inferCadence()
+		ps.forgetTheFuture(now)
 	}
 
 	return &s, nil
+}
+
+// forgetTheFuture drops timestamps that have not happened yet.
+//
+// Confidence is measured between FirstBusyAt and LastBusyAt, and LastBusyAt can
+// only move FORWARD — so a state file carrying 2099 gives a pool full
+// confidence for ever, and no live observation can ever shorten the span. Full
+// confidence is permission to CUT, so the pool is permanently eligible to be
+// trimmed on evidence that never existed.
+//
+// One NTP step, one restore from a mis-clocked host, one container with a dead
+// RTC. The tolerance is generous because a few seconds of clock skew between
+// writing and reading is ordinary and means nothing.
+func (ps *PoolState) forgetTheFuture(now time.Time) {
+	const skew = time.Minute
+
+	horizon := now.Add(skew)
+	for _, t := range []*time.Time{
+		&ps.FirstSeen, &ps.LastUpdated, &ps.FirstBusyAt, &ps.LastBusyAt,
+		&ps.LastPeakAt, &ps.PeakAt, &ps.LastAppliedAt,
+	} {
+		if t.After(horizon) {
+			*t = time.Time{}
+		}
+	}
 }
 
 // inferCadence fills in the observation cadence for state written before it was

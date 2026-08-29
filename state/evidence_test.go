@@ -624,3 +624,48 @@ func TestAColdWorkerIsNotEvidenceThatAPoolGotCheaper(t *testing.T) {
 			"is committed past what it has", got/mb)
 	}
 }
+
+// TestAStateFileFromTheFutureGrantsNothing.
+//
+// Confidence is measured between FirstBusyAt and LastBusyAt, and LastBusyAt can
+// only move FORWARD — so a state file carrying 2099 gives a pool full
+// confidence for ever, and no live observation can ever shorten the span.
+//
+// Full confidence is permission to CUT. The pool is then permanently eligible
+// to be trimmed on evidence that never existed, and nothing short of deleting
+// the file recovers it. One NTP step, one restore from a mis-clocked host, one
+// container with a dead RTC.
+func TestAStateFileFromTheFutureGrantsNothing(t *testing.T) {
+	opts := Options{}.Defaults()
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	future := time.Now().AddDate(70, 0, 0)
+	body := `{"version":1,"pools":{"shop":{"pool":"shop","typical_peak_bytes":104857600,` +
+		`"last_peak_bytes":104857600,"samples":500,"busy_samples":500,` +
+		`"first_seen":"` + future.Format(time.RFC3339) + `",` +
+		`"last_updated":"` + future.Format(time.RFC3339) + `",` +
+		`"first_busy_at":"` + future.Format(time.RFC3339) + `",` +
+		`"last_busy_at":"` + future.AddDate(0, 5, 0).Format(time.RFC3339) + `"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ps := s.Pools["shop"]
+	if ps.Trusted(opts) {
+		t.Errorf("confidence %.2f from five months of evidence dated seventy years from "+
+			"now; the pool is permanently eligible to be cut and no observation can "+
+			"take it back", ps.Confidence(opts))
+	}
+
+	// What it MEASURED is kept. The timestamps are wrong; 100MiB a worker is
+	// still the only thing anyone knows about this pool's cost, and throwing it
+	// away would size the host from a table.
+	if ps.SizingBytes() < 100*mb {
+		t.Errorf("the measured cost was discarded along with the clock: %d", ps.SizingBytes())
+	}
+}

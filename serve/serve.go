@@ -34,6 +34,14 @@ type Config struct {
 	// Interval is how often the pools are sampled.
 	Interval time.Duration
 
+	// NoLearn stops the loop recording what it observes.
+	//
+	// The flag was registered for `serve` and read by nothing: a daemon started
+	// with -no-learn wrote a state file with a sample count per pool, while its
+	// help said "do not record this scrape". Someone using it to watch a host
+	// without disturbing a baseline was disturbing it.
+	NoLearn bool
+
 	// Discover and Sample replace the loop's two views of the outside world.
 	//
 	// Nil in production, where they are php-fpm itself. A test sets them to hold
@@ -252,7 +260,9 @@ func (l *Loop) round(ctx context.Context) {
 	cancelScrape()
 
 	now := time.Now()
-	plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)
+	if !l.cfg.NoLearn {
+		plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)
+	}
 
 	// Pools removed from the host are forgotten, so a machine that has had sites
 	// come and go for years does not carry every one of them forever.
@@ -290,7 +300,9 @@ func (l *Loop) round(ctx context.Context) {
 
 	// After the plan: the counters are what the NEXT round compares against, and
 	// storing them earlier made the comparison one against itself.
-	plan.RecordCounters(l.state, views)
+	if !l.cfg.NoLearn {
+		plan.RecordCounters(l.state, views)
+	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
 
@@ -499,6 +511,11 @@ func (l *Loop) reconcile(ctx context.Context) {
 // save writes state, either because enough time has passed or because something
 // happened that the next start must not lose.
 func (l *Loop) save(now time.Time, force bool) {
+	if l.cfg.NoLearn {
+		// Nothing was recorded, so writing would replace whatever a previous run
+		// learned with a file that has learned nothing.
+		return
+	}
 	if !force && now.Sub(l.lastSaved) < l.cfg.SaveEvery {
 		return
 	}
