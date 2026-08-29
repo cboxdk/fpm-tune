@@ -141,7 +141,8 @@ series to build on instead:
 
 ```
 fpm_tune_apply_enabled                    # 0 means this process only watches
-fpm_tune_apply_blocked{reason}            # asked to apply and cannot: lock, no_master, unrepaired
+fpm_tune_apply_blocked{reason}            # asked to apply and cannot: lock, no_master,
+                                          # unrepaired, budget_unconfirmed
 fpm_tune_last_run_timestamp_seconds       # not advancing means the loop has stalled
 fpm_tune_last_apply_timestamp_seconds     # not advancing while changes are pending
 fpm_tune_applies_failed_total

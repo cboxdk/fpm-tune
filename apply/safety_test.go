@@ -86,8 +86,8 @@ func TestShrinksGoWithTheGrowthTheyPayFor(t *testing.T) {
 	dir := t.TempDir()
 
 	st := state.New()
-	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
-	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "quiet", 40, time.Now().Add(-time.Hour))
 
 	const worker = 100 << 20 // 100MiB
 
@@ -147,8 +147,8 @@ func TestAShrinkTheBudgetDoesNotNeedIsStillDamped(t *testing.T) {
 	dir := t.TempDir()
 
 	st := state.New()
-	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
-	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "quiet", 40, time.Now().Add(-time.Hour))
 
 	const worker = 100 << 20
 
@@ -189,11 +189,11 @@ func TestShrinkingIsDampedHarderThanGrowing(t *testing.T) {
 	now := time.Now()
 
 	st := state.New()
-	st.RecordApplied("p", 20, now.Add(-time.Hour))
+	st.RecordApplied("", "p", 20, now.Add(-time.Hour))
 
 	// A 20% move: over the 15% growth threshold, under the 30% shrink threshold.
-	up, worthUp := decide(allocate.PoolPlan{Name: "p", MaxChildren: 24, Current: 20}, st, opts, now)
-	down, worthDown := decide(allocate.PoolPlan{Name: "p", MaxChildren: 16, Current: 20}, st, opts, now)
+	up, worthUp := decide(allocate.PoolPlan{Name: "p", MaxChildren: 24, Current: 20}, st, Master{}, opts, now)
+	down, worthDown := decide(allocate.PoolPlan{Name: "p", MaxChildren: 16, Current: 20}, st, Master{}, opts, now)
 
 	if !worthUp || up.Action != ActionApplied {
 		t.Errorf("a 20%% growth was not applied: %s (%s)", up.Action, up.Reason)
@@ -204,11 +204,11 @@ func TestShrinkingIsDampedHarderThanGrowing(t *testing.T) {
 	}
 
 	// And the same asymmetry in time: a shrink waits four intervals.
-	st.RecordApplied("p", 20, now.Add(-2*time.Minute))
-	if _, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: 40, Current: 20}, st, opts, now); !worth {
+	st.RecordApplied("", "p", 20, now.Add(-2*time.Minute))
+	if _, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: 40, Current: 20}, st, Master{}, opts, now); !worth {
 		t.Error("a growth was refused two intervals after the last change")
 	}
-	if out, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: 4, Current: 20}, st, opts, now); worth {
+	if out, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: 4, Current: 20}, st, Master{}, opts, now); worth {
 		t.Errorf("a shrink was allowed two intervals after the last change: %s", out.Reason)
 	}
 }
@@ -226,10 +226,10 @@ func TestDecideComparesAgainstTheRunningSystem(t *testing.T) {
 	now := time.Now()
 
 	st := state.New()
-	st.RecordApplied("p", 60, now.Add(-time.Hour))
+	st.RecordApplied("", "p", 60, now.Add(-time.Hour))
 
 	// The drop-in was deleted, so the pool is back to its own configured 20.
-	out, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: 60, Current: 20}, st, opts, now)
+	out, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: 60, Current: 20}, st, Master{}, opts, now)
 
 	if !worth || out.Action != ActionApplied {
 		t.Errorf("a pool whose configuration was reverted behind the tool's back was "+
@@ -681,7 +681,7 @@ func TestApplyReloadsARealMasterAndSurvives(t *testing.T) {
 	if !strings.Contains(string(body), "pm.max_children = 12") {
 		t.Errorf("the fragment does not carry the new value:\n%s", body)
 	}
-	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
+	if ps := st.Lookup(master.ConfigPath, "shop"); ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the change was not recorded, so the next round has no baseline: %+v", ps)
 	}
 }
@@ -798,9 +798,9 @@ func TestAGrowthWaitsRatherThanForceAReloadTooSoon(t *testing.T) {
 	const worker = 100 << 20
 
 	st := state.New()
-	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "busy", 10, time.Now().Add(-time.Hour))
 	// Reloaded seconds ago: inside its shrink interval whatever the size.
-	st.RecordApplied("quiet", 40, time.Now().Add(-time.Second))
+	st.RecordApplied("", "quiet", 40, time.Now().Add(-time.Second))
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		TotalBytes: 5120 << 20, // the damped subset would need 6000MiB
@@ -1112,8 +1112,8 @@ func TestAFullHostStopsRedistributing(t *testing.T) {
 	const worker = 100 << 20
 
 	st := state.New()
-	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
-	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "quiet", 40, time.Now().Add(-time.Hour))
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		TotalBytes:        5120 << 20,
@@ -1157,8 +1157,8 @@ func TestATightButNotExhaustedHostStillRebalances(t *testing.T) {
 	const worker = 100 << 20
 
 	st := state.New()
-	st.RecordApplied("busy", 10, time.Now().Add(-time.Hour))
-	st.RecordApplied("quiet", 40, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "busy", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "quiet", 40, time.Now().Add(-time.Hour))
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		TotalBytes:        5120 << 20,
@@ -1205,8 +1205,8 @@ func TestARemovedPoolsOverrideIsTakenOutImmediately(t *testing.T) {
 	}
 
 	st := state.New()
-	st.RecordApplied("shop", 10, time.Now().Add(-time.Hour))
-	st.RecordApplied("news", 8, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "shop", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "news", 8, time.Now().Add(-time.Hour))
 
 	// The plan no longer has "news": the site is gone. Nothing else changed, so
 	// without this the file would keep the section indefinitely.

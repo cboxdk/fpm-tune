@@ -142,6 +142,15 @@ func gauge(reg *prometheus.Registry, name, help string) prometheus.Gauge {
 // fpm_tune_pool_demand_unmet is exactly the alert nobody can silence — it
 // describes a pool that no longer exists.
 func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Options, now float64) {
+	// Which master each pool belongs to. A pool name is not an identity — `www`
+	// is the default in every distribution's package — so looking a baseline up
+	// by name alone reports another master's confidence and another master's
+	// measured cost under this one's label.
+	masters := make(map[string]string, len(result.Views))
+	for _, v := range result.Views {
+		masters[v.Name] = v.Target.ConfigPath
+	}
+
 	c.workersConfigured.Reset()
 	c.workersRecommended.Reset()
 	c.workerRSS.Reset()
@@ -162,7 +171,7 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 
 		var conf float64
 		if st != nil {
-			if ps := st.Pools[p.Name]; ps != nil {
+			if ps := st.Lookup(masters[p.Name], p.Name); ps != nil {
 				conf = ps.Confidence(opts)
 				c.workerRSS.WithLabelValues(p.Name, "typical_peak").Set(float64(ps.TypicalPeakBytes))
 				c.workerRSS.WithLabelValues(p.Name, "high_water").Set(float64(ps.HighWaterBytes))

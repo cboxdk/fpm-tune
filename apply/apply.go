@@ -275,7 +275,7 @@ func Apply(
 
 	changes := make([]allocate.PoolPlan, 0, len(plan.Pools))
 	for _, pp := range plan.Pools {
-		outcome, worth := decide(pp, st, opts, now)
+		outcome, worth := decide(pp, st, master, opts, now)
 		result.Outcomes = append(result.Outcomes, outcome)
 		if worth {
 			changes = append(changes, pp)
@@ -429,7 +429,7 @@ func Apply(
 		log.Info("Wrote pool configuration; no running master to reload", "pools", len(pools))
 		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 		commit(opts.BackupDir, master.DropInDir, b, log)
-		record(st, changes, now)
+		record(st, master, changes, now)
 
 		return result, nil
 	}
@@ -494,7 +494,7 @@ func Apply(
 			// of a record that says the last one was never finished.
 			result.Inconclusive = true
 			phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
-			record(st, changes, now)
+			record(st, master, changes, now)
 
 			return result, nil
 		}
@@ -548,13 +548,13 @@ func Apply(
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
 	commit(opts.BackupDir, master.DropInDir, b, log)
-	record(st, changes, now)
+	record(st, master, changes, now)
 
 	return result, nil
 }
 
 // decide reports whether a pool's plan is worth a reload.
-func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) (Outcome, bool) {
+func decide(pp allocate.PoolPlan, st *state.State, master Master, opts Options, now time.Time) (Outcome, bool) {
 	out := Outcome{Pool: pp.Name, To: pp.MaxChildren, Action: ActionUnchanged}
 
 	// A pool whose current configuration could not be read is never written.
@@ -569,7 +569,7 @@ func decide(pp allocate.PoolPlan, st *state.State, opts Options, now time.Time) 
 
 	var ps *state.PoolState
 	if st != nil {
-		ps = st.Pools[pp.Name]
+		ps = st.Lookup(master.ConfigPath, pp.Name)
 	}
 
 	// The OBSERVED ceiling, not the one this tool remembers setting. They differ
@@ -1199,12 +1199,15 @@ func validateSandboxed(ctx context.Context, master Master, changes []allocate.Po
 	return nil
 }
 
-func record(st *state.State, changes []allocate.PoolPlan, at time.Time) {
+func record(st *state.State, master Master, changes []allocate.PoolPlan, at time.Time) {
 	if st == nil {
 		return
 	}
 	for _, pp := range changes {
-		st.RecordApplied(pp.Name, pp.MaxChildren, at)
+		// Scoped to the master, because a pool name is not an identity: `www` is
+		// the default in every distribution's package, so two PHP versions side
+		// by side have two of them.
+		st.RecordApplied(master.ConfigPath, pp.Name, pp.MaxChildren, at)
 	}
 }
 

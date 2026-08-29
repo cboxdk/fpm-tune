@@ -109,10 +109,10 @@ func TestHysteresis(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			st := state.New()
 			if tt.lastApplied > 0 {
-				st.RecordApplied("p", tt.lastApplied, tt.lastAt)
+				st.RecordApplied("", "p", tt.lastApplied, tt.lastAt)
 			}
 
-			out, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: tt.planned}, st, opts, now)
+			out, worth := decide(allocate.PoolPlan{Name: "p", MaxChildren: tt.planned}, st, Master{}, opts, now)
 
 			if out.Action != tt.wantAction {
 				t.Errorf("action = %q (%s), want %q", out.Action, out.Reason, tt.wantAction)
@@ -146,7 +146,7 @@ func TestInvalidConfigNeverReachesTheMaster(t *testing.T) {
 	}
 
 	st := state.New()
-	st.RecordApplied("shop", 5, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "shop", 5, time.Now().Add(-time.Hour))
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 50}},
@@ -226,8 +226,8 @@ func TestRollbackRemovesAFragmentThatDidNotExist(t *testing.T) {
 func TestNothingWorthChangingDoesNotReload(t *testing.T) {
 	dir := t.TempDir()
 	st := state.New()
-	st.RecordApplied("a", 10, time.Now().Add(-time.Hour))
-	st.RecordApplied("b", 20, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "a", 10, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "b", 20, time.Now().Add(-time.Hour))
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{
@@ -282,11 +282,12 @@ func TestDryRunValidatesButKeepsNothing(t *testing.T) {
 // TestDryRunStillReportsARejectedConfig — otherwise it rehearses nothing.
 func TestDryRunStillReportsARejectedConfig(t *testing.T) {
 	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
 
 	_, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: falseBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		Binary: falseBin(t), ConfigPath: configPath, DropInDir: dir,
 	}, state.New(), Options{DryRun: true, BackupDir: filepath.Join(dir, "backup")}, nil)
 
 	if !errors.Is(err, ErrValidationFailed) {
@@ -299,11 +300,12 @@ func TestDryRunStillReportsARejectedConfig(t *testing.T) {
 func TestNoRunningMasterWritesWithoutReloading(t *testing.T) {
 	dir := t.TempDir()
 	st := state.New()
+	configPath := masterConfigAt(t, dir)
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir,
 		PID: 0, NoMasterExpected: true,
 	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
 
@@ -324,7 +326,7 @@ func TestNoRunningMasterWritesWithoutReloading(t *testing.T) {
 
 	// And it is recorded, so the next run's hysteresis has something to compare
 	// against rather than treating it as a first configuration again.
-	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
+	if ps := st.Lookup(configPath, "shop"); ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the write was not recorded: %+v", ps)
 	}
 }
@@ -373,12 +375,13 @@ func TestBackupsAreKeptOutOfTheConfigDirectory(t *testing.T) {
 func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
+	configPath := masterConfigAt(t, dir)
 	st := state.New()
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "shop", MaxChildren: 12}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir,
 		NoMasterExpected: true,
 	}, st, Options{BackupDir: backupDir}, nil)
 
@@ -406,7 +409,7 @@ func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 		t.Errorf("nothing records where php-fpm lives: %+v — and recovery on a host whose "+
 			"master will not start has no other way to find out", ref)
 	}
-	if ps := st.Pools["shop"]; ps == nil || ps.LastAppliedMaxChildren != 12 {
+	if ps := st.Lookup(configPath, "shop"); ps == nil || ps.LastAppliedMaxChildren != 12 {
 		t.Errorf("the change was not recorded: %+v", ps)
 	}
 }
@@ -423,12 +426,13 @@ func TestSuccessfulApplyCleansUpAndRecords(t *testing.T) {
 // nothing above Info in the log.
 func TestUnidentifiedMasterIsRefusedNotProvisioned(t *testing.T) {
 	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
 	st := state.New()
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 40}},
 	}, Master{
-		Binary: trueBin(t), ConfigPath: masterConfigAt(t, dir), DropInDir: dir,
+		Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir,
 		// A master IS running; we simply could not find it.
 		PID: 0, NoMasterExpected: false,
 	}, st, Options{BackupDir: filepath.Join(dir, "backup")}, nil)
@@ -445,7 +449,7 @@ func TestUnidentifiedMasterIsRefusedNotProvisioned(t *testing.T) {
 	if _, err := os.Stat(DropInPath(dir)); !os.IsNotExist(err) {
 		t.Error("configuration was written for a master that was never reloaded")
 	}
-	if ps := st.Pools["www"]; ps != nil && ps.LastAppliedMaxChildren != 0 {
+	if ps := st.Lookup(configPath, "www"); ps != nil && ps.LastAppliedMaxChildren != 0 {
 		t.Errorf("the no-op was recorded as applied (%d); the next run reports "+
 			"'unchanged' and never retries", ps.LastAppliedMaxChildren)
 	}
@@ -516,7 +520,7 @@ func TestRollbackFailureIsNotReportedAsSuccess(t *testing.T) {
 	}
 
 	st := state.New()
-	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "www", 5, time.Now().Add(-time.Hour))
 
 	configPath := masterConfigAt(t, dir)
 

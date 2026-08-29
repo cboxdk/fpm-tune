@@ -354,12 +354,12 @@ func TestTheLoopItselfScopesToItsMaster(t *testing.T) {
 
 	loop.round(context.Background())
 
-	if _, learned := loop.State().Pools["api"]; learned {
+	if learned := loop.State().Lookup(theirs, "api"); learned != nil {
 		t.Error("the daemon learned a pool belonging to a master it was not pointed at; " +
 			"its budget is read from one master's cgroup and is now being divided among " +
 			"pools that master does not run")
 	}
-	if _, learned := loop.State().Pools["shop"]; !learned {
+	if learned := loop.State().Lookup(mine, "shop"); learned == nil {
 		t.Error("the daemon learned nothing at all; the filter has removed its own pools")
 	}
 }

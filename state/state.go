@@ -220,6 +220,31 @@ type MasterRef struct {
 	DropInDir  string `json:"drop_in_dir,omitempty"`
 }
 
+// PoolKey is how a pool is identified in the store: by its master AND its name.
+//
+// The name alone is not an identity. `www` is the default pool name in every
+// distribution's package, so a host running PHP 8.2 and 8.3 side by side — which
+// is what an upgrade looks like for as long as it takes — has two different
+// pools called `www`, with different applications, different traffic and
+// different worker costs.
+//
+// Sharing one record between them is a measured overcommit: 8.3's trusted
+// 40MiB/worker was used to reserve for 8.2's unreachable `www` that actually
+// costs 220MiB, and the difference was given to a neighbour that does get
+// written.
+//
+// Readable on purpose. This file is meant to be understood with cat during an
+// incident, and "/etc/php/8.3/fpm/php-fpm.conf::www" says what it is.
+func PoolKey(master, pool string) string {
+	if master == "" {
+		// Legacy, and the unscoped case: a single-master host, or a record
+		// written before this existed.
+		return pool
+	}
+
+	return master + "::" + pool
+}
+
 // Known reports whether there is enough here to act on.
 func (m MasterRef) Known() bool {
 	return m.Binary != "" && m.ConfigPath != "" && m.DropInDir != ""
@@ -535,6 +560,48 @@ func (s *State) Save(path string) error {
 	return nil
 }
 
+// Lookup finds a pool's baseline, preferring the record for THIS master and
+// falling back to an unscoped one written before pools carried a master.
+//
+// The fallback is deliberately not narrowed to a matching MasterConfig: a
+// legacy record has none, and refusing it would throw away every baseline on
+// the first run after an upgrade.
+func (s *State) Lookup(master, pool string) *PoolState {
+	if ps, ok := s.Pools[PoolKey(master, pool)]; ok {
+		return ps
+	}
+	if legacy, ok := s.Pools[pool]; ok && legacy.MasterConfig == "" {
+		return legacy
+	}
+
+	return nil
+}
+
+// forWriting is Lookup with the record created, and a legacy one adopted under
+// its scoped key so two masters separate from the first observation.
+func (s *State) forWriting(master, pool string, at time.Time) *PoolState {
+	key := PoolKey(master, pool)
+	if ps, ok := s.Pools[key]; ok {
+		return ps
+	}
+
+	if legacy, ok := s.Pools[pool]; ok && key != pool && legacy.MasterConfig == "" {
+		// Re-keyed rather than copied: whichever master observes it first keeps
+		// the history and the other starts clean. That is one round of confusion
+		// on one upgrade, against sharing a record for ever.
+		delete(s.Pools, pool)
+		legacy.MasterConfig = master
+		s.Pools[key] = legacy
+
+		return legacy
+	}
+
+	ps := &PoolState{Pool: pool, FirstSeen: at, MasterConfig: master}
+	s.Pools[key] = ps
+
+	return ps
+}
+
 // Learn folds one observation into the store.
 //
 // It returns whether the observation taught anything. A scrape of an idle pool
@@ -549,11 +616,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		at = time.Now()
 	}
 
-	ps := s.Pools[obs.Pool]
-	if ps == nil {
-		ps = &PoolState{Pool: obs.Pool, FirstSeen: at}
-		s.Pools[obs.Pool] = ps
-	}
+	ps := s.forWriting(obs.MasterConfig, obs.Pool, at)
 
 	// Captured before LastUpdated moves: the downward weight is derived from how
 	// much time has passed, not from how many times we happened to look.
@@ -1001,12 +1064,8 @@ func (ps *PoolState) Trusted(opts Options) bool {
 }
 
 // RecordApplied notes that a pool was reconfigured, for hysteresis.
-func (s *State) RecordApplied(pool string, maxChildren int, at time.Time) {
-	ps := s.Pools[pool]
-	if ps == nil {
-		ps = &PoolState{Pool: pool, FirstSeen: at}
-		s.Pools[pool] = ps
-	}
+func (s *State) RecordApplied(master, pool string, maxChildren int, at time.Time) {
+	ps := s.forWriting(master, pool, at)
 	ps.LastAppliedMaxChildren = maxChildren
 	ps.LastAppliedAt = at
 }
@@ -1022,12 +1081,13 @@ func (s *State) Forget(current []string, scope string) []string {
 	}
 
 	var dropped []string
-	for name, ps := range s.Pools {
-		if keep[name] {
+	for key, ps := range s.Pools {
+		if keep[ps.Pool] {
 			ps.MissedRounds = 0
 
 			continue
 		}
+		name := key
 
 		// Not mine to forget.
 		//

@@ -549,7 +549,7 @@ func TestRecordApplied(t *testing.T) {
 	s := New()
 	at := time.Now()
 
-	s.RecordApplied("new-pool", 24, at)
+	s.RecordApplied("", "new-pool", 24, at)
 
 	ps := s.Pools["new-pool"]
 	if ps == nil {
@@ -1311,7 +1311,7 @@ func TestAScopedDaemonDoesNotForgetAnotherMastersPools(t *testing.T) {
 		s.Forget([]string{"shop"}, "/etc/php/8.3/php-fpm.conf")
 	}
 
-	if _, still := s.Pools["api"]; !still {
+	if still := s.Lookup("/etc/php/8.2/php-fpm.conf", "api"); still == nil {
 		t.Error("a daemon scoped to one master deleted another master's baseline out of " +
 			"a shared state file; that pool is now sized from a profile guess, and a " +
 			"week of the other daemon's learning is gone")
@@ -1321,8 +1321,96 @@ func TestAScopedDaemonDoesNotForgetAnotherMastersPools(t *testing.T) {
 	for i := 0; i < forgetAfterMissedRounds; i++ {
 		s.Forget([]string{}, "/etc/php/8.3/php-fpm.conf")
 	}
-	if _, still := s.Pools["shop"]; still {
+	if still := s.Lookup("/etc/php/8.3/php-fpm.conf", "shop"); still != nil {
 		t.Error("a pool of this daemon's own master was never forgotten; a host that has " +
 			"had sites come and go for years carries every one of them")
+	}
+}
+
+// TestTwoMastersWithAPoolOfTheSameNameKeepSeparateBaselines.
+//
+// `www` is the default pool name in every distribution's package, so a host
+// running PHP 8.2 and 8.3 side by side — which is what an upgrade looks like
+// for as long as it takes — has two different pools called `www`, with
+// different applications, different traffic and different worker costs.
+//
+// Keying state by name alone shared one record between them. Measured
+// consequence: 8.3's trusted 40MiB/worker was used to reserve for 8.2's
+// unreachable `www` that actually costs 220MiB, and the 5.4GiB difference went
+// to a neighbour that does get written.
+func TestTwoMastersWithAPoolOfTheSameNameKeepSeparateBaselines(t *testing.T) {
+	s := New()
+	opts := Options{}.Defaults()
+	at := time.Now().Add(-time.Hour)
+
+	const eight2 = "/etc/php/8.2/fpm/php-fpm.conf"
+	const eight3 = "/etc/php/8.3/fpm/php-fpm.conf"
+
+	learn := func(master string, rss int64) {
+		var accepted int64
+		for i := 0; i < 30; i++ {
+			accepted += 6000
+			s.Learn(Observation{
+				Pool: "www", MasterConfig: master,
+				At: at.Add(time.Duration(i) * 2 * time.Minute), ActiveNow: 6, Accepted: accepted,
+				Workers: []WorkerSample{
+					{RSSBytes: rss, Requests: 500}, {RSSBytes: rss, Requests: 500},
+				},
+			}, opts)
+		}
+	}
+	learn(eight3, 40*mb)
+	learn(eight2, 220*mb)
+
+	cheap := s.Lookup(eight3, "www")
+	dear := s.Lookup(eight2, "www")
+	if cheap == nil || dear == nil {
+		t.Fatalf("one of the two pools is missing: 8.3=%v 8.2=%v", cheap, dear)
+	}
+	if cheap.SizingBytes() > 60*mb {
+		t.Errorf("8.3's www is costed at %dMiB; it has taken 8.2's measurements",
+			cheap.SizingBytes()/mb)
+	}
+	if dear.SizingBytes() < 200*mb {
+		t.Errorf("8.2's www is costed at %dMiB against a real 220MiB; the difference is "+
+			"about to be offered to a neighbour that does get written",
+			dear.SizingBytes()/mb)
+	}
+}
+
+// TestALegacyRecordIsAdoptedRatherThanDiscarded: state written before pools
+// carried a master has no master. Refusing it would throw away every baseline
+// on the first run after an upgrade, so the first master to observe the pool
+// adopts the record under its own key — one round of confusion on one upgrade,
+// against sharing a record for ever.
+func TestALegacyRecordIsAdoptedRatherThanDiscarded(t *testing.T) {
+	s := New()
+	opts := Options{}.Defaults()
+	at := time.Now().Add(-time.Hour)
+
+	// A record with no master, as an older version wrote it.
+	s.Learn(busyObs("www", at), opts)
+	legacy := s.Pools["www"]
+	if legacy == nil {
+		t.Fatal("setup: the unscoped record was not created")
+	}
+	legacy.TypicalPeakBytes = 123 * mb
+
+	// It is found before any master has claimed it.
+	if got := s.Lookup("/etc/php-fpm.conf", "www"); got == nil {
+		t.Fatal("a baseline written before pools carried a master was thrown away")
+	}
+
+	// And the first master to observe it takes it over.
+	obs := busyObs("www", at.Add(time.Minute))
+	obs.MasterConfig = "/etc/php-fpm.conf"
+	s.Learn(obs, opts)
+
+	if _, still := s.Pools["www"]; still {
+		t.Error("the unscoped record was left behind as well, so the pool now has two")
+	}
+	adopted := s.Lookup("/etc/php-fpm.conf", "www")
+	if adopted == nil || adopted.TypicalPeakBytes == 0 {
+		t.Errorf("the history was not carried over: %+v", adopted)
 	}
 }

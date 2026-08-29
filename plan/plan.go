@@ -145,9 +145,20 @@ func Build(in Input) (Result, error) {
 
 	result.Plan = allocation
 	result.Views = in.Views
-	result.WorstCaseBytes = worstCase(allocation, in.State)
+	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 
 	return result, nil
+}
+
+// mastersOf maps each pool to the configuration it belongs to, so a lookup by
+// name alone cannot reach another master's record.
+func mastersOf(views []observe.PoolView) map[string]string {
+	out := make(map[string]string, len(views))
+	for _, v := range views {
+		out[v.Name] = v.Target.ConfigPath
+	}
+
+	return out
 }
 
 // worstCase is what the plan would cost if every pool filled its ceiling with
@@ -162,7 +173,7 @@ func Build(in Input) (Result, error) {
 //
 // It is not a sizing input and must not become one. It is the sentence an
 // operator wants when the host OOMs anyway.
-func worstCase(p allocate.Plan, st *state.State) int64 {
+func worstCase(p allocate.Plan, st *state.State, masters map[string]string) int64 {
 	if st == nil {
 		return 0
 	}
@@ -170,7 +181,7 @@ func worstCase(p allocate.Plan, st *state.State) int64 {
 	var total int64
 	for _, pp := range p.Pools {
 		cost := pp.WorkerBytes
-		if ps := st.Pools[pp.Name]; ps != nil && ps.HighWaterBytes > cost {
+		if ps := st.Lookup(masters[pp.Name], pp.Name); ps != nil && ps.HighWaterBytes > cost {
 			cost = ps.HighWaterBytes
 		}
 		total += int64(pp.MaxChildren) * cost
@@ -206,7 +217,7 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 
 	var ps *state.PoolState
 	if st != nil {
-		ps = st.Pools[view.Name]
+		ps = st.Lookup(view.Target.ConfigPath, view.Name)
 	}
 
 	// Two separate questions, and conflating them was a way to overcommit.
@@ -431,7 +442,7 @@ func RecordCounters(st *state.State, views []observe.PoolView) {
 		if view.Err != nil {
 			continue
 		}
-		if ps := st.Pools[view.Name]; ps != nil {
+		if ps := st.Lookup(view.Target.ConfigPath, view.Name); ps != nil {
 			ps.LastMaxChildrenReached = view.MaxChildrenReached
 		}
 	}

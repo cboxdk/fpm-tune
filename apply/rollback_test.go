@@ -37,7 +37,7 @@ func TestAMasterThatDoesNotComeBackIsPutBack(t *testing.T) {
 	}
 
 	st := state.New()
-	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "www", 5, time.Now().Add(-time.Hour))
 
 	dying := stubMaster(t, configPath, true)
 
@@ -103,7 +103,7 @@ func TestARollbackThatCannotWriteSaysSo(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
 	st := state.New()
-	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "www", 5, time.Now().Add(-time.Hour))
 
 	res, err := Apply(context.Background(), allocate.Plan{
 		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 50, Current: 5}},
@@ -159,7 +159,7 @@ func TestAMasterGoneAndAFileThatCannotBeRemovedIsSaidPlainly(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
 	st := state.New()
-	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "www", 5, time.Now().Add(-time.Hour))
 	dying := stubMaster(t, configPath, true)
 
 	res, err := Apply(context.Background(), allocate.Plan{
@@ -309,7 +309,7 @@ func TestDeletingTheFileUndoesEverything(t *testing.T) {
 	// A previous run sized three pools, and the state remembers all three.
 	st := state.New()
 	for _, pool := range []string{"shop", "forum", "blog"} {
-		st.RecordApplied(pool, 30, time.Now().Add(-time.Hour))
+		st.RecordApplied("", pool, 30, time.Now().Add(-time.Hour))
 	}
 
 	// The operator deleted the drop-in. Nothing is ours any more.
@@ -391,7 +391,7 @@ func TestARecordThatCannotBeWrittenStopsTheReload(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(backupDir, 0o755) })
 
 	st := state.New()
-	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "www", 5, time.Now().Add(-time.Hour))
 	stubbed := fakeMasterWithLog(t, configPath)
 
 	res, err := Apply(context.Background(), allocate.Plan{
@@ -445,8 +445,8 @@ func TestAnUnreachablePoolKeepsTheCeilingWeAlreadySetForIt(t *testing.T) {
 	}
 
 	st := state.New()
-	st.RecordApplied("shop", 6, time.Now().Add(-time.Hour))
-	st.RecordApplied("api", 8, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "shop", 6, time.Now().Add(-time.Hour))
+	st.RecordApplied("", "api", 8, time.Now().Add(-time.Hour))
 
 	// This round shop could not be read, and api is being resized.
 	_, err := Apply(context.Background(), allocate.Plan{
