@@ -31,10 +31,13 @@ func ForMaster(targets []phpfpm.Target, dropInDir string, log *slog.Logger) []ph
 			// memory — which is larger than either of them, and therefore the
 			// answer that overcommits.
 			log.Warn("This host runs more than one PHP-FPM master and no --drop-in-dir "+
-				"was given. These pools are being planned together, and since no single "+
-				"master's memory limit applies to all of them the budget is the whole "+
-				"machine's — which is more than either master is allowed. Name a pool "+
-				"directory to plan for one of them.",
+				"was given. Three things follow, and none of them is what you want: "+
+				"the pools are planned together, so the budget is the whole MACHINE's "+
+				"— no single master's limit applies to all of them, and the machine's is "+
+				"more than either is allowed; nothing can be applied, since a write goes "+
+				"to one master's pool directory; and two pools of the same name — `www` "+
+				"is the default in every distribution — publish under one label, so the "+
+				"metrics show one of them. Name a pool directory.",
 				"masters", len(configs))
 		}
 
