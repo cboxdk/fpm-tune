@@ -816,36 +816,62 @@ func TestStatePredatingTheBusyFieldsIsNotTrustedOnSight(t *testing.T) {
 	}
 }
 
-// TestAnOutlierDoesNotFloorTheSizingForever: one anomalous mature scrape held
-// the sizing high until another happened to arrive, which on a pool that has
-// gone quiet can be a very long time. It does not overcommit — a high cost means
-// fewer workers — but it starves the pool and its neighbours for no visible
-// reason.
-func TestAnOutlierDoesNotFloorTheSizingForever(t *testing.T) {
+// TestTheSizingFloorIsTheLatestMeasurementAndDoesNotExpire.
+//
+// This replaces a test asserting the opposite, and the reversal is the point.
+//
+// A previous round made the floor expire after fifteen minutes, so that one
+// anomalous scrape could not hold a quiet pool's sizing high forever. The worry
+// was real; the remedy was the wrong way round. Expiring falls back to the
+// smoothed estimate, which after a single new reading has moved only halfway —
+// so a genuine deploy from 40MiB to 120MiB would be sized at 80MiB a quarter of
+// an hour later, having seen nothing whatever to contradict the 120.
+//
+// Under-sizing ends in an OOM kill. Holding high costs unused headroom on one
+// pool until the next mature scrape replaces the reading, which is the direction
+// to be wrong in.
+func TestTheSizingFloorIsTheLatestMeasurementAndDoesNotExpire(t *testing.T) {
 	st := New()
 	opts := Options{}.Defaults()
 	now := time.Now()
 
+	accepted := int64(0)
 	for i := range 10 {
-		st.Learn(steadyAt("shop", 60<<20, now.Add(time.Duration(i)*time.Minute)), opts)
+		accepted += 100
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * time.Minute),
+			ActiveNow: 6, Accepted: accepted,
+			Workers: []WorkerSample{{RSSBytes: 40 << 20, Requests: 500}, {RSSBytes: 40 << 20, Requests: 500}},
+		}, opts)
 	}
 
-	// One scrape catches something enormous.
-	st.Learn(Observation{Pool: "shop", At: now.Add(11 * time.Minute), ActiveNow: 8,
-		Workers: []WorkerSample{
-			{RSSBytes: 400 << 20, Requests: 500},
-			{RSSBytes: 400 << 20, Requests: 500},
-		}}, opts)
+	// A deploy: one scrape sees 120MiB. The smoothed estimate only reaches ~80.
+	accepted += 100
+	st.Learn(Observation{Pool: "shop", At: now.Add(11 * time.Minute),
+		ActiveNow: 6, Accepted: accepted,
+		Workers: []WorkerSample{{RSSBytes: 120 << 20, Requests: 500}, {RSSBytes: 120 << 20, Requests: 500}},
+	}, opts)
 
-	// The pool then goes quiet for an hour: seen, teaching nothing.
+	// An hour passes with the pool seen but teaching nothing.
 	for i := range 60 {
 		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(12+i) * time.Minute)}, opts)
 	}
 
-	ps := st.Pools["shop"]
-	if ps.SizingBytes() >= 400<<20 {
-		t.Errorf("a single reading is still the floor an hour later (%dMiB); the pool "+
-			"and its neighbours are held short by one scrape", ps.SizingBytes()>>20)
+	if got := st.Pools["shop"].SizingBytes(); got < 120<<20 {
+		t.Errorf("sizing fell to %dMiB an hour after measuring 120MiB, with nothing "+
+			"seen to contradict it; the pool is sized for workers smaller than the "+
+			"ones it has", got>>20)
+	}
+
+	// And a genuinely smaller mature reading replaces it, which is what stops a
+	// high reading holding forever.
+	accepted += 100
+	st.Learn(Observation{Pool: "shop", At: now.Add(80 * time.Minute),
+		ActiveNow: 6, Accepted: accepted,
+		Workers: []WorkerSample{{RSSBytes: 50 << 20, Requests: 500}, {RSSBytes: 50 << 20, Requests: 500}},
+	}, opts)
+
+	if got := st.Pools["shop"].SizingBytes(); got >= 120<<20 {
+		t.Errorf("a newer, smaller measurement did not replace the floor (%dMiB)", got>>20)
 	}
 }
 
@@ -974,5 +1000,53 @@ func TestAReloadResettingTheCounterIsNotReadAsWork(t *testing.T) {
 	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
 		t.Errorf("a reload reset the counter and the estimate collapsed from %dMiB to "+
 			"%dMiB; this tool causes those reloads", settled>>20, got>>20)
+	}
+}
+
+// TestASlowPoolHoldsItsEstimateRatherThanDrifting.
+//
+// A review asked for this to go the other way: a pool that deploys a cheaper
+// application but serves one request every thirty seconds never clears a
+// per-scrape threshold, so its estimate never comes down. On examination that is
+// the behaviour to want.
+//
+// Such a pool's workers are idle almost all the time, and PHP returns their
+// large allocations to the operating system — so a small reading from them is
+// evidence about idleness, not about what the application costs. Holding the old
+// estimate costs nothing while nothing is asking anything of the pool, and
+// letting it drift down is how the morning finds it sized for workers that do
+// not exist. Accumulating the requests instead of requiring a rate reintroduced
+// exactly that: a night at one request per five minutes pulled a 200MiB estimate
+// to 35MiB.
+func TestASlowPoolHoldsItsEstimateRatherThanDrifting(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	accepted := int64(0)
+	for i := range 15 {
+		accepted += 400
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 6, Accepted: accepted,
+			Workers: []WorkerSample{{RSSBytes: 200 << 20, Requests: 5000}, {RSSBytes: 200 << 20, Requests: 5000}},
+		}, opts)
+	}
+	settled := st.Pools["shop"].SizingBytes()
+
+	// Twelve hours at one request per scrape, workers reading small because they
+	// spend their lives waiting.
+	slow := now.Add(10 * time.Minute)
+	for i := range 1440 {
+		accepted++
+		st.Learn(Observation{Pool: "shop", At: slow.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 0, Accepted: accepted,
+			Workers: []WorkerSample{{RSSBytes: 18 << 20, Requests: 5000}, {RSSBytes: 17 << 20, Requests: 5000}},
+		}, opts)
+	}
+
+	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
+		t.Errorf("twelve hours at one request per scrape took the estimate from %dMiB "+
+			"to %dMiB; those workers are idle, not cheap, and the morning would find "+
+			"the pool sized for workers that do not exist", settled>>20, got>>20)
 	}
 }

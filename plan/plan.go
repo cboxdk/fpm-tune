@@ -154,20 +154,27 @@ func poolFor(view observe.PoolView, st *state.State, profile Profile, opts state
 		ps = st.Pools[view.Name]
 	}
 
-	trusted := ps != nil && ps.Trusted(opts) && ps.SizingBytes() > 0
-	if trusted {
+	// Two separate questions, and conflating them was a way to overcommit.
+	//
+	// What does a worker COST is answered by any measurement there is: a number
+	// taken from this pool's own workers beats a profile estimate whatever the
+	// confidence, because confidence is about how much of the traffic pattern has
+	// been seen, not about whether the bytes were real. Gating the cost on it
+	// meant a pool carrying a measured 160MiB reverted to the profile's 48MiB —
+	// on an upgrade, on a state file with no busy timestamps — and could then be
+	// grown into three times the memory it fits in.
+	//
+	// May the pool be CUT is the question confidence is for. A baseline that has
+	// not been watched through a real traffic pattern is no basis for taking
+	// workers away, so until it has, the floor holds at what the pool is
+	// configured for and the first run can only ever help.
+	measured := ps != nil && ps.SizingBytes() > 0
+	if measured {
 		pool.WorkerBytes = ps.SizingBytes()
 		pool.Measured = true
-	} else if view.MaxChildrenKnown && pool.CurrentMaxChildren > 0 {
-		// While a pool is still bootstrapping it may GROW but must not be cut.
-		//
-		// The trust gate covers the per-worker cost, but the demand signal needs
-		// it just as much: max_active_processes is a high-water mark since the
-		// master started, so a pool observed for thirty seconds looks idle
-		// whatever it does at nine in the morning. Cutting a site from twenty
-		// workers to two on that evidence is precisely the outage this tool is
-		// installed to prevent. Holding the floor at the current setting means
-		// the first run can only ever help.
+	}
+
+	if (ps == nil || !ps.Trusted(opts)) && view.MaxChildrenKnown && pool.CurrentMaxChildren > 0 {
 		pool.Floor = pool.CurrentMaxChildren
 	}
 

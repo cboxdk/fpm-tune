@@ -41,7 +41,7 @@ func TestBootstrapUntilTrusted(t *testing.T) {
 		}
 	})
 
-	t.Run("history, not yet trusted", func(t *testing.T) {
+	t.Run("history, not yet trusted: the cost is used, the pool is not cut", func(t *testing.T) {
 		st := state.New()
 		// Real observations, but only a handful over a couple of minutes.
 		for i := 0; i < 3; i++ {
@@ -50,13 +50,25 @@ func TestBootstrapUntilTrusted(t *testing.T) {
 
 		res := build(t, st, view)
 
-		if res.Plan.Pools[0].Measured {
-			t.Error("three samples over two minutes was treated as a trusted baseline")
+		// Two separate questions, and this test used to conflate them.
+		//
+		// What a worker COSTS is answered by whatever measurement exists: 200MB
+		// taken from this pool's own workers beats a profile's guess whatever the
+		// confidence, because confidence is about how much of the traffic pattern
+		// has been seen, not about whether the bytes were real. Falling back to
+		// the profile's 48MB here is how a pool gets grown into three times the
+		// memory it fits in.
+		perWorker := res.Plan.Pools[0].Bytes / int64(res.Plan.Pools[0].MaxChildren)
+		if perWorker < 190*mb || perWorker > 210*mb {
+			t.Errorf("per-worker cost %dMB; the measurement this pool actually produced "+
+				"was discarded for a profile estimate", perWorker/mb)
 		}
-		// And crucially the 200MB observation is NOT used, or the pool would be
-		// sized on a number nobody has confidence in yet.
-		if got := res.Plan.Pools[0].Bytes / int64(res.Plan.Pools[0].MaxChildren); got >= 200*mb {
-			t.Errorf("per-worker cost %dMB came from the untrusted baseline", got/mb)
+
+		// Whether the pool may be CUT is what confidence is for, and three
+		// samples over two minutes is no basis for taking workers away.
+		if res.Plan.Pools[0].MaxChildren < view.CurrentMaxChildren {
+			t.Errorf("a pool with two minutes of history was cut from %d to %d",
+				view.CurrentMaxChildren, res.Plan.Pools[0].MaxChildren)
 		}
 	})
 

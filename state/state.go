@@ -254,6 +254,13 @@ type Options struct {
 	// would pin its estimate to whatever peak it once reached, for ever. Which is
 	// the same fault as the one this gate exists to prevent, arrived at from the
 	// other side.
+	//
+	// Deliberately a RATE, per scrape, and not a running total. Accumulating
+	// would let a pool serving one request every five minutes reach the threshold
+	// overnight and take its estimate down with it — and that pool's small
+	// workers are idle workers, not cheap ones. Holding its estimate costs
+	// nothing while nothing is asking anything of it, and the alternative is the
+	// morning finding it sized for workers that do not exist.
 	MinRequestsToDecay int64
 
 	// ConfidenceSamples and ConfidenceSpan are what a baseline needs before it
@@ -539,11 +546,6 @@ func decayAlpha(since, halfLife time.Duration) float64 {
 // against workers that no longer exist. Being slow to believe memory got CHEAPER
 // costs some unused headroom; being slow to believe it got more EXPENSIVE costs
 // the host.
-// peakFloorLifetime is how long the latest reading acts as a floor. Long enough
-// to cover a scrape or two of a busy pool; short enough that an outlier does not
-// outlive the traffic that produced it.
-const peakFloorLifetime = 15 * time.Minute
-
 func (ps *PoolState) SizingBytes() int64 {
 	if ps == nil {
 		return 0
@@ -553,16 +555,19 @@ func (ps *PoolState) SizingBytes() int64 {
 	if size == 0 {
 		size = ps.HighWaterBytes
 	}
-	// The floor expires. A single anomalous scrape otherwise held the sizing
-	// high until another mature scrape happened to arrive, which on a pool that
-	// has gone quiet can be a very long time. That does not overcommit — a high
-	// cost means fewer workers — but it starves the pool and its neighbours for
-	// no reason anyone can see.
-	// Measured against the last time the pool was SEEN, which is what LastUpdated
-	// records and is effectively now: the plan is built immediately after the
-	// scrape that produced it.
-	if ps.LastPeakBytes > size && !ps.LastPeakAt.IsZero() &&
-		ps.LastUpdated.Sub(ps.LastPeakAt) <= peakFloorLifetime {
+	// The floor does not expire on a clock, and an earlier version of it did.
+	//
+	// The worry was that one anomalous scrape holds the sizing high on a pool
+	// that then goes quiet. It does — and the alternative turned out to be worse.
+	// Expiring falls back to the smoothed estimate, which after a single new
+	// reading has moved only halfway: a genuine deploy from 40MiB to 120MiB would
+	// be sized at 80MiB fifteen minutes later, having seen nothing at all to
+	// contradict the 120. Under-sizing is the failure that ends in an OOM kill;
+	// holding high costs unused headroom on one pool.
+	//
+	// So the floor is simply the most recent mature measurement, replaced — up or
+	// down — by the next one.
+	if ps.LastPeakBytes > size {
 		size = ps.LastPeakBytes
 	}
 
@@ -679,16 +684,18 @@ func (s *State) Names() []string {
 // the reading is neither believed nor used to block, so the pool keeps whatever
 // estimate it had until the next scrape can compare properly.
 func didWork(ps *PoolState, obs Observation, opts Options) bool {
-	if obs.Accepted > 0 && ps.LastAccepted > 0 {
-		served := obs.Accepted - ps.LastAccepted
-		if served < 0 {
-			// Counter reset. Fall through to the instantaneous count rather than
-			// treating a reload as evidence either way.
-			return obs.ActiveNow > 0
-		}
-
-		return served >= opts.MinRequestsToDecay
+	if obs.Accepted <= 0 || ps.LastAccepted <= 0 {
+		// No counter to compare. Fall back to whether anything was caught
+		// mid-request, which is weak but better than nothing.
+		return obs.ActiveNow > 0
 	}
 
-	return obs.ActiveNow > 0
+	served := obs.Accepted - ps.LastAccepted
+	if served < 0 {
+		// Counter reset — php-fpm does that on reload, and this tool causes
+		// reloads. Unknown, not negative work.
+		return obs.ActiveNow > 0
+	}
+
+	return served >= opts.MinRequestsToDecay
 }

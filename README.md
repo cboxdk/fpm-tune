@@ -82,6 +82,27 @@ help: the machine needs more RAM, or fewer sites. On a host in that state it
 stops rearranging and says so, because moving the shortfall between pools costs a
 reload of each and does not make it smaller.
 
+## Operating it
+
+**Resetting the baseline.** `rm /var/lib/fpm-tune/state.json` does nothing while
+`serve` is running: the daemon holds its baselines in memory and writes them back
+on the next save, including on the way out. Stop it first.
+
+```bash
+systemctl stop fpm-tune && rm /var/lib/fpm-tune/state.json && systemctl start fpm-tune
+```
+
+**If php-fpm will not start.** The most likely cause is a site removed while this
+tool still overrides its pool: a pool defined only in the drop-in has no `listen`
+and no `user`, so php-fpm refuses the whole configuration. fpm-tune detects that
+and takes its own file out — but it cannot bring the service back, because
+systemd exhausts its restart burst in seconds, long before any polling supervisor
+can land a fix. `systemctl reset-failed php-fpm && systemctl start php-fpm` once
+you have read the log line explaining what happened.
+
+**Bind it with `Wants=`, not `Requires=`.** A supervisor that dies with the thing
+it supervises cannot repair it.
+
 ## Safety
 
 It writes production configuration, so it is built to fail safe.
