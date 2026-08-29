@@ -117,15 +117,17 @@ func TestEstimateRisesFastAndFallsSlow(t *testing.T) {
 	opts := Options{}
 	now := time.Now()
 
-	// ActiveNow says the pool is working. A smaller reading from an IDLE pool is
-	// deliberately not believed — that is a lull, not a cheaper application —
-	// so a test about the estimate following the workload has to say the
-	// workload is there.
+	// The pool is WORKING, and says so with the counter php-fpm always reports.
+	// A smaller reading from an idle pool is deliberately not believed — that is
+	// a lull, not a cheaper application — so a test about the estimate following
+	// the workload has to supply the traffic.
 	steady := func(rss int64, at time.Time) Observation {
-		return Observation{Pool: "app", At: at, ActiveNow: 8, Workers: []WorkerSample{
-			{RSSBytes: rss, Requests: 300},
-			{RSSBytes: rss, Requests: 300},
-		}}
+		return Observation{Pool: "app", At: at, ActiveNow: 8,
+			Accepted: acceptedAt(at),
+			Workers: []WorkerSample{
+				{RSSBytes: rss, Requests: 300},
+				{RSSBytes: rss, Requests: 300},
+			}}
 	}
 
 	for i := 0; i < 40; i++ {
@@ -255,13 +257,16 @@ func TestDecayRateIsIndependentOfTheScrapeInterval(t *testing.T) {
 	}
 }
 
-// steadyAt is a pool under steady load. ActiveNow matters: a smaller reading
-// from an idle pool is not evidence that the application got cheaper.
+// steadyAt is a pool under steady load. The traffic matters: a smaller reading
+// from an idle pool is not evidence that the application got cheaper, so a pool
+// that is meant to be busy has to carry a rising request counter.
 func steadyAt(pool string, rss int64, at time.Time) Observation {
-	return Observation{Pool: pool, At: at, ActiveNow: 8, Workers: []WorkerSample{
-		{RSSBytes: rss, Requests: 300},
-		{RSSBytes: rss, Requests: 300},
-	}}
+	return Observation{Pool: pool, At: at, ActiveNow: 8,
+		Accepted: acceptedAt(at),
+		Workers: []WorkerSample{
+			{RSSBytes: rss, Requests: 300},
+			{RSSBytes: rss, Requests: 300},
+		}}
 }
 
 // TestConfidenceNeedsBothSamplesAndTime: samples alone would let a tight polling
@@ -697,6 +702,7 @@ func TestASustainedReductionIsBelievedWithinTheHour(t *testing.T) {
 	// Settled expensive.
 	for i := range 20 {
 		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * time.Minute), ActiveNow: 8,
+			Accepted: acceptedAt(now.Add(time.Duration(i) * time.Minute)),
 			Workers: []WorkerSample{
 				{RSSBytes: 240 << 20, Requests: 500},
 				{RSSBytes: 240 << 20, Requests: 500},
@@ -710,6 +716,7 @@ func TestASustainedReductionIsBelievedWithinTheHour(t *testing.T) {
 	cheap := now.Add(30 * time.Minute)
 	for i := range 60 {
 		st.Learn(Observation{Pool: "shop", At: cheap.Add(time.Duration(i) * time.Minute), ActiveNow: 8,
+			Accepted: acceptedAt(cheap.Add(time.Duration(i) * time.Minute)),
 			Workers: []WorkerSample{
 				{RSSBytes: 90 << 20, Requests: 500},
 				{RSSBytes: 90 << 20, Requests: 500},
@@ -735,6 +742,7 @@ func TestAQuietSpellDoesNotPullTheEstimateDown(t *testing.T) {
 
 	for i := range 20 {
 		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * time.Minute), ActiveNow: 8,
+			Accepted: acceptedAt(now.Add(time.Duration(i) * time.Minute)),
 			Workers: []WorkerSample{
 				{RSSBytes: 240 << 20, Requests: 500},
 				{RSSBytes: 240 << 20, Requests: 500},
@@ -748,6 +756,7 @@ func TestAQuietSpellDoesNotPullTheEstimateDown(t *testing.T) {
 	quiet := now.Add(30 * time.Minute)
 	for i := range 96 {
 		st.Learn(Observation{Pool: "shop", At: quiet.Add(time.Duration(i) * 5 * time.Minute), ActiveNow: 8,
+			Accepted: acceptedAt(quiet.Add(time.Duration(i) * 5 * time.Minute)),
 			Workers: []WorkerSample{
 				{RSSBytes: 12 << 20, Requests: 2},
 				{RSSBytes: 11 << 20, Requests: 1},
@@ -1085,5 +1094,86 @@ func TestTheRequestCounterAdvancesOnEveryScrape(t *testing.T) {
 		t.Errorf("LastAccepted = %d after five scrapes reporting up to 600; the next "+
 			"comparison is against a reading five scrapes old, so a quiet stretch banks "+
 			"itself into permission to decay", got)
+	}
+}
+
+// acceptedAt is a plausible lifetime request counter for a pool under steady
+// load: monotonic in time, and generous enough that any two scrapes are well
+// clear of the decay threshold.
+func acceptedAt(at time.Time) int64 {
+	return at.Unix() * 100
+}
+
+// TestAReloadDoesNotPullTheEstimateDown.
+//
+// php-fpm zeroes its counters on reload, and this tool causes reloads, so the
+// difference between two readings can be meaningless. A review asked for this to
+// be detected by the master's start time rather than by the count going
+// backwards — worked through, that changes no answer, and in the one case where
+// it would it makes things worse. The reasoning is recorded at didWork; what
+// matters to a caller is this.
+func TestAReloadDoesNotPullTheEstimateDown(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	// A pool that started recently, so its lifetime counter is still small —
+	// which is the ordinary state of affairs after this tool has just reloaded
+	// it once.
+	for i := range 15 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 6, Accepted: int64(20 + i*20),
+			Workers: []WorkerSample{{RSSBytes: 200 << 20, Requests: 5000}, {RSSBytes: 200 << 20, Requests: 5000}},
+		}, opts)
+	}
+	settled := st.Pools["shop"].SizingBytes()
+
+	// A reload. The counter restarts — and because the pool is busier afterwards
+	// than it was before, the fresh count OVERTAKES the old one within a scrape.
+	// The difference is positive and looks exactly like ordinary traffic; nothing
+	// about the number says a reset happened. Only the start time does.
+	after := now.Add(10 * time.Minute)
+	for i := range 10 {
+		st.Learn(Observation{Pool: "shop", At: after.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 0, Accepted: int64(500 + i*500),
+			Workers: []WorkerSample{{RSSBytes: 20 << 20, Requests: 5000}, {RSSBytes: 19 << 20, Requests: 5000}},
+		}, opts)
+	}
+
+	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
+		t.Errorf("a reload took the estimate from %dMiB to %dMiB; the counter restarting "+
+			"looked like ordinary traffic", settled>>20, got>>20)
+	}
+}
+
+// TestNoCounterMeansNoDecay: without the counter there is nothing that
+// distinguishes a busy pool from a quiet one — the instantaneous count measures
+// request duration as much as load. Refusing to decay costs headroom on one
+// pool; guessing costs the host.
+func TestNoCounterMeansNoDecay(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	for i := range 10 {
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 6, Accepted: int64(1000 + i*400),
+			Workers: []WorkerSample{{RSSBytes: 200 << 20, Requests: 5000}, {RSSBytes: 200 << 20, Requests: 5000}},
+		}, opts)
+	}
+	settled := st.Pools["shop"].SizingBytes()
+
+	// The same pool, scraped without a counter, reading small.
+	quiet := now.Add(10 * time.Minute)
+	for i := range 60 {
+		st.Learn(Observation{Pool: "shop", At: quiet.Add(time.Duration(i) * time.Minute),
+			ActiveNow: 4,
+			Workers:   []WorkerSample{{RSSBytes: 20 << 20, Requests: 5000}, {RSSBytes: 19 << 20, Requests: 5000}},
+		}, opts)
+	}
+
+	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
+		t.Errorf("the estimate fell from %dMiB to %dMiB on readings with nothing to say "+
+			"whether the pool was working", settled>>20, got>>20)
 	}
 }

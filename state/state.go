@@ -693,16 +693,29 @@ func (s *State) Names() []string {
 // estimate it had until the next scrape can compare properly.
 func didWork(ps *PoolState, obs Observation, opts Options) bool {
 	if obs.Accepted <= 0 || ps.LastAccepted <= 0 {
-		// No counter to compare. Fall back to whether anything was caught
-		// mid-request, which is weak but better than nothing.
-		return obs.ActiveNow > 0
+		// No counter to compare against. Refused rather than guessed: the
+		// instantaneous busy count measures request duration as much as load, and
+		// a pool answering quickly reads idle whatever it is carrying. Declining
+		// to decay leaves the estimate where it is, which costs headroom on one
+		// pool — the alternative costs the host.
+		return false
 	}
 
 	served := obs.Accepted - ps.LastAccepted
 	if served < 0 {
-		// Counter reset — php-fpm does that on reload, and this tool causes
-		// reloads. Unknown, not negative work.
-		return obs.ActiveNow > 0
+		// A reload zeroed the counter, so the difference means nothing. Unknown,
+		// not negative work.
+		//
+		// A review asked for this to be detected by the master's start time
+		// instead, on the grounds that a busy pool's fresh count can overtake the
+		// old reading and hide the reset. Worked through, the start time changes
+		// no answer: after a reset obs.Accepted is at least as large as the
+		// difference, so wherever the difference clears the threshold the fresh
+		// count does too — and the one case where they differ is a pool with a
+		// large lifetime count but only a request or two since the last scrape,
+		// which is a SLOW pool, and slow pools are exactly what this must not let
+		// decay. Detecting the reset there would have made it worse.
+		return false
 	}
 
 	return served >= opts.MinRequestsToDecay
