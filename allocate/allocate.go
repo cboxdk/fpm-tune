@@ -238,6 +238,12 @@ type Plan struct {
 	// fewer sites.
 	CapacityExhausted bool
 
+	// ShortfallBytes is what one more worker would cost the least expensive pool
+	// that wanted one and did not get it. Read with FreeBytes, it is the
+	// difference between "the budget is committed" and "the budget has room that
+	// is smaller than a worker" — which look the same and are not.
+	ShortfallBytes int64
+
 	Warnings []string
 }
 
@@ -413,18 +419,16 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	// reads like a second opinion and is not one.
 	plan.CapacityExhausted = unmet
 
-	if plan.CapacityExhausted {
-		// The free budget belongs in the message. "Fully committed" was printed
-		// with 30% of the budget free, because free budget that is smaller than
-		// ONE worker of the pool that needs one buys nothing — true, and not
-		// what those words say to someone reading a log at two in the morning.
-		short := cheapestUnmet(pools, granted, wants)
-		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
-			"at least one pool is short of workers, and the %s left in the budget is less "+
-				"than the %s one more worker would cost it: no rearrangement helps, the host "+
-				"needs more memory or fewer pools",
-			humanBytes(plan.FreeBytes), humanBytes(short)))
-	}
+	// The numbers, carried on the plan rather than written into a warning.
+	//
+	// The renderer prints a CAPACITY EXHAUSTED block of its own, and appending a
+	// warning that says the same thing put the identical news on the screen
+	// twice, at exactly the moment an operator is looking for signal. serve logs
+	// the transition with its own wording. What both of them lacked was the
+	// arithmetic: how much is free, against what one more worker costs the pool
+	// that needs one — "fully committed" was printed with 30% of the budget
+	// free, which is true and not what those words say at three in the morning.
+	plan.ShortfallBytes = cheapestUnmet(pools, granted, wants)
 
 	return plan, nil
 }
@@ -900,9 +904,12 @@ func reason(p Pool, granted, want, floor int, exhausted bool) string {
 	switch {
 	case p.Unknown:
 		return "current configuration could not be read; left alone"
+	case exhausted && granted < floor:
+		return fmt.Sprintf("host oversubscribed; cut to %d, below the %d reserved for it, "+
+			"%s %s/worker", granted, floor, source, humanBytes(p.WorkerBytes))
 	case exhausted:
-		return fmt.Sprintf("host oversubscribed; held at %d (floor %d), %s %s/worker",
-			granted, floor, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("host oversubscribed; held at %d, %s %s/worker",
+			granted, source, humanBytes(p.WorkerBytes))
 	case granted < want:
 		return fmt.Sprintf("wants %d, budget allows %d; %s %s/worker",
 			want, granted, source, humanBytes(p.WorkerBytes))
@@ -942,5 +949,9 @@ func humanBytes(b int64) string {
 		exp++
 	}
 
-	return fmt.Sprintf("%.0f%ciB", float64(b)/float64(div), "KMGT"[exp])
+	// One decimal, matching what the renderer prints in the same output. With
+	// none, 1536MiB came out as "2GiB" — so a warning about not having enough
+	// memory named a third more of it than the header two lines above, in the
+	// one message where the number is the point.
+	return fmt.Sprintf("%.1f%ciB", float64(b)/float64(div), "KMGT"[exp])
 }

@@ -115,9 +115,10 @@ func (r Result) Render(w io.Writer) error {
 	// for the next run would have been advice to wait for nothing.
 	if r.Plan.CapacityExhausted {
 		fmt.Fprintf(&b, "\nCAPACITY EXHAUSTED — pools marked * want more workers and there is\n"+
-			"nowhere left to get them. The free budget above is smaller than one more\n"+
-			"worker would cost them, so no configuration change will help: this host\n"+
-			"needs more memory, or fewer sites.\n")
+			"nowhere left to get them: %s free against the %s one more worker would\n"+
+			"cost the cheapest of them. No configuration change will help; this host\n"+
+			"needs more memory, or fewer sites.\n",
+			budget.HumanBytes(r.Plan.FreeBytes), budget.HumanBytes(r.Plan.ShortfallBytes))
 	}
 
 	_, err := io.WriteString(w, b.String())

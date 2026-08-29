@@ -188,8 +188,18 @@ func TestCapacityExhaustedOnlyWhenNothingCanBeGiven(t *testing.T) {
 			t.Errorf("a saturated pool with %s free was not reported as a capacity problem",
 				humanBytes(plan.FreeBytes))
 		}
-		if len(plan.Warnings) == 0 {
-			t.Error("capacity exhaustion produced no warning for the operator")
+		// The arithmetic, not a warning. A warning saying the same thing as the
+		// renderer's own block put the identical news on the screen twice at
+		// the moment an operator is looking for signal; what neither of them
+		// carried was how far off it is. Without ShortfallBytes the message can
+		// only say "committed", which was printed with 30% of the budget free.
+		if plan.ShortfallBytes <= 0 {
+			t.Error("nothing says what one more worker would cost, so the report can only " +
+				"say the budget is committed and not by how much it is missed")
+		}
+		if plan.FreeBytes >= plan.ShortfallBytes {
+			t.Errorf("free = %s and one more worker costs %s: that is not exhaustion",
+				humanBytes(plan.FreeBytes), humanBytes(plan.ShortfallBytes))
 		}
 	})
 }
@@ -648,4 +658,54 @@ func TestHavingAMeasurementIsNotPermissionToCut(t *testing.T) {
 				pp.MaxChildren)
 		}
 	}
+}
+
+// TestTheReportedNumbersMatchTheOnesItWasGiven.
+//
+// humanBytes had no decimals, so 1536MiB came out as "2GiB" — and the message
+// it appears in is the one about not having enough memory, printed two lines
+// under a header that says 1.5GiB. A number that is a third wrong in the
+// message where the number is the point.
+func TestTheReportedNumbersMatchTheOnesItWasGiven(t *testing.T) {
+	for bytes, want := range map[int64]string{
+		1536 * mb:   "1.5GiB",
+		2048 * mb:   "2.0GiB",
+		1024 * mb:   "1.0GiB",
+		1536 * 1024: "1.5MiB",
+		700:         "700B",
+	} {
+		if got := humanBytes(bytes); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", bytes, got, want)
+		}
+	}
+}
+
+// TestAPoolCutBelowItsFloorIsNotDescribedAsHeldAtIt: "held at 7 (floor 12)"
+// reads as though 7 were a floor being respected. It is the opposite — the pool
+// was reduced below what was reserved for it, which is the thing an operator
+// most needs to notice on an oversubscribed host.
+func TestAPoolCutBelowItsFloorIsNotDescribedAsHeldAtIt(t *testing.T) {
+	plan := mustCompute(t, Budget{TotalBytes: 700 * mb, ReserveBytes: 400 * mb}, []Pool{
+		{Name: "a", WorkerBytes: 48 * mb, Floor: 12, CurrentMaxChildren: 12,
+			Measured: true, Reducible: true},
+		{Name: "b", WorkerBytes: 48 * mb, Floor: 12, CurrentMaxChildren: 12,
+			Measured: true, Reducible: true},
+	})
+
+	for _, pp := range plan.Pools {
+		if pp.MaxChildren >= 12 {
+			continue
+		}
+		if strings.Contains(pp.Reason, "held at") {
+			t.Errorf("a pool cut from 12 to %d is described as %q; it was not held at "+
+				"anything, it was cut below what was reserved for it",
+				pp.MaxChildren, pp.Reason)
+		}
+		if !strings.Contains(pp.Reason, "below") {
+			t.Errorf("the reason does not say the pool went below its reserve: %q", pp.Reason)
+		}
+
+		return
+	}
+	t.Fatal("setup: no pool was cut, so the wording under test never ran")
 }
