@@ -1550,7 +1550,10 @@ func TestSignalledWithNoMasterAliveIsNotTreatedAsProvisioning(t *testing.T) {
 	// A run that wrote, signalled, and did not survive to see the result.
 	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
 	b := backup{path: DropInPath(dir), existed: true, saved: filepath.Join(backupDir, backupName(dir, DropInPath(dir)))}
-	markSignalled(backupDir, master, b, Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 40}}))
+	if err := markSignalled(backupDir, master, b,
+		Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 40}})); err != nil {
+		t.Fatal(err)
+	}
 
 	// Nothing running: PID stays zero.
 	_, err := Reconcile(context.Background(), master, Options{BackupDir: backupDir}, nil)

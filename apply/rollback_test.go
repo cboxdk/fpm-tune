@@ -290,3 +290,134 @@ func inodeOf(t *testing.T, path string) uint64 {
 
 	return uint64(sys.Ino)
 }
+
+// TestDeletingTheFileUndoesEverything.
+//
+// The README's promise, and the thing anyone reaching for rm expects: "deleting
+// that file returns everything to what you configured".
+//
+// It did not. When a pool was absent from the live file, overrideSet took its
+// last applied size out of the state file and wrote it back — so deleting the
+// file and running the tool once put every override back. The state was
+// consulted for "the window between a successful apply and the file being read
+// again", and there is no such window: overrideSet reads the file as it stands,
+// and after a successful apply the file contains the pool.
+func TestDeletingTheFileUndoesEverything(t *testing.T) {
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+
+	// A previous run sized three pools, and the state remembers all three.
+	st := state.New()
+	for _, pool := range []string{"shop", "forum", "blog"} {
+		st.RecordApplied(pool, 30, time.Now().Add(-time.Hour))
+	}
+
+	// The operator deleted the drop-in. Nothing is ours any more.
+	if _, err := os.Stat(DropInPath(dir)); !os.IsNotExist(err) {
+		t.Fatal("setup: the drop-in should not exist")
+	}
+
+	// One pool now genuinely needs a change.
+	_, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{
+			{Name: "shop", MaxChildren: 12, Current: 4},
+			{Name: "forum", MaxChildren: 8, Current: 8},
+			{Name: "blog", MaxChildren: 6, Current: 6},
+		},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: configPath,
+		DropInDir: dir, NoMasterExpected: true,
+	}, st, Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	body, err := os.ReadFile(DropInPath(dir))
+	if err != nil {
+		t.Fatalf("nothing was written: %v", err)
+	}
+
+	// shop changed, so it is written. The other two were not ours any more and
+	// are not being changed, so nothing about them belongs in this file.
+	if !strings.Contains(string(body), "[shop]") {
+		t.Errorf("the pool that changed is missing:\n%s", body)
+	}
+	for _, resurrected := range []string{"[forum]", "[blog]"} {
+		if strings.Contains(string(body), resurrected) {
+			t.Errorf("%s came back from the state file after the drop-in was deleted; "+
+				"the one documented way to undo everything this tool has done does not "+
+				"work:\n%s", resurrected, body)
+		}
+	}
+}
+
+// TestARecordThatCannotBeWrittenStopsTheReload.
+//
+// The recovery record's whole job is to describe what MIGHT have happened, and
+// it is read by the next start to choose between finishing a change and undoing
+// it. Its write was attempted and its error thrown away — so a full disk left
+// the record saying "written, not signalled" while the master was signalled a
+// line later. A crash in the settle window would then be recovered as "nobody
+// was told", and the configuration php-fpm had already adopted discarded as
+// unfinished work.
+//
+// Not signalling is the safe half of the trade: nothing has been reloaded, the
+// previous file goes back, and the operator gets a disk-full error instead of a
+// host recovered against a record that was never true.
+func TestARecordThatCannotBeWrittenStopsTheReload(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through a read-only directory, so the failure cannot be staged")
+	}
+
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+	path := DropInPath(dir)
+
+	if err := os.WriteFile(path,
+		Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 5}}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The backup directory is sealed BETWEEN the two writes that go into it.
+	//
+	// Sealing it from the start fails at the backup instead, which is a
+	// different and already-safe path — nothing has been written, so there is
+	// nothing to undo. What has to be staged is a backup that succeeded and a
+	// phase update that cannot. Validation of the real tree runs between them.
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(backupDir, 0o755) })
+
+	st := state.New()
+	st.RecordApplied("www", 5, time.Now().Add(-time.Hour))
+	stubbed := fakeMasterWithLog(t, configPath)
+
+	res, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 50, Current: 5}},
+	}, Master{
+		Binary: sealsThenAccepts(t, configPath, backupDir), ConfigPath: configPath,
+		DropInDir: dir, PID: stubbed.pid,
+	}, st, Options{BackupDir: backupDir, SettleTime: 200 * time.Millisecond}, nil)
+
+	if err == nil {
+		t.Fatal("the reload went ahead with no durable record of it")
+	}
+	if n := stubbed.signalsSeen(t); n != 0 {
+		t.Errorf("the master was signalled %d times with no record that it would be; a "+
+			"crash in the settle window is then recovered as if nothing had happened", n)
+	}
+	if !res.RolledBack {
+		t.Errorf("the change was left on disk: RolledBack = false, RollbackFailed = %v",
+			res.RollbackFailed)
+	}
+
+	body, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("the previous file is gone: %v", rerr)
+	}
+	if !strings.Contains(string(body), "pm.max_children = 5") {
+		t.Errorf("the previous configuration was not put back:\n%s", body)
+	}
+}

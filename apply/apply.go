@@ -190,6 +190,12 @@ type Result struct {
 	// host" needs to hear about it.
 	Wrote bool
 
+	// Inconclusive means the master was signalled and the settle window did not
+	// finish, so the recovery record is still open. Nothing is wrong yet — the
+	// change may well have been adopted — but the next round has to reconcile
+	// before it writes again.
+	Inconclusive bool
+
 	// RolledBack reports that something went wrong and the previous
 	// configuration WAS restored. Only true when every file went back.
 	RolledBack bool
@@ -402,9 +408,15 @@ func Apply(
 		return result, fmt.Errorf("%w: %w", ErrValidationFailed, err)
 	}
 
+	// Anything that reached the pool directory counts as written, whether or not
+	// a pool changed size. Wrote was set only on the provisioning branch, so on
+	// a live host — the ordinary case — last_apply_timestamp_seconds never
+	// advanced, and the alert built on "not advancing while changes are pending"
+	// fired on every successful apply.
+	result.Wrote = true
+
 	if master.PID <= 0 {
 		// Provisioning: the file is in place for whenever PHP-FPM starts.
-		result.Wrote = true
 		log.Info("Wrote pool configuration; no running master to reload", "pools", len(pools))
 		phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 		commit(opts.BackupDir, master.DropInDir, b, log)
@@ -416,7 +428,35 @@ func Apply(
 	// Recorded BEFORE the signal, because the record's job is to describe what
 	// might have happened. Writing it afterwards leaves a window in which the
 	// master has adopted the change and the record still says nobody was told.
-	markSignalled(opts.BackupDir, master, b, rendered)
+	// The record has to be DURABLE before the signal, not merely attempted.
+	//
+	// Its whole job is to describe what might have happened, and it is read by
+	// the next start to decide between finishing the change and undoing it. A
+	// failed write left the record saying PhaseWritten while the master was
+	// about to be signalled — so a crash in the settle window would be recovered
+	// as "nobody was told", and the configuration php-fpm had already adopted
+	// would be discarded as unfinished work.
+	//
+	// Not signalling is the safe half of that trade. Nothing has been reloaded,
+	// the previous file goes back, and the operator gets a disk-full error
+	// rather than a host recovered against a false record.
+	if err := markSignalled(opts.BackupDir, master, b, rendered); err != nil {
+		log.Error("Could not record that the master is about to be signalled; "+
+			"putting the previous configuration back rather than reloading",
+			"error", err)
+
+		if rerr := restore(b, log); rerr != nil {
+			result.RollbackFailed = []string{b.path}
+
+			return result, fmt.Errorf("the reload could not be recorded (%w) AND the "+
+				"configuration could not be taken back out of %s", err, b.path)
+		}
+		result.RolledBack = true
+		commit(opts.BackupDir, master.DropInDir, b, log)
+
+		return result, fmt.Errorf("the reload could not be recorded, so it was not "+
+			"performed; the previous configuration is back in place: %w", err)
+	}
 
 	// PIDFile and ConfigPath let a reload be confirmed when the master comes
 	// back under a NEW pid, which is what a daemonized reload does — php-fpm's
@@ -438,6 +478,12 @@ func Apply(
 				"recorded so the next start can finish checking it",
 				"pid", master.PID, "error", ctxErr)
 			result.Reloaded = true
+			// The transaction is deliberately left open, and the caller has to
+			// know: a daemon that reconciles once at startup will never look at
+			// it again, so an interrupted settle sat there unresolved until the
+			// process was restarted — with the tool writing more changes on top
+			// of a record that says the last one was never finished.
+			result.Inconclusive = true
 			phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 			record(st, changes, now)
 
@@ -955,7 +1001,7 @@ func writeDropIn(master Master, pools []allocate.PoolPlan, opts Options, log *sl
 // Written before the signal, because the record's job is to describe what MIGHT
 // have happened. Recording it afterwards would leave a window in which the
 // master had adopted the change and the record still said nobody had been told.
-func markSignalled(backupDir string, master Master, b backup, rendered []byte) {
+func markSignalled(backupDir string, master Master, b backup, rendered []byte) error {
 	txn := transaction{
 		DropInDir:  master.DropInDir,
 		Binary:     master.Binary,
@@ -969,7 +1015,7 @@ func markSignalled(backupDir string, master Master, b backup, rendered []byte) {
 		txn.Saved = filepath.Base(b.saved)
 	}
 
-	_ = writeTransaction(backupDir, txn)
+	return writeTransaction(backupDir, txn)
 }
 
 // restore puts the previous file back, and reports whether it could.
@@ -1268,16 +1314,17 @@ func overrideSet(
 			continue
 		}
 
-		// Not in the file. State is consulted only as a fallback, for the window
-		// between a successful apply and the file being read again.
-		if st != nil {
-			if ps := st.Pools[pp.Name]; ps != nil && ps.LastAppliedMaxChildren > 0 {
-				held := pp
-				held.MaxChildren = ps.LastAppliedMaxChildren
-				held.Reason = "unchanged"
-				out = append(out, held)
-			}
-		}
+		// Not in the file, so not ours. There used to be a fallback here that
+		// took the pool's last applied size out of the state file and wrote it
+		// back — and that turns "delete the file to undo everything" into "delete
+		// the file and watch the tool put it all back on the next run", which is
+		// the opposite of what the README promises and of what an operator
+		// reaching for rm expects.
+		//
+		// It was there for the window between a successful apply and the file
+		// being read again. There is no such window: overrideSet reads the file
+		// as it stands, and after a successful apply the file contains the pool.
+		_ = st
 	}
 
 	return out, nil

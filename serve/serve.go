@@ -339,6 +339,15 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// Wrote, not Changed(): a run that only removes the section of a site that no
 	// longer exists writes and reloads while resizing nothing, and it reached the
 	// host just as much as a resize did.
+	if applied.Inconclusive {
+		// The settle window did not finish, so the recovery record is still
+		// open. Reconciling once at startup would leave it there for the life of
+		// the process while this loop kept writing on top of it.
+		l.log.Warn("The reload could not be confirmed; the next round will reconcile " +
+			"before writing again")
+		l.reconciled = false
+	}
+
 	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote, applied.RolledBack,
 		len(applied.RollbackFailed), err)
 
