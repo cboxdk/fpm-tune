@@ -725,6 +725,21 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// Upward is different. 2.75x the memory is real memory, whatever the worker
 	// has served, and a deploy that makes every worker more expensive is the
 	// case the waiver was added for.
+	//
+	// The cost of this asymmetry is a ratchet, and it is deliberate: one
+	// expensive scrape raises a recycling pool's estimate and no later reading
+	// from the same pool can bring it down, because every later reading is
+	// immature too. A review proposed tracking immature-derived estimates
+	// separately and letting them fall on sustained evidence.
+	//
+	// Not taken, for now. It buys back reservation accuracy on pools that
+	// cannot be measured properly in the first place, and pays for it with a
+	// second estimate whose downward gate has all the same difficulties as the
+	// first and is exercised only by the pools where the evidence is worst. The
+	// ratchet over-reserves; the alternative's failure mode is
+	// under-reserving on exactly the pools this tool understands least. If a
+	// real host is found wasting real memory to it, that is the moment to build
+	// the second estimate — with the measurement in hand.
 	if recycled && mature == 0 && peak <= ps.SizingBytes() {
 		return false
 	}
