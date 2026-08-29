@@ -740,3 +740,71 @@ func TestTheRepairWorksWithNothingButTheBackupDirectory(t *testing.T) {
 		t.Errorf("this tool's file is still there: %v", serr)
 	}
 }
+
+// TestARepairDoesNotUseAnotherMastersNote.
+//
+// The note recording where php-fpm lives was one unkeyed file per backup
+// directory — and the backup directory has a default, so two masters share one.
+// The last successful apply overwrote it, and a repair for the OTHER master
+// then filled in that one's binary and config: it validated a tree it was not
+// about to touch, found it fine, and returned without repairing the host that
+// was actually down.
+func TestARepairDoesNotUseAnotherMastersNote(t *testing.T) {
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	healthy := t.TempDir()
+	broken := t.TempDir()
+
+	// The healthy master applied last, so under the old scheme its note is the
+	// only one there.
+	rememberMaster(backupDir, Master{
+		Binary: "/usr/sbin/php-fpm8.3", ConfigPath: "/etc/php/8.3/php-fpm.conf",
+		DropInDir: healthy,
+	})
+
+	if ref := rememberedMaster(backupDir, broken); ref.Binary != "" {
+		t.Errorf("a repair for %s was handed %s's php-fpm (%q); it would validate a tree "+
+			"it is not about to touch, find it fine, and leave the broken host alone",
+			broken, healthy, ref.Binary)
+	}
+
+	// Its own note still comes back.
+	rememberMaster(backupDir, Master{
+		Binary: "/usr/sbin/php-fpm8.2", ConfigPath: "/etc/php/8.2/php-fpm.conf",
+		DropInDir: broken,
+	})
+	if ref := rememberedMaster(backupDir, broken); ref.Binary != "/usr/sbin/php-fpm8.2" {
+		t.Errorf("the master's own note did not come back: %+v", ref)
+	}
+	// And the other's is untouched, which the single-file scheme could not do.
+	if ref := rememberedMaster(backupDir, healthy); ref.Binary != "/usr/sbin/php-fpm8.3" {
+		t.Errorf("writing one master's note overwrote another's: %+v", ref)
+	}
+}
+
+// TestADaemonWithNoDirectoryOnlyGuessesWhenThereIsOneAnswer.
+//
+// A daemon started with no --drop-in-dir has nothing to reconcile without a
+// note, and the note is the only thing between the host and being repaired. But
+// with several masters remembered there is no way to tell which one is down,
+// and guessing points a repair at a master that is fine.
+func TestADaemonWithNoDirectoryOnlyGuessesWhenThereIsOneAnswer(t *testing.T) {
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	only := t.TempDir()
+
+	rememberMaster(backupDir, Master{
+		Binary: "/usr/sbin/php-fpm", ConfigPath: "/etc/php-fpm.conf", DropInDir: only,
+	})
+	if got := RememberedMaster(backupDir, "").DropInDir; got != only {
+		t.Errorf("with exactly one master remembered, the daemon found %q, want %q", got, only)
+	}
+
+	rememberMaster(backupDir, Master{
+		Binary: "/usr/sbin/php-fpm8.2", ConfigPath: "/etc/php/8.2/php-fpm.conf",
+		DropInDir: t.TempDir(),
+	})
+	if got := RememberedMaster(backupDir, "").DropInDir; got != "" {
+		t.Errorf("with two masters remembered the daemon picked %q; there is no way to "+
+			"tell which one is down, and repairing the wrong one is its own outage", got)
+	}
+}

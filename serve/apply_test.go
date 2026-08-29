@@ -28,7 +28,11 @@ import (
 func TestTheDaemonRefusesToApplyWithNoMasterAndSaysSoOnTheEndpoint(t *testing.T) {
 	defer swapDiscovery(nil)()
 
-	loop := applyingLoop(t, t.TempDir())
+	// A properly scoped daemon: it knows which master it is for, and that master
+	// is not running. That is the case an operator hits, and it is the one where
+	// a watching process and an acting one look identical from outside.
+	tr := poolTree(t, "8.5")
+	loop := applyingLoop(t, tr.poolDir, tr.configPath)
 	loop.round(context.Background())
 
 	if got := blockedReason(t, loop); got != "no_master" {
@@ -58,7 +62,7 @@ func TestTheDaemonWritesWhenItCan(t *testing.T) {
 		{PID: livingMaster(t, configPath), ConfigPath: configPath, Binary: trueBinary(t)},
 	})()
 
-	loop := applyingLoop(t, poolDir)
+	loop := applyingLoop(t, poolDir, configPath)
 	loop.round(context.Background())
 
 	body, err := os.ReadFile(apply.DropInPath(poolDir))
@@ -74,10 +78,17 @@ func TestTheDaemonWritesWhenItCan(t *testing.T) {
 }
 
 // applyingLoop is a daemon configured to act, driven by fixed observations.
-func applyingLoop(t *testing.T, dropInDir string) *Loop {
+//
+// configPath matters: the loop scopes discovery to the master that includes its
+// pool directory, so a target that does not say which master it belongs to is
+// correctly filtered out. Empty means "do not scope", for the cases that are
+// not about scoping.
+func applyingLoop(t *testing.T, dropInDir, configPath string) *Loop {
 	t.Helper()
 
-	targets := []phpfpm.Target{{Name: "shop", MaxChildren: 4, ProcessManager: "dynamic"}}
+	targets := []phpfpm.Target{{
+		Name: "shop", MaxChildren: 4, ProcessManager: "dynamic", ConfigPath: configPath,
+	}}
 
 	loop, err := New(Config{
 		StatePath:      filepath.Join(t.TempDir(), "state.json"),
@@ -242,7 +253,7 @@ func TestTheLockFollowsTheDirectoryBeingWritten(t *testing.T) {
 	restore := swapDiscoveryFunc(func() []phpfpm.Master { return []phpfpm.Master{current.master(t)} })
 	defer restore()
 
-	loop := applyingLoop(t, "")
+	loop := applyingLoop(t, "", "")
 	loop.round(context.Background())
 
 	if loop.resourceDir != old.poolDir {
@@ -296,4 +307,59 @@ func swapDiscoveryFunc(fn func() []phpfpm.Master) func() {
 	discoverMasters = func(*slog.Logger) ([]phpfpm.Master, error) { return fn(), nil }
 
 	return func() { discoverMasters = saved }
+}
+
+// TestTheLoopItselfScopesToItsMaster.
+//
+// ForMaster is tested directly elsewhere; this is about the LOOP calling it.
+// The filter existed and was correct, and lived in the CLI — so plan and apply
+// scoped and the daemon did not, which is a fault in the wiring rather than in
+// the rule, and no test of the rule could catch it.
+func TestTheLoopItselfScopesToItsMaster(t *testing.T) {
+	dir := t.TempDir()
+	mine := writeMasterConfig(t, dir, "8.5")
+	theirs := writeMasterConfig(t, dir, "8.2")
+
+	loop, err := New(Config{
+		StatePath:      filepath.Join(t.TempDir(), "state.json"),
+		MetricsAddr:    "",
+		MemoryOverride: 4096 * mb,
+		DropInDir:      filepath.Join(dir, "8.5", "pool.d"),
+		Discover: func(context.Context) ([]phpfpm.Target, error) {
+			return []phpfpm.Target{
+				{Name: "shop", ConfigPath: mine, PID: 100, MaxChildren: 8, ProcessManager: "dynamic"},
+				{Name: "api", ConfigPath: theirs, PID: 200, MaxChildren: 8, ProcessManager: "dynamic"},
+			}, nil
+		},
+		Sample: func(_ context.Context, targets []phpfpm.Target) []observe.PoolView {
+			views := make([]observe.PoolView, 0, len(targets))
+			for _, tg := range targets {
+				views = append(views, observe.PoolView{
+					Name: tg.Name, ProcessManager: "dynamic", Target: tg,
+					CurrentMaxChildren: 8, MaxChildrenKnown: true,
+					ActiveNow: 4, ObservedPeak: 4, Accepted: 100_000,
+					Workers: []state.WorkerSample{
+						{RSSBytes: 40 * mb, Requests: 500}, {RSSBytes: 41 * mb, Requests: 500},
+					},
+				})
+			}
+
+			return views
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { loop.Close() })
+
+	loop.round(context.Background())
+
+	if _, learned := loop.State().Pools["api"]; learned {
+		t.Error("the daemon learned a pool belonging to a master it was not pointed at; " +
+			"its budget is read from one master's cgroup and is now being divided among " +
+			"pools that master does not run")
+	}
+	if _, learned := loop.State().Pools["shop"]; !learned {
+		t.Error("the daemon learned nothing at all; the filter has removed its own pools")
+	}
 }

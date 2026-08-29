@@ -77,7 +77,7 @@ func Reconcile(ctx context.Context, master Master, opts Options, log *slog.Logge
 		// the backups on every successful apply is the answer: it survives a
 		// lost state file, and it is written by the same code that knows the
 		// master is real.
-		master = master.filledFrom(rememberedMaster(opts.BackupDir))
+		master = master.filledFrom(rememberedMaster(opts.BackupDir, master.DropInDir))
 
 		return repairIfOursIsBroken(ctx, master, opts, log)
 	}

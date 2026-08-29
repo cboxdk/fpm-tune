@@ -448,7 +448,7 @@ func (l *Loop) reconcile(ctx context.Context) {
 		// the one thing standing between the host and being repaired.
 		master = apply.Master{DropInDir: l.cfg.DropInDir}
 		if master.DropInDir == "" {
-			master = apply.RememberedMaster(l.cfg.BackupDir)
+			master = apply.RememberedMaster(l.cfg.BackupDir, l.cfg.DropInDir)
 		}
 		if master.DropInDir == "" {
 			return
@@ -520,18 +520,25 @@ func (l *Loop) save(now time.Time, force bool) {
 // meant the growth signal never fired in any round since it was written. Nothing
 // could assert it, because the only way in was through a real php-fpm.
 func (l *Loop) discover(ctx context.Context) ([]phpfpm.Target, error) {
+	find := observe.Discover
 	if l.cfg.Discover != nil {
-		return l.cfg.Discover(ctx)
+		find = func(context.Context, *slog.Logger) ([]phpfpm.Target, error) {
+			return l.cfg.Discover(ctx)
+		}
 	}
 
-	targets, err := observe.Discover(ctx, l.log)
+	targets, err := find(ctx, l.log)
 	if err != nil {
 		return nil, err
 	}
 
-	// Scoped to the master this daemon was pointed at, the same way plan and
-	// apply scope. Without it a daemon on a two-master host learned and sized
-	// the other master's pools as if they were its own.
+	// Scoped AFTER the source, whichever source it was.
+	//
+	// The filter first sat inside the production branch, so an injected one
+	// skipped it — and a test then proved something the daemon does not do. That
+	// is the same shape as the fault this filter exists for: a rule that lives
+	// on one path and not the other. A seam has to supply the world, not decide
+	// what is done with it.
 	return ForMaster(targets, l.cfg.DropInDir, l.log), nil
 }
 

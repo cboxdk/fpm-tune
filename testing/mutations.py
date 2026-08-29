@@ -35,6 +35,16 @@ LAYERED = {
     "allocate: no terminal budget assertion",
     "allocate: the per-worker cost is unbounded",
     "allocate: the worker count is unbounded",
+    # The recycled waiver has three conditions and any two of them hold the
+    # line. `worked` keeps a quiet pool from waiving at all; the counter makes
+    # the waiver mean recycling rather than age; and the cold-worker rule stops
+    # a waived reading lowering an estimate. Removing all three does not survive,
+    # which is checked below.
+    "state: the recycled waiver fires on a quiet pool",
+    "state: the recycled waiver counts idle samples",
+    # The master note is keyed by pool directory in the FILENAME as well as
+    # re-checked inside. Either alone keeps a repair off another master.
+    "apply: the master note is not keyed by pool directory",
 }
 
 # (label, file, old, new)
@@ -89,6 +99,34 @@ MUTATIONS = [
     ("state: a single-worker pool is never measured",
      "state/state.go",
      "	sole := mature == 1 && ps.PeakWorkers <= 1", "	sole := false"),
+    ("state: a cold worker lowers the estimate",
+     "state/state.go",
+     "	if recycled && mature == 0 && peak <= ps.SizingBytes() {",
+     "	if false {"),
+    ("state: the recycled waiver fires on a quiet pool",
+     "state/state.go",
+     "	recycled := mature == 0 && worked &&",
+     "	recycled := mature == 0 &&"),
+    ("state: the recycled waiver is one-shot",
+     "state/state.go",
+     "	recycled := mature == 0 && worked &&",
+     "	recycled := mature == 0 && worked && ps.TypicalPeakBytes == 0 &&"),
+    ("apply: the master note is not keyed by pool directory",
+     "apply/remembered.go",
+     "	if filepath.Clean(ref.DropInDir) != filepath.Clean(dropInDir) {\n		return rememberedMasterRef{}\n	}\n",
+     ""),
+    ("serve: the daemon plans pools of a master it was not pointed at",
+     "serve/serve.go",
+     "	return ForMaster(targets, l.cfg.DropInDir, l.log), nil",
+     "	return targets, nil"),
+    ("cmd: a flag after a positional argument is discarded",
+     "cmd/fpm-tune/main.go",
+     "	if fs.NArg() == 0 {\n		return nil\n	}\n",
+     "	if true {\n		return nil\n	}\n"),
+    ("budget: a failed lookup is reported as an unlimited host",
+     "budget/budget.go",
+     "		limits.LookupErr = err\n\n		return limits",
+     "		_ = err\n\n		return limits"),
     ("state: the recycled waiver counts idle samples",
      "state/state.go",
      "		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived",
@@ -129,10 +167,11 @@ MUTATIONS = [
     ("observe: a cancelled discovery reports success",
      "observe/observe.go",
      "	if cerr := ctx.Err(); cerr != nil {\n		return nil, fmt.Errorf(\"discovery was interrupted: %w\", cerr)\n	}\n", ""),
-    ("serve: the counters are recorded before the plan",
-     "serve/serve.go",
-     "	// After the plan: the counters are what the NEXT round compares against, and\n	// storing them earlier made the comparison one against itself.\n	plan.RecordCounters(l.state, views)\n",
-     ""),
+    # MOVED before the plan, not deleted. Deleting it is caught for the wrong
+    # reason — the first round never records a counter at all, so the second has
+    # nothing to compare against, which is not the bug this names. The bug is
+    # the plan comparing a round's own reading against itself.
+    ("serve: the counters are recorded before the plan", "serve/serve.go", "@@MOVE@@", ""),
     ("apply: the sandbox validation is bypassed", "apply/apply.go", "@@FUNC@@validateSandboxed", ""),
     ("apply: the live tree is not validated after the write",
      "apply/apply.go",
@@ -148,7 +187,7 @@ MUTATIONS = [
      "apply/reconcile.go", "@@FUNC@@removeOursIfThatFixesIt", ""),
     ("apply: recovery cannot find php-fpm without a state file",
      "apply/reconcile.go",
-     "		master = master.filledFrom(rememberedMaster(opts.BackupDir))",
+     "		master = master.filledFrom(rememberedMaster(opts.BackupDir, master.DropInDir))",
      "		_ = rememberedMaster"),
     ("serve: the lock does not follow the directory being written",
      "serve/serve.go",
@@ -177,6 +216,20 @@ for label, path, old, new in MUTATIONS:
         head = src[i:src.index("{", i) + 1]
         shutil.copy(path, "/tmp/mut.bak")
         open(path, "w").write(src[:i] + head + "\n	return nil\n}\n" + src[j:])
+        r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+        shutil.copy("/tmp/mut.bak", path)
+        (survived if r.returncode == 0 else caught).append(label)
+        print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+        continue
+    if old == "@@MOVE@@":
+        block = ("	// After the plan: the counters are what the NEXT round compares against, and\n"
+                 "	// storing them earlier made the comparison one against itself.\n"
+                 "	plan.RecordCounters(l.state, views)\n")
+        anchor = "	plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)\n"
+        moved = src.replace(block, "", 1).replace(
+            anchor, anchor + "	plan.RecordCounters(l.state, views)\n", 1)
+        shutil.copy(path, "/tmp/mut.bak")
+        open(path, "w").write(moved)
         r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
         shutil.copy("/tmp/mut.bak", path)
         (survived if r.returncode == 0 else caught).append(label)
@@ -219,6 +272,24 @@ for label, path, old, new in MUTATIONS:
     else:
         caught.append(label)
         print(f"caught       {label}")
+
+# The recycled waiver, all three conditions removed together.
+src = open("state/state.go").read()
+shutil.copy("state/state.go", "/tmp/mut.bak")
+together = src
+for o, n in [
+    ("	recycled := mature == 0 && worked &&", "	recycled := mature == 0 &&"),
+    ("		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived",
+     "		ps.Samples >= opts.SamplesBeforeMaturityIsWaived"),
+    ("	if recycled && mature == 0 && peak <= ps.SizingBytes() {", "	if false {"),
+]:
+    together = together.replace(o, n, 1)
+open("state/state.go", "w").write(together)
+r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+shutil.copy("/tmp/mut.bak", "state/state.go")
+label = "state: every recycled-waiver guard removed together"
+(survived if r.returncode == 0 else caught).append(label)
+print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
 
 # The layers, removed together.
 src = open("allocate/allocate.go").read()

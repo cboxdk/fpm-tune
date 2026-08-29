@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -121,4 +123,47 @@ func capture(t *testing.T, fn func()) string {
 	}
 
 	return b.String()
+}
+
+// TestAStrayWordIsRefusedRatherThanIgnored.
+//
+// Go's flag package stops parsing at the first non-flag token and silently
+// discards everything after it. So `fpm-tune plan -state S www -memory 1G`
+// dropped -memory — the one flag whose whole purpose is to stop this tool
+// sizing against the wrong number — reported the entire machine's memory, and
+// exited 0 with nothing to notice.
+//
+// A pool name is the obvious thing to type at a pool-sizing tool. On `apply`
+// the same slip discards -memory, -reserve, -state and -drop-in-dir, and then
+// writes.
+func TestAStrayWordIsRefusedRatherThanIgnored(t *testing.T) {
+	for _, command := range []string{"plan", "apply", "serve"} {
+		t.Run(command, func(t *testing.T) {
+			fs := flag.NewFlagSet(command, flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			_ = fs.String("state", "", "")
+			memory := fs.String("memory", "", "")
+
+			if err := fs.Parse([]string{"-state", "s.json", "www", "-memory", "1G"}); err != nil {
+				t.Fatal(err)
+			}
+
+			// The state of affairs the guard exists for: parsing succeeded and
+			// -memory was thrown away.
+			if *memory != "" {
+				t.Skip("the flag package no longer stops at a positional argument")
+			}
+
+			err := noPositionalArgs(fs)
+			if err == nil {
+				t.Fatal("a stray word was accepted, and every flag after it silently ignored")
+			}
+			if !strings.Contains(err.Error(), "www") {
+				t.Errorf("the error does not name the argument that caused it: %v", err)
+			}
+			if !strings.Contains(err.Error(), "ignored") {
+				t.Errorf("the error does not say what happened to the other flags: %v", err)
+			}
+		})
+	}
 }

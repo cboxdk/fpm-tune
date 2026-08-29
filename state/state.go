@@ -607,16 +607,53 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// twenty scrapes earned the waiver without ever having been seen to recycle
 	// anything — so the first burst of four one-request workers at 80MiB was
 	// taken as the pool's cost against a 200MiB truth.
-	if mature == 0 && len(obs.Workers) > 0 {
+	if mature == 0 && len(obs.Workers) > 0 && worked {
 		ps.ImmatureRounds++
 	} else if mature > 0 {
 		ps.ImmatureRounds = 0
 	}
 
-	recycled := mature == 0 && ps.TypicalPeakBytes == 0 &&
+	// Once the pattern is EARNED it keeps applying, for as long as it holds.
+	//
+	// It used to require TypicalPeakBytes == 0, which made the waiver one-shot:
+	// the first waived reading set the estimate and every later reading was
+	// refused again, so a pool with pm.max_requests=10 went on being costed at
+	// whatever it happened to cost the day it was first seen. A deploy that made
+	// every worker 220MiB was invisible.
+	//
+	// But that condition was also doing real work, and dropping it alone opened
+	// the hole it was closing: a QUIET pool's workers have low request counts
+	// too, so the waiver started reading idle memory and a quiet night pulled an
+	// established estimate from 240MiB to 50MiB.
+	//
+	// `worked` is what separates them. A pool recycling its workers every ten
+	// requests is a pool serving twenty-five requests a second; a pool whose
+	// workers are young because nothing is asking anything of them is not. The
+	// counter is advanced only on rounds where the pool was busy AND produced no
+	// mature worker, which is the recycling signature and nothing else, and it
+	// resets the moment a mature worker appears.
+	recycled := mature == 0 && worked &&
 		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived
 
 	if mature < opts.MinMatureWorkers && !sole && !recycled {
+		return false
+	}
+
+	// A reading taken from workers that never matured may RAISE the estimate and
+	// never lower it.
+	//
+	// The waiver exists because a pool recycling every ten requests has no
+	// mature workers to offer and would otherwise be sized from a table. But a
+	// worker on its first or second request has not loaded the application yet,
+	// and at 100 requests a second that is most of what a scrape catches — so
+	// the readings are a mixture of warm workers and cold ones, and the cold
+	// ones are not evidence that the pool got cheaper. Measured: an established
+	// 240MiB pool fell to 50MiB across a night of exactly that.
+	//
+	// Upward is different. 2.75x the memory is real memory, whatever the worker
+	// has served, and a deploy that makes every worker more expensive is the
+	// case the waiver was added for.
+	if recycled && mature == 0 && peak <= ps.SizingBytes() {
 		return false
 	}
 

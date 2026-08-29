@@ -516,3 +516,111 @@ func TestTheRecycledWaiverIsEarnedByRecyclingNotByIdling(t *testing.T) {
 			"application yet, and its warm cost is more than twice that", got/mb)
 	}
 }
+
+// TestARecyclingPoolKeepsLearningAfterADeploy.
+//
+// The waiver that lets an always-recycling pool be measured required that
+// nothing had been measured yet, which made it one-shot: the first waived
+// reading set the estimate and every later reading was refused again. So a pool
+// with pm.max_requests=10 learned what it cost the day it was first seen, and
+// went on being costed at that for ever.
+//
+// A deploy is the case that matters. Workers that go from 80MiB to 220MiB are
+// 2.75x the memory, and the plan kept dividing the budget as though nothing had
+// changed — the exact under-measurement the waiver was added to prevent, one
+// deploy later.
+func TestARecyclingPoolKeepsLearningAfterADeploy(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	base := time.Now().Add(-4 * time.Hour)
+
+	var accepted int64
+	at := base
+	scrape := func(rss int64) {
+		accepted += 750 // 25 req/s across a 30s scrape
+		s.Learn(Observation{Pool: "churny", At: at, ActiveNow: 8, Accepted: accepted,
+			Workers: []WorkerSample{
+				// pm.max_requests = 10: nothing reaches the threshold of 20.
+				{RSSBytes: rss, Requests: 3},
+				{RSSBytes: rss - mb, Requests: 7},
+				{RSSBytes: rss, Requests: 1},
+			}}, opts)
+		at = at.Add(30 * time.Second)
+	}
+
+	for i := 0; i < 60; i++ {
+		scrape(80 * mb)
+	}
+	if got := s.Pools["churny"].SizingBytes(); got < 75*mb {
+		t.Fatalf("setup: the pool measured %dMiB, want about 80", got/mb)
+	}
+
+	// The deploy.
+	for i := 0; i < 60; i++ {
+		scrape(220 * mb)
+	}
+
+	if got := s.Pools["churny"].SizingBytes(); got < 200*mb {
+		t.Errorf("after a deploy made every worker 220MiB the pool is still costed at "+
+			"%dMiB; the estimate is frozen at whatever it cost the day it was first "+
+			"seen, and the budget is being divided as though nothing changed", got/mb)
+	}
+	// And still never trusted: nothing has established what it costs once warm.
+	if s.Pools["churny"].Trusted(opts) {
+		t.Error("a pool whose workers never mature was granted permission to be cut")
+	}
+}
+
+// TestAColdWorkerIsNotEvidenceThatAPoolGotCheaper.
+//
+// The waiver that measures an always-recycling pool reads workers that never
+// matured, and a worker on its first request has not loaded the application. At
+// twenty-five requests a second most of what a scrape catches is exactly that,
+// so the readings are a mixture of warm workers and cold ones — and the cold
+// ones are not evidence of anything except that a fork is cheap.
+//
+// Measured before this: an established 240MiB pool fell to 50MiB across a night
+// of nothing but recycled workers.
+func TestAColdWorkerIsNotEvidenceThatAPoolGotCheaper(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	at := time.Now().Add(-8 * time.Hour)
+
+	var accepted int64
+	learn := func(rss int64, requests int64, n int) {
+		for i := 0; i < n; i++ {
+			accepted += 3000
+			s.Learn(Observation{Pool: "churny", At: at, ActiveNow: 8, Accepted: accepted,
+				Workers: []WorkerSample{
+					{RSSBytes: rss, Requests: requests},
+					{RSSBytes: rss - mb, Requests: requests},
+				}}, opts)
+			at = at.Add(time.Minute)
+		}
+	}
+
+	// Established properly, from warm workers.
+	learn(240*mb, 500, 20)
+	settled := s.Pools["churny"].SizingBytes()
+	if settled < 230*mb {
+		t.Fatalf("setup: settled at %dMiB", settled/mb)
+	}
+
+	// Then hours of nothing but freshly forked workers.
+	learn(12*mb, 1, 200)
+
+	if got := s.Pools["churny"].SizingBytes(); got < settled/2 {
+		t.Errorf("readings from workers that had served one request took the estimate "+
+			"from %dMiB to %dMiB; those workers had not loaded the application, and the "+
+			"morning finds the pool sized for workers that do not exist",
+			settled/mb, got/mb)
+	}
+
+	// And a real rise is still believed, from workers just as young.
+	learn(700*mb, 2, 3)
+	if got := s.Pools["churny"].SizingBytes(); got < 700*mb {
+		t.Errorf("a 700MiB worker was ignored for being young: sizing = %dMiB. Upward is "+
+			"real memory whatever the worker has served, and refusing it is how a host "+
+			"is committed past what it has", got/mb)
+	}
+}
