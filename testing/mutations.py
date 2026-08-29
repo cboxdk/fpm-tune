@@ -14,13 +14,62 @@ nothing about the rule under test. Prepending a plain write to an atomic-write
 function leaves the rename in place, so the inode still changes. A mutation that
 does not actually remove the behaviour is a false pass.
 
+Every mutation is applied to the REAL working tree and undone afterwards. That
+is what makes it honest — it runs the tests you actually have against the code
+you actually shipped — and it is also its one hazard: an interruption between
+applying and restoring leaves a safety guard removed. One was, by a timeout
+while this was being written, and it was nearly committed. So the restore is
+registered the moment a file is touched and runs on exit, exception, Ctrl-C and
+kill alike. Check `git status` after an interrupted run anyway.
+
 Run from the repo root:
 
     python3 testing/mutations.py
 
-Exits non-zero if any guard survives.
+Exits non-zero if any guard survives, or if a mutation no longer matches.
 """
-import subprocess, sys, shutil, os
+import atexit
+import os
+import shutil
+import signal
+import subprocess
+import sys
+
+# Every mutation is applied to the real working tree, so an interruption between
+# applying one and restoring it leaves the repo mutated — and a mutation is by
+# construction a safety guard removed. One was left behind by a timeout while
+# this was being written, and it was nearly committed: the daemon silently
+# stopped publishing why it could not apply.
+#
+# So the restore is registered the moment a file is touched, and runs on a
+# normal exit, an exception, Ctrl-C and a kill alike.
+_pending = {}
+
+
+def _restore_all(*_):
+    for target, backup in list(_pending.items()):
+        shutil.copy(backup, target)
+        _pending.pop(target, None)
+
+
+atexit.register(_restore_all)
+for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_sig, lambda s, f: (_restore_all(), sys.exit(130)))
+
+
+def stash(path):
+    """Back a file up and arrange for it to come back whatever happens."""
+    backup = "/tmp/mut-" + path.replace("/", "_") + ".bak"
+    shutil.copy(path, backup)
+    _pending[path] = backup
+
+    return backup
+
+
+def unstash(path):
+    backup = _pending.pop(path, None)
+    if backup:
+        shutil.copy(backup, path)
 
 # Run from wherever, against the repo this file lives in.
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,7 +89,8 @@ LAYERED = {
     # the waiver mean recycling rather than age; and the cold-worker rule stops
     # a waived reading lowering an estimate. Removing all three does not survive,
     # which is checked below.
-    "state: the recycled waiver fires on a quiet pool",
+    "state: a low-rate recycling pool is never measured",
+    "state: a low-rate recycling pool never earns the waiver",
     "state: the recycled waiver counts idle samples",
     # The master note is keyed by pool directory in the FILENAME as well as
     # re-checked inside. Either alone keeps a repair off another master.
@@ -102,14 +152,18 @@ MUTATIONS = [
      "state/state.go",
      "	if recycled && mature == 0 && peak <= ps.SizingBytes() {",
      "	if false {"),
-    ("state: the recycled waiver fires on a quiet pool",
-     "state/state.go",
-     "	recycled := mature == 0 && worked &&",
-     "	recycled := mature == 0 &&"),
     ("state: the recycled waiver is one-shot",
      "state/state.go",
-     "	recycled := mature == 0 && worked &&",
-     "	recycled := mature == 0 && worked && ps.TypicalPeakBytes == 0 &&"),
+     "	recycled := mature == 0 && servedSomething &&",
+     "	recycled := mature == 0 && servedSomething && ps.TypicalPeakBytes == 0 &&"),
+    ("state: a low-rate recycling pool is never measured",
+     "state/state.go",
+     "	recycled := mature == 0 && servedSomething &&",
+     "	recycled := mature == 0 && worked &&"),
+    ("state: a low-rate recycling pool never earns the waiver",
+     "state/state.go",
+     "	if mature == 0 && len(obs.Workers) > 0 && servedSomething {",
+     "	if mature == 0 && len(obs.Workers) > 0 && worked {"),
     ("state: a scoped daemon forgets another master's pools",
      "state/state.go",
      '		if scope != "" && ps.MasterConfig != scope {\n			continue\n		}\n', ""),
@@ -233,6 +287,32 @@ MUTATIONS = [
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")
+
+
+def suite_fails(path):
+    """Run the tests and report whether the mutation in `path` was caught.
+
+    The mutated package's OWN tests first, with -failfast: most guards are held
+    by a test beside them, and stopping there turns a full-suite run into a
+    fraction of one. Catching is catching, whoever catches it.
+
+    Only when its own package stays green does the whole suite run, because the
+    interesting mutations are exactly the ones another package holds — state's
+    rules are caught by plan's tests, serve's ordering by its own, and the
+    allocator's layers by a sweep three packages away.
+    """
+    pkg = "./" + os.path.dirname(path) if os.path.dirname(path) else "./..."
+    if pkg != "./...":
+        r = subprocess.run(["go", "test", "-failfast", "-count=1", pkg],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            return True
+
+    r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+
+    return r.returncode != 0
+
+
 survived, caught, broken = [], [], []
 
 for label, path, old, new in MUTATIONS:
@@ -245,12 +325,12 @@ for label, path, old, new in MUTATIONS:
         i = src.index("func " + name + "(")
         j = src.index("\n}", src.index("{", i)) + 2
         head = src[i:src.index("{", i) + 1]
-        shutil.copy(path, "/tmp/mut.bak")
+        stash(path)
         open(path, "w").write(src[:i] + head + "\n	return nil\n}\n" + src[j:])
-        r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-        shutil.copy("/tmp/mut.bak", path)
-        (survived if r.returncode == 0 else caught).append(label)
-        print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+        failed = suite_fails(path)
+        unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
         continue
     if old == "@@MOVE@@":
         block = ("	// After the plan: the counters are what the NEXT round compares against, and\n"
@@ -259,55 +339,55 @@ for label, path, old, new in MUTATIONS:
         anchor = "	plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)\n"
         moved = src.replace(block, "", 1).replace(
             anchor, anchor + "	plan.RecordCounters(l.state, views)\n", 1)
-        shutil.copy(path, "/tmp/mut.bak")
+        stash(path)
         open(path, "w").write(moved)
-        r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-        shutil.copy("/tmp/mut.bak", path)
-        (survived if r.returncode == 0 else caught).append(label)
-        print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+        failed = suite_fails(path)
+        unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
         continue
     if old == "@@CMP@@":
         i = src.index("		sort.SliceStable(cands, func(a, b int) bool {")
         j = src.index("		})", i) + 4
-        shutil.copy(path, "/tmp/mut.bak")
+        stash(path)
         open(path, "w").write(src[:i] +
             "		sort.SliceStable(cands, func(a, b int) bool { return cands[a].gap > cands[b].gap })\n" + src[j:])
-        r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-        shutil.copy("/tmp/mut.bak", path)
-        (survived if r.returncode == 0 else caught).append(label)
-        print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+        failed = suite_fails(path)
+        unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
         continue
     if old.startswith("@@BODY@@"):
         name = old[len("@@BODY@@"):]
         i = src.index("func (s *State) " + name + "(")
         i = src.index("	tmp, err := os.CreateTemp(", i)
         j = src.index("\n	return nil\n}", i)
-        shutil.copy(path, "/tmp/mut.bak")
+        stash(path)
         open(path, "w").write(src[:i] + "	if err := os.WriteFile(path, data, 0o644); err != nil {\n		return err\n	}\n" + src[j:])
-        r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-        shutil.copy("/tmp/mut.bak", path)
-        (survived if r.returncode == 0 else caught).append(label)
-        print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+        failed = suite_fails(path)
+        unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
         continue
     if old not in src:
         broken.append(label)
         print(f"?? NO MATCH  {label}")
         continue
-    shutil.copy(path, "/tmp/mut.bak")
+    stash(path)
     open(path, "w").write(src.replace(old, new, 1))
-    r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-    shutil.copy("/tmp/mut.bak", path)
-    if r.returncode == 0:
-        survived.append(label)
-        print(f"SURVIVED     {label}")
-    else:
+    failed = suite_fails(path)
+    unstash(path)
+    if failed:
         caught.append(label)
         print(f"caught       {label}")
+    else:
+        survived.append(label)
+        print(f"SURVIVED     {label}")
 
 # The master note's two layers, removed together: the keyed filename and the
 # payload re-check. Either alone keeps a repair off another master.
 src = open("apply/remembered.go").read()
-shutil.copy("apply/remembered.go", "/tmp/mut.bak")
+stash("apply/remembered.go")
 together = src
 for o, n in [
     ('	return hex.EncodeToString(sum[:4]) + "-master.json"', '	_ = sum\n\n	return "master.json"'),
@@ -316,17 +396,17 @@ for o, n in [
     together = together.replace(o, n, 1)
 open("apply/remembered.go", "w").write(together)
 r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-shutil.copy("/tmp/mut.bak", "apply/remembered.go")
+unstash("apply/remembered.go")
 label = "apply: both master-note layers removed together"
 (survived if r.returncode == 0 else caught).append(label)
 print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
 
 # The recycled waiver, all three conditions removed together.
 src = open("state/state.go").read()
-shutil.copy("state/state.go", "/tmp/mut.bak")
+stash("state/state.go")
 together = src
 for o, n in [
-    ("	recycled := mature == 0 && worked &&", "	recycled := mature == 0 &&"),
+    ("	recycled := mature == 0 && servedSomething &&", "	recycled := mature == 0 &&"),
     ("		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived",
      "		ps.Samples >= opts.SamplesBeforeMaturityIsWaived"),
     ("	if recycled && mature == 0 && peak <= ps.SizingBytes() {", "	if false {"),
@@ -334,14 +414,14 @@ for o, n in [
     together = together.replace(o, n, 1)
 open("state/state.go", "w").write(together)
 r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-shutil.copy("/tmp/mut.bak", "state/state.go")
+unstash("state/state.go")
 label = "state: every recycled-waiver guard removed together"
 (survived if r.returncode == 0 else caught).append(label)
 print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
 
 # The layers, removed together.
 src = open("allocate/allocate.go").read()
-shutil.copy("allocate/allocate.go", "/tmp/mut.bak")
+stash("allocate/allocate.go")
 together = src
 for o, n in [
     ("if unwritableNeed+writableMinimum > allocatable {", "if unwritableNeed >= allocatable {"),
@@ -353,7 +433,7 @@ for o, n in [
     together = together.replace(o, n, 1)
 open("allocate/allocate.go", "w").write(together)
 r = subprocess.run(["go", "test", "./allocate/"], capture_output=True, text=True, env=env)
-shutil.copy("/tmp/mut.bak", "allocate/allocate.go")
+unstash("allocate/allocate.go")
 if r.returncode == 0:
     survived.append("allocate: EVERY budget guard removed together")
     print("SURVIVED     allocate: EVERY budget guard removed together")

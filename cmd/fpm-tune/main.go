@@ -326,6 +326,20 @@ func runApply(args []string) error {
 		return err
 	}
 
+	// The same contradiction `serve --apply --no-learn` is refused for, and it
+	// bites harder here because a single run looks like it worked.
+	//
+	// -no-learn suppresses the save, and the save is what carries LastAppliedAt
+	// — the record hysteresis reads to refuse a reload within five minutes of
+	// the last one. So every `apply --no-learn` was free to reload a pool the
+	// previous one had just reloaded, on a busy host, indefinitely.
+	if *c.noLearn && !*dryRun {
+		return errors.New("-no-learn cannot be used with apply: applying has to record " +
+			"what it wrote, or the next run reloads the pool this one just reloaded. Use " +
+			"-dry-run to see what would happen without recording anything, or drop " +
+			"-no-learn")
+	}
+
 	log := newLogger(*c.verbose)
 
 	// Held for the whole command. Without it an interactive apply and a running

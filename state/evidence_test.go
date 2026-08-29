@@ -707,3 +707,40 @@ func TestAClockCorrectionDoesNotReleaseTheReloadBrake(t *testing.T) {
 		t.Errorf("LastAppliedAt is still in the future: %v", ps.LastAppliedAt)
 	}
 }
+
+// TestALowTrafficRecyclingPoolIsMeasuredToo.
+//
+// The waiver required the pool to clear the DECAY threshold — one request a
+// second — before its immature workers were read. That is the wrong bar. A pool
+// at half a request a second with pm.max_requests=10 recycles just as
+// thoroughly, and was never measured at all: profile guess for ever, which is
+// exactly the under-measurement the waiver exists to fix.
+//
+// The rate gate is about whether a SMALLER reading is believable, and a waived
+// reading can only raise. Gating it on the rate bought nothing and cost every
+// low-traffic pool.
+func TestALowTrafficRecyclingPoolIsMeasuredToo(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	at := time.Now().Add(-6 * time.Hour)
+
+	var accepted int64
+	for i := 0; i < 120; i++ {
+		accepted += 15 // 0.5 req/s across a 30s scrape
+		s.Learn(Observation{Pool: "small", At: at, ActiveNow: 1, Accepted: accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 200 * mb, Requests: 3},
+				{RSSBytes: 198 * mb, Requests: 7},
+			}}, opts)
+		at = at.Add(30 * time.Second)
+	}
+
+	ps := s.Pools["small"]
+	if ps == nil || ps.SizingBytes() < 190*mb {
+		t.Fatalf("a pool recycling every ten requests at half a request a second measured "+
+			"nothing across six hours: %v — the host is budgeted for it from a table", ps)
+	}
+	if ps.Trusted(opts) {
+		t.Errorf("confidence %.2f from a pool whose workers never warm up", ps.Confidence(opts))
+	}
+}

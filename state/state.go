@@ -589,6 +589,10 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// placed where the wrong answer wastes memory instead of losing it.
 	effort := workRatio(ps, obs, opts, since)
 	worked := effort >= 1
+
+	// Did it serve ANYTHING, which is a different and much lower bar than
+	// "was it working hard enough for a smaller reading to be believed".
+	servedSomething := effort > 0
 	ps.LastAccepted = obs.Accepted
 
 	// Learned before it is used, so the cadence tracks a changing interval and a
@@ -664,7 +668,18 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// twenty scrapes earned the waiver without ever having been seen to recycle
 	// anything — so the first burst of four one-request workers at 80MiB was
 	// taken as the pool's cost against a 200MiB truth.
-	if mature == 0 && len(obs.Workers) > 0 && worked {
+	// Counted on any round where the pool SERVED something and produced no
+	// mature worker, which is the recycling signature.
+	//
+	// It used to require `worked` — the decay threshold, one request a second —
+	// and that is the wrong bar here. A pool at half a request a second with
+	// pm.max_requests=10 recycles just as thoroughly and was never measured at
+	// all, so it kept the profile's guess for ever, which is the exact
+	// under-measurement the waiver exists to fix. The rate gate is about whether
+	// a SMALLER reading is believable, and a waived reading can only ever raise
+	// the estimate — so gating it on the rate buys nothing and costs every
+	// low-traffic pool.
+	if mature == 0 && len(obs.Workers) > 0 && servedSomething {
 		ps.ImmatureRounds++
 	} else if mature > 0 {
 		ps.ImmatureRounds = 0
@@ -689,7 +704,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// counter is advanced only on rounds where the pool was busy AND produced no
 	// mature worker, which is the recycling signature and nothing else, and it
 	// resets the moment a mature worker appears.
-	recycled := mature == 0 && worked &&
+	recycled := mature == 0 && servedSomething &&
 		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived
 
 	if mature < opts.MinMatureWorkers && !sole && !recycled {
