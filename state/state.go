@@ -144,6 +144,11 @@ type PoolState struct {
 	// of it was.
 	TypicalIntervalSeconds float64 `json:"typical_interval_seconds,omitempty"`
 
+	// MissedRounds counts consecutive rounds in which this pool was not among
+	// the ones discovered, so a transient discovery failure does not delete a
+	// week of learning.
+	MissedRounds int `json:"missed_rounds,omitempty"`
+
 	// PeakWorkers is the most workers this pool has had busy at once, as
 	// remembered by us rather than by PHP-FPM.
 	//
@@ -289,6 +294,12 @@ type Options struct {
 	// budget.
 	MinRequestsPerSecondToDecay float64
 
+	// SamplesBeforeMaturityIsWaived is how long a pool may teach this tool
+	// nothing before its immature workers are read anyway. A configuration that
+	// recycles workers faster than they can mature is otherwise a permanent
+	// blind spot, and a guess is worse evidence than a young worker.
+	SamplesBeforeMaturityIsWaived int
+
 	// MaxDecayGap is how long a hole in the observations may be before a smaller
 	// reading is refused as evidence. A gap is missing information, not proof a
 	// pool got cheaper, and the rate above averaged across it cannot tell a busy
@@ -322,6 +333,9 @@ func (o Options) Defaults() Options {
 		// is idle memory. High enough to exclude monitoring and crawler traffic,
 		// low enough that a genuinely small site still teaches this anything.
 		o.MinRequestsPerSecondToDecay = 1
+	}
+	if o.SamplesBeforeMaturityIsWaived <= 0 {
+		o.SamplesBeforeMaturityIsWaived = 20
 	}
 	if o.MaxDecayGap <= 0 {
 		o.MaxDecayGap = 12 * time.Hour
@@ -545,7 +559,22 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// the same as earning permission to cut it, and letting one worker do the
 	// second job would size an ondemand pool at two.
 	sole := mature == 1 && ps.PeakWorkers <= 1
-	if mature < opts.MinMatureWorkers && !sole {
+
+	// And a pool whose workers are recycled before they can ever mature.
+	//
+	// pm.max_requests at or below the maturity threshold means no worker ever
+	// reaches it. Measured across a full weekday at up to 25 requests a second:
+	// at pm.max_requests = 20 a fully loaded pool learned from 0 of 2880
+	// scrapes, and at 15 and 10 the same. It fell back to the 48MiB profile
+	// against a 120MiB truth, permanently — the same blind spot as the
+	// single-worker pool, arrived at from the other side.
+	//
+	// Waived only after a long stretch of learning nothing at all, so an
+	// ordinary pool's first few scrapes are still held to the real gate.
+	recycled := mature == 0 && ps.TypicalPeakBytes == 0 &&
+		ps.Samples >= opts.SamplesBeforeMaturityIsWaived
+
+	if mature < opts.MinMatureWorkers && !sole && !recycled {
 		return false
 	}
 
@@ -827,16 +856,39 @@ func (s *State) Forget(current []string) []string {
 	}
 
 	var dropped []string
-	for name := range s.Pools {
-		if !keep[name] {
-			dropped = append(dropped, name)
-			delete(s.Pools, name)
+	for name, ps := range s.Pools {
+		if keep[name] {
+			ps.MissedRounds = 0
+
+			continue
 		}
+
+		// Missing from ONE round is not the same as gone.
+		//
+		// Discovery skips a master whose configuration it cannot parse rather
+		// than failing the round, so a single transient `php-fpm -tt` error on a
+		// host running two PHP versions made every pool of one of them
+		// disappear — and a week of learning went with it. The direction was
+		// safe, since a forgotten pool reverts to its configured ceiling and the
+		// profile guess, but it is a week of learning either way.
+		//
+		// A site that really is removed is still forgotten, a few rounds later.
+		ps.MissedRounds++
+		if ps.MissedRounds < forgetAfterMissedRounds {
+			continue
+		}
+
+		dropped = append(dropped, name)
+		delete(s.Pools, name)
 	}
 	sort.Strings(dropped)
 
 	return dropped
 }
+
+// forgetAfterMissedRounds is how many consecutive rounds a pool may be absent
+// before its baseline is discarded.
+const forgetAfterMissedRounds = 5
 
 // Names returns the pools in the store, sorted, so output is stable.
 func (s *State) Names() []string {

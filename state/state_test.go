@@ -482,13 +482,25 @@ func TestSaveCreatesItsDirectory(t *testing.T) {
 
 // TestForgetDropsRemovedPools: a host that has had sites come and go for years
 // should not carry every one of them forever.
+//
+// After several consecutive rounds, not the first. Discovery skips a master
+// whose configuration it cannot parse rather than failing the round, so one
+// transient `php-fpm -tt` error on a host running two PHP versions used to make
+// every pool of one of them disappear — and a week of learning with it.
 func TestForgetDropsRemovedPools(t *testing.T) {
 	s := New()
 	for _, name := range []string{"kept-a", "kept-b", "removed"} {
 		s.Learn(busyObs(name, time.Now()), Options{})
 	}
 
-	dropped := s.Forget([]string{"kept-a", "kept-b"})
+	var dropped []string
+	for i := 0; i < forgetAfterMissedRounds; i++ {
+		if _, still := s.Pools["removed"]; !still {
+			t.Fatalf("the pool was forgotten after %d rounds of absence; a discovery "+
+				"failure lasting one round costs a week of learning", i)
+		}
+		dropped = s.Forget([]string{"kept-a", "kept-b"})
+	}
 
 	if len(dropped) != 1 || dropped[0] != "removed" {
 		t.Errorf("dropped = %v, want [removed]", dropped)
@@ -498,6 +510,32 @@ func TestForgetDropsRemovedPools(t *testing.T) {
 	}
 	if len(s.Pools) != 2 {
 		t.Errorf("%d pools remain, want 2", len(s.Pools))
+	}
+}
+
+// TestATransientDiscoveryFailureDoesNotForget: a pool that comes back has its
+// absence counter cleared, so an intermittent failure never accumulates its way
+// to a deletion.
+func TestATransientDiscoveryFailureDoesNotForget(t *testing.T) {
+	s := New()
+	for _, name := range []string{"a", "b"} {
+		s.Learn(busyObs(name, time.Now()), Options{})
+	}
+
+	for i := 0; i < 20; i++ {
+		// b vanishes every other round, the way a master that intermittently
+		// fails to parse does.
+		if i%2 == 0 {
+			s.Forget([]string{"a"})
+
+			continue
+		}
+		s.Forget([]string{"a", "b"})
+	}
+
+	if _, still := s.Pools["b"]; !still {
+		t.Error("a pool that was present in half the rounds was forgotten; an " +
+			"intermittent discovery failure should not add up to a deletion")
 	}
 }
 

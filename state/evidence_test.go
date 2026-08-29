@@ -364,3 +364,68 @@ func TestAPoolThatHasRunTwoWorkersStillNeedsTwo(t *testing.T) {
 			"left mid-recycle: %dMiB to %dMiB", before/mb, got/mb)
 	}
 }
+
+// TestAPoolThatRecyclesItsWorkersFastIsStillMeasured.
+//
+// pm.max_requests at or below the maturity threshold means no worker ever
+// reaches it. Measured across a full weekday at up to 25 requests a second: at
+// pm.max_requests = 20 a fully loaded pool learned from 0 of 2880 scrapes, and
+// the same at 15 and 10. It fell back to a 48MiB profile guess against a 120MiB
+// truth, permanently — the same blind spot as a pool that never runs two
+// workers, reached from the other side.
+//
+// A young worker is worse evidence than an old one. It is much better evidence
+// than a table.
+func TestAPoolThatRecyclesItsWorkersFastIsStillMeasured(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	base := time.Now().Add(-4 * time.Hour)
+
+	var accepted int64
+	for i := 0; i < 100; i++ {
+		accepted += 750 // 25 req/s
+		s.Learn(Observation{Pool: "churny", At: base.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 8, Accepted: accepted,
+			Workers: []WorkerSample{
+				// pm.max_requests = 10: nothing ever reaches the threshold of 20.
+				{RSSBytes: 120 * mb, Requests: 3},
+				{RSSBytes: 118 * mb, Requests: 7},
+				{RSSBytes: 121 * mb, Requests: 1},
+			}}, opts)
+	}
+
+	ps := s.Pools["churny"]
+	if ps == nil || ps.SizingBytes() < 110*mb {
+		t.Fatalf("a fully loaded pool recycling its workers every 10 requests measured "+
+			"nothing across four hours: %v", ps)
+	}
+
+	// Still not trusted: it has never produced a mature worker, so nothing has
+	// established what it costs once warm.
+	if ps.Trusted(opts) {
+		t.Errorf("confidence %.2f from a pool whose workers never warm up", ps.Confidence(opts))
+	}
+}
+
+// TestTheMaturityGateStillHoldsAtFirst: the waiver is for a pool that has proved
+// over time that it cannot produce a mature worker, not for the first few
+// scrapes of an ordinary one starting up.
+func TestTheMaturityGateStillHoldsAtFirst(t *testing.T) {
+	opts := Options{}.Defaults()
+	s := New()
+	base := time.Now().Add(-time.Hour)
+
+	for i := 0; i < 5; i++ {
+		s.Learn(Observation{Pool: "starting", At: base.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 2, Accepted: int64(100 * (i + 1)),
+			Workers: []WorkerSample{
+				{RSSBytes: 20 * mb, Requests: 2}, {RSSBytes: 22 * mb, Requests: 1},
+			}}, opts)
+	}
+
+	if got := s.Pools["starting"].SizingBytes(); got > 0 {
+		t.Errorf("a pool five scrapes old was sized at %dMiB from workers that have "+
+			"served two requests; those workers have not loaded the application yet",
+			got/mb)
+	}
+}
