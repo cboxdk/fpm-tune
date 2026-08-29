@@ -562,6 +562,12 @@ func (l *Loop) Metrics() *metrics.Collectors { return l.metrics }
 func (l *Loop) State() *state.State { return l.state }
 
 // MasterPIDOf picks the master serving these pools, for budget detection.
+// discoverMasters is the process-table scan, indirected so the rules built on
+// top of it can be tested. Which master is picked on a host running several, and
+// what happens when none is running, are decisions with consequences — and both
+// were reachable only by having php-fpm installed in the right shape.
+var discoverMasters = phpfpm.DiscoverMasters
+
 func MasterPIDOf(views []observe.PoolView) int {
 	for _, v := range views {
 		if v.Target.PID > 0 {
@@ -611,7 +617,7 @@ func MasterFromMemory(dropInDir string, remembered state.MasterRef, log *slog.Lo
 }
 
 func masterOnHost(dropInDir string, remembered *state.MasterRef, log *slog.Logger) (apply.Master, error) {
-	masters, err := phpfpm.DiscoverMasters(log)
+	masters, err := discoverMasters(log)
 	if err != nil {
 		return apply.Master{}, fmt.Errorf("cannot scan for PHP-FPM masters: %w", err)
 	}

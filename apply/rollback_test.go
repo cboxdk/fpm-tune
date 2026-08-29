@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -232,4 +233,60 @@ func rejectsAndSeals(t *testing.T, configPath, sealDir string) string {
 	}
 
 	return path
+}
+
+// TestTheDropInIsReplacedByARenameNotARewrite.
+//
+// "Indivisible" is a claim about the write, not about the layout. php-fpm globs
+// the pool directory and reads whatever it finds; a rewrite in place means a
+// reload landing mid-write reads half a file, and a crash mid-write leaves one
+// permanently. A rename makes the change a single step: the old file or the new
+// one, never part of either.
+//
+// The test that carried this claim asserted that both pools ended up in one
+// file, which is a fact about Render. Replacing writeAtomic with a plain
+// os.WriteFile left the package green.
+//
+// Checked by inode, because that is the only observable difference: a rename
+// installs a new file over the name, an in-place rewrite keeps the same one.
+func TestTheDropInIsReplacedByARenameNotARewrite(t *testing.T) {
+	dir := t.TempDir()
+	path := DropInPath(dir)
+
+	if err := writeAtomic(path, Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 5}})); err != nil {
+		t.Fatal(err)
+	}
+	before := inodeOf(t, path)
+
+	if err := writeAtomic(path, Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 9}})); err != nil {
+		t.Fatal(err)
+	}
+	if after := inodeOf(t, path); after == before {
+		t.Error("the second write kept the same inode: the file was rewritten in place, " +
+			"so a reload landing mid-write reads half a configuration and a crash leaves " +
+			"one on disk")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "pm.max_children = 9") {
+		t.Errorf("the new content did not land:\n%s", got)
+	}
+}
+
+func inodeOf(t *testing.T, path string) uint64 {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no inode available on this platform")
+	}
+
+	return uint64(sys.Ino)
 }
