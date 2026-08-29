@@ -15,10 +15,17 @@
 #   - the reload was refused because the master was pid 1
 #   - the master was reported dead when the signal had never been sent
 #
-# NOT proven here: that a change set php-fpm rejects never reaches the live
-# directory. That needs a state where this tool has already written and the
-# world has moved underneath it, which is what chaos.sh sets up — its
-# removed-site scenario reaches the guard and this suite cannot.
+# NOT proven by either suite, and worth saying plainly rather than pointing
+# somewhere it is not: that a change set php-fpm rejects never reaches the live
+# directory. chaos.sh's removed-site scenario looks like it covers this and does
+# not — there the rejection comes from a file that is already on disk, discovery
+# fails, and Apply is never called, so no change set is ever rendered. Bypassing
+# the sandbox validation or the post-write validation individually leaves both
+# suites green.
+#
+# Reaching it needs this tool to render something php-fpm refuses, which its own
+# arithmetic will not do. It is covered in Go, against a stub php-fpm that
+# rejects on cue, by the tests in apply/.
 #
 # Usage: testing/e2e.sh /path/to/fpm-tune
 set -euo pipefail
@@ -108,7 +115,10 @@ if command -v md5sum >/dev/null; then
 # and call it the general one.
 SCOPE=(--drop-in-dir "$POOLS")
 
-fingerprint() { md5sum "$POOLS"/*.conf | sort; }
+# Every entry, not just *.conf. A leaked ".zz-fpm-tune.conf.tmp-XXXX" from an
+# interrupted atomic write is exactly the kind of thing this should catch, and a
+# glob on *.conf cannot see it.
+fingerprint() { ls -A "$POOLS"; md5sum "$POOLS"/* 2>/dev/null | sort; }
 else
   # Passed to every invocation. A development machine, or any host serving several
 # sites, genuinely runs more than one php-fpm master — this one has Herd's two
@@ -117,7 +127,7 @@ else
 # and call it the general one.
 SCOPE=(--drop-in-dir "$POOLS")
 
-fingerprint() { md5 -r "$POOLS"/*.conf | sort; }
+fingerprint() { ls -A "$POOLS"; md5 -r "$POOLS"/* 2>/dev/null | sort; }
 fi
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -129,6 +139,25 @@ BEFORE="$(fingerprint)"
   --state "$STATE/state.json" --backup-dir "$ROOT/backup" > "$ROOT/dry.out" 2>&1 || true
 [ "$(fingerprint)" = "$BEFORE" ] || fail "the dry run modified the pool directory"
 grep -q "Dry run" "$ROOT/dry.out" || fail "the dry run did not report itself"
+
+# And a dry run against a tree php-fpm will not accept must FAIL rather than
+# report a clean rendering — the check that distinguishes a dry run that
+# validated from one that only rendered.
+printf '[dry-broken]\n; no listen, no user\n' > "$POOLS/zz-dry-broken.conf"
+if "$FPM" -t --fpm-config "$ROOT/php-fpm.conf" >/dev/null 2>&1; then
+  echo "  (this php-fpm accepts a pool with no listen; skipping the validation probe)"
+else
+  BEFORE="$(fingerprint)"
+  if "$BIN" apply --dry-run --memory 512MB --reserve 128MB "${SCOPE[@]}" \
+       --state "$STATE/state.json" --backup-dir "$ROOT/backup" > "$ROOT/dry2.out" 2>&1; then
+    rm -f "$POOLS/zz-dry-broken.conf"
+    fail "a dry run against a configuration php-fpm rejects reported success:$(printf '\n')$(cat "$ROOT/dry2.out")"
+  fi
+  [ "$(fingerprint)" = "$BEFORE" ] \
+    || { rm -f "$POOLS/zz-dry-broken.conf"; fail "the failing dry run changed the pool directory"; }
+  echo "  confirmed: a dry run validates, and still writes nothing when it fails"
+fi
+rm -f "$POOLS/zz-dry-broken.conf"
 
 # ---------------------------------------------------------------------------
 echo "--- a real apply must reload the master without restarting it"
@@ -216,19 +245,37 @@ $(cat "$OUT")"
 
 echo "  confirmed: refused by name, and neither directory was touched"
 
-echo "--- a second run must be refused while the first holds the lock"
-"$BIN" serve --state "$STATE/state.json" --interval 60s --metrics "" \
+echo "--- a second writer must be refused while a daemon holds the pool directory"
+#
+# --apply, and a DIFFERENT state file and backup directory for the second run.
+#
+# Without --apply the daemon takes only the state lock, and with both runs
+# sharing --state that is the lock being tested — which is not the one that
+# matters. The lock that stops two processes writing the same pool files is
+# keyed on the pool DIRECTORY, and it has to hold when someone points a second
+# run at their own state and backups, because that is what an operator does when
+# the first one seems stuck.
+"$BIN" serve --apply --state "$STATE/state.json" --interval 60s --metrics "" \
   --backup-dir "$ROOT/backup" "${SCOPE[@]}" \
   > "$ROOT/serve.out" 2>&1 &
 SERVE=$!
-sleep 2
-if "$BIN" apply --memory 512MB --state "$STATE/state.json" "${SCOPE[@]}" \
-     --backup-dir "$ROOT/backup" > "$ROOT/second.out" 2>&1; then
+sleep 3
+# A different state DIRECTORY, not just a different file: the state lock is
+# keyed on the directory, so sharing it would test that lock instead of the one
+# this scenario is named for.
+mkdir -p "$ROOT/other-state"
+if "$BIN" apply --memory 512MB --state "$ROOT/other-state/state.json" "${SCOPE[@]}" \
+     --backup-dir "$ROOT/other-backup" > "$ROOT/second.out" 2>&1; then
   kill $SERVE 2>/dev/null || true
-  fail "a second run took the lock while a daemon held it"
+  fail "a second writer took the pool directory while a daemon held it, with its own
+state file and backup directory:$(printf '\n')$(cat "$ROOT/second.out")"
 fi
-grep -qi "already running" "$ROOT/second.out" \
+# The POOL DIRECTORY's lock by name, so a refusal from the state lock — which
+# is a different guarantee and was what this used to be measuring — cannot pass
+# for this one.
+grep -q "apply.lock" "$ROOT/second.out" \
   || { kill $SERVE 2>/dev/null || true; fail "the refusal did not say why:$(printf '\n')$(cat "$ROOT/second.out")"; }
+echo "  confirmed: refused with $(head -1 "$ROOT/second.out")"
 kill $SERVE 2>/dev/null || true
 wait $SERVE 2>/dev/null || true
 

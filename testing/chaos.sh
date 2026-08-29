@@ -98,14 +98,30 @@ kill -USR2 "$(cat "$ROOT/fpm.pid")"
 sleep 1
 
 "$BIN" apply "${SCOPE[@]}" > "$ROOT/a2" 2>&1 || fail "apply after a pool appeared: $(cat "$ROOT/a2")"
-grep -q "news" "$POOLS/zz-fpm-tune.conf" || echo "  (news not overridden yet; it has no demand history)"
+# An assertion, not a note. This printed either way, which made it the only
+# check for "a pool added mid-flight is handled" and no check at all.
+#
+# The outcome TABLE is the right thing to look at: a pool appears there whether
+# or not it has enough history to be overridden, so this is stable while the
+# stronger claim — that it is written — is not.
+grep -q "news" "$ROOT/a2" \
+  || fail "a pool added while the tool was running does not appear in its output at all:
+$(cat "$ROOT/a2")"
+grep -q "news" "$POOLS/zz-fpm-tune.conf" \
+  || echo "  (news is accounted for but not overridden yet; it has no demand history)"
 
 # ---------------------------------------------------------------------------
 echo "--- a pool is REMOVED, and php-fpm is reloaded before the tool notices"
 #
 # The P0. An operator removing a site reloads php-fpm as part of doing so, so
 # this ordering is the likely one rather than an exotic one.
-if ! grep -q "^\[news\]" "$POOLS/zz-fpm-tune.conf" 2>/dev/null; then
+# Guarded, because appending to a file that is not there FABRICATES one without
+# this tool's marker — and the suite then fails on the repair correctly refusing
+# to touch a foreign file, which is a confusing red for the wrong reason.
+[ -f "$POOLS/zz-fpm-tune.conf" ] \
+  || fail "this tool has written nothing, so there is no override for a removed pool to break"
+
+if ! grep -q "^\[news\]" "$POOLS/zz-fpm-tune.conf"; then
   # Force the situation the bug needs: our file must name the pool being removed.
   printf '\n[news]\npm.max_children = 4\n' >> "$POOLS/zz-fpm-tune.conf"
 fi
@@ -166,6 +182,83 @@ BEFORE="$(cat "$POOLS/zz-fpm-tune.conf")"
 [ "$(cat "$POOLS/zz-fpm-tune.conf")" = "$BEFORE" ] \
   || fail "the tool rewrote its own configuration for a breakage elsewhere"
 rm -f "$POOLS/zz-broken.conf"
+
+# ---------------------------------------------------------------------------
+echo "--- a previous run died between writing and being sure the master took it"
+#
+# The recovery record is the thing that makes a crash survivable, and neither
+# suite ever created one — so making writeTransaction a no-op, or making the
+# put-back on a rejected leftover do nothing, left both of them green.
+#
+# The record is hand-written rather than produced by killing a run mid-flight,
+# because the window is milliseconds wide and a test that has to hit it is a
+# test that fails on a loaded CI machine for no reason. What matters is the
+# state on disk, and that is exactly reproducible.
+[ -f "$POOLS/zz-fpm-tune.conf" ] || fail "nothing is overridden, so there is nothing to recover"
+
+# A record naming a file this tool did NOT leave: the hash will not match, which
+# is the "the rename never happened" case — nothing to undo, and the live file
+# must be left exactly as it is.
+#
+# existed=false because the record's own validation refuses existed=true with no
+# saved copy, and rightly: that combination describes a backup that should be
+# there and is not, which is a different situation from this one.
+KEY="$(printf '%s' "$POOLS" | shasum -a 256 2>/dev/null | cut -c1-8 || printf '%s' "$POOLS" | sha256sum | cut -c1-8)"
+mkdir -p "$ROOT/backup"
+BEFORE="$(cat "$POOLS/zz-fpm-tune.conf")"
+cat > "$ROOT/backup/$KEY-transaction.json" <<EOF
+{"drop_in_dir":"$POOLS","binary":"$FPM","config_path":"$ROOT/php-fpm.conf",
+ "path":"$POOLS/zz-fpm-tune.conf","existed":false,
+ "wrote":"0000000000000000000000000000000000000000000000000000000000000000",
+ "phase":"written"}
+EOF
+
+"$BIN" apply "${SCOPE[@]}" --backup-dir "$ROOT/backup" > "$ROOT/a8" 2>&1 \
+  || fail "a run that found a stale record could not proceed: $(cat "$ROOT/a8")"
+
+[ -f "$POOLS/zz-fpm-tune.conf" ] \
+  || fail "recovery removed this tool's file over a record that does not describe it"
+"$FPM" -t --fpm-config "$ROOT/php-fpm.conf" 2>/dev/null \
+  || fail "the configuration is rejected after recovery ran"
+kill -0 "$(cat "$ROOT/fpm.pid")" || fail "the master did not survive recovery"
+[ -f "$ROOT/backup/$KEY-transaction.json" ] \
+  && fail "the record was left behind, so every future run will reconcile it again"
+
+echo "  confirmed: a record that does not describe the file on disk is resolved and cleared"
+
+# And the other half: a record that DOES describe the file, where php-fpm
+# rejects it. That is the crash this whole mechanism exists for — a run that
+# wrote something bad and died before it could take it back out — and it is the
+# only path that reaches the restore. Without it, making the restore a no-op
+# left both suites green.
+GOOD="$(cat "$POOLS/zz-fpm-tune.conf")"
+printf '%s\n[gone-with-the-site]\npm.max_children = 4\n' "$GOOD" > "$POOLS/zz-fpm-tune.conf"
+
+if "$FPM" -t --fpm-config "$ROOT/php-fpm.conf" >/dev/null 2>&1; then
+  echo "  (this php-fpm accepts an override for a pool that does not exist; skipping the restore probe)"
+  printf '%s' "$GOOD" > "$POOLS/zz-fpm-tune.conf"
+else
+  printf '%s' "$GOOD" > "$ROOT/backup/$KEY-zz-fpm-tune.conf.bak"
+  HASH="$(shasum -a 256 "$POOLS/zz-fpm-tune.conf" 2>/dev/null | cut -d' ' -f1 \
+        || sha256sum "$POOLS/zz-fpm-tune.conf" | cut -d' ' -f1)"
+  cat > "$ROOT/backup/$KEY-transaction.json" <<EOF
+{"drop_in_dir":"$POOLS","binary":"$FPM","config_path":"$ROOT/php-fpm.conf",
+ "path":"$POOLS/zz-fpm-tune.conf","existed":true,
+ "saved":"$KEY-zz-fpm-tune.conf.bak",
+ "wrote":"$HASH","phase":"written"}
+EOF
+
+  "$BIN" apply "${SCOPE[@]}" --backup-dir "$ROOT/backup" > "$ROOT/a9" 2>&1 || true
+
+  "$FPM" -t --fpm-config "$ROOT/php-fpm.conf" 2>/dev/null \
+    || fail "the configuration a dead run left is still rejected; recovery did not take it back out:
+$(cat "$ROOT/a9")"
+  grep -q "gone-with-the-site" "$POOLS/zz-fpm-tune.conf" \
+    && fail "the override for a pool that does not exist is still there"
+  kill -0 "$(cat "$ROOT/fpm.pid")" || fail "the master did not survive recovery"
+
+  echo "  confirmed: a rejected leftover is taken back out and the previous version restored"
+fi
 
 # ---------------------------------------------------------------------------
 echo "--- the state file is lost"

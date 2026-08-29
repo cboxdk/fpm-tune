@@ -133,6 +133,21 @@ MUTATIONS = [
      "serve/serve.go",
      "	// After the plan: the counters are what the NEXT round compares against, and\n	// storing them earlier made the comparison one against itself.\n	plan.RecordCounters(l.state, views)\n",
      ""),
+    ("apply: the sandbox validation is bypassed", "apply/apply.go", "@@FUNC@@validateSandboxed", ""),
+    ("apply: the live tree is not validated after the write",
+     "apply/apply.go",
+     "	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {",
+     "	if err := error(nil); err != nil {"),
+    ("apply: a rejected leftover is not taken back out",
+     "apply/reconcile.go", "@@FUNC@@applyPrevious", ""),
+    ("apply: recovery reverts a configuration php-fpm accepts",
+     "apply/reconcile.go",
+     '			saved := "(none: this was the first apply)"',
+     '			previous, perr := previousContent(txn, opts.BackupDir)\n			if perr == nil {\n				_ = applyPrevious(txn, previous)\n			}\n			saved := "(none: this was the first apply)"'),
+    ("serve: the lock does not follow the directory being written",
+     "serve/serve.go",
+     '	if !l.holdResource(master.DropInDir) {\n		return\n	}\n	if !l.reconciled {\n		l.log.Warn("The pool directory changed under this process; reconciling before "+\n			"writing to it", "dir", master.DropInDir)\n\n		return\n	}\n\n	l.metrics.SetApplyBlocked("")',
+     '	l.metrics.SetApplyBlocked("")'),
     ("serve: a blocked apply publishes nothing",
      "serve/serve.go", "		l.metrics.SetApplyBlocked(\"no_master\")", "		l.metrics.SetApplyBlocked(\"\")"),
     ("serve: the metrics bind failure is a log line",
@@ -146,6 +161,21 @@ survived, caught, broken = [], [], []
 
 for label, path, old, new in MUTATIONS:
     src = open(path).read()
+    if old.startswith("@@FUNC@@"):
+        # Whole function body replaced with a bare return, because these are
+        # multi-statement guards and a partial replacement leaves the rest of
+        # the body doing half the job.
+        name = old[len("@@FUNC@@"):]
+        i = src.index("func " + name + "(")
+        j = src.index("\n}", src.index("{", i)) + 2
+        head = src[i:src.index("{", i) + 1]
+        shutil.copy(path, "/tmp/mut.bak")
+        open(path, "w").write(src[:i] + head + "\n	return nil\n}\n" + src[j:])
+        r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+        shutil.copy("/tmp/mut.bak", path)
+        (survived if r.returncode == 0 else caught).append(label)
+        print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+        continue
     if old == "@@CMP@@":
         i = src.index("		sort.SliceStable(cands, func(a, b int) bool {")
         j = src.index("		})", i) + 4
