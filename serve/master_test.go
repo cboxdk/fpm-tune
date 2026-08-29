@@ -212,3 +212,42 @@ func TestNoMasterIsChosenWhenThePoolsSpanTwo(t *testing.T) {
 		t.Errorf("MasterPIDOf = %d, want 4242", got)
 	}
 }
+
+// TestARememberedMasterIsNotReusedForAnotherDirectory.
+//
+// The remembered reference describes ONE master, and a caller naming a
+// different pool directory is asking about a different one. It used to keep the
+// remembered binary and config and overwrite only the directory — so on a host
+// where 8.3 applied last and 8.2 is down, a repair for 8.2 was handed 8.3's
+// php-fpm and its config, validated a tree it was not about to touch, found it
+// fine, and left the broken host alone.
+//
+// Same fault as a shared sidecar, one layer up, and this layer is consulted
+// first.
+func TestARememberedMasterIsNotReusedForAnotherDirectory(t *testing.T) {
+	defer noMastersRunning()()
+
+	dir := t.TempDir()
+	applied := writeMasterConfig(t, dir, "8.3")
+	remembered := state.MasterRef{
+		Binary: "/usr/sbin/php-fpm8.3", ConfigPath: applied,
+		DropInDir: filepath.Join(dir, "8.3", "pool.d"),
+	}
+
+	// Asking about the OTHER master.
+	other := writeMasterConfig(t, dir, "8.2")
+	_ = other
+	if _, err := MasterFromMemory(filepath.Join(dir, "8.2", "pool.d"), remembered, nil); err == nil {
+		t.Error("a repair for 8.2 was handed 8.3's php-fpm; it validates a tree it is not " +
+			"about to touch, finds it fine, and leaves the broken host alone")
+	}
+
+	// And its own directory still resolves.
+	m, err := MasterFromMemory(remembered.DropInDir, remembered, nil)
+	if err != nil {
+		t.Fatalf("the master's own directory was refused: %v", err)
+	}
+	if m.Binary != remembered.Binary {
+		t.Errorf("Binary = %q, want the remembered one", m.Binary)
+	}
+}

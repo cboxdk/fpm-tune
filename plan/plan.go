@@ -410,6 +410,9 @@ func LearnFrom(st *state.State, views []observe.PoolView, at time.Time, opts sta
 
 		obs := view.Observation()
 		obs.At = at
+		// Which master this pool belongs to, so a daemon scoped to one of them
+		// does not forget the other's pools out of a shared state file.
+		obs.MasterConfig = view.Target.ConfigPath
 		st.Learn(obs, opts)
 	}
 }

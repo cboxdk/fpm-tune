@@ -270,7 +270,7 @@ func (l *Loop) round(ctx context.Context) {
 	for _, v := range views {
 		names = append(names, v.Name)
 	}
-	if dropped := l.state.Forget(names); len(dropped) > 0 {
+	if dropped := l.state.Forget(names, l.masterScope(targets)); len(dropped) > 0 {
 		l.log.Info("Forgot pools that are no longer configured", "pools", dropped)
 	}
 
@@ -359,6 +359,19 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	if !l.reconciled {
 		l.log.Warn("The pool directory changed under this process; reconciling before "+
 			"writing to it", "dir", master.DropInDir)
+
+		return
+	}
+
+	// The same refusal the CLI makes: a budget nobody could confirm is not one
+	// to write from. Published rather than only logged, because a daemon that
+	// has quietly stopped applying looks exactly like one that has nothing to do.
+	if result.Budget.LookupErr != nil {
+		l.metrics.SetApplyBlocked("budget_unconfirmed")
+		l.log.Error("Not applying: php-fpm's own memory limit could not be read, so the "+
+			"only budget available is the machine's. Pass --memory with the real limit, "+
+			"or make the master's cgroup readable.",
+			"budget", result.Budget.MemoryBytes, "error", result.Budget.LookupErr)
 
 		return
 	}
@@ -536,6 +549,28 @@ func (l *Loop) save(now time.Time, force bool) {
 // plan before it is overwritten for the next round, and getting that wrong once
 // meant the growth signal never fired in any round since it was written. Nothing
 // could assert it, because the only way in was through a real php-fpm.
+// masterScope names the master this round is about, when it is about exactly
+// one. Empty means the round is unscoped and every pool it cannot see really
+// has gone.
+func (l *Loop) masterScope(targets []phpfpm.Target) string {
+	if l.cfg.DropInDir == "" {
+		return ""
+	}
+
+	scope := ""
+	for _, t := range targets {
+		if t.ConfigPath == "" {
+			continue
+		}
+		if scope != "" && t.ConfigPath != scope {
+			return ""
+		}
+		scope = t.ConfigPath
+	}
+
+	return scope
+}
+
 func (l *Loop) discover(ctx context.Context) ([]phpfpm.Target, error) {
 	find := observe.Discover
 	if l.cfg.Discover != nil {
@@ -766,17 +801,25 @@ func masterOnHost(dropInDir string, remembered *state.MasterRef, log *slog.Logge
 		// Nothing running, but a previous run recorded where it lives. PID stays
 		// zero: there is nothing to signal, and the caller must not mistake that
 		// for "provisioning, go ahead".
-		m := apply.Master{
+		// The remembered reference describes ONE master, and a caller naming a
+		// different pool directory is asking about a different one.
+		//
+		// It used to keep the remembered binary and config and overwrite only
+		// the directory — so on a host where 8.3 applied last and 8.2 is down,
+		// a repair for 8.2 was handed 8.3's php-fpm and its config. It then
+		// validated a tree it was not about to touch, found it fine, and left
+		// the broken host alone. Same fault as the shared sidecar, one layer up,
+		// and this layer is consulted first.
+		if dropInDir != "" && filepath.Clean(remembered.DropInDir) != filepath.Clean(dropInDir) {
+			return apply.Master{}, ErrNoMaster
+		}
+
+		return apply.Master{
 			Binary:          remembered.Binary,
 			ConfigPath:      remembered.ConfigPath,
 			DropInDir:       remembered.DropInDir,
 			IncludePatterns: IncludePatternsOf(remembered.ConfigPath),
-		}
-		if dropInDir != "" {
-			m.DropInDir = dropInDir
-		}
-
-		return m, nil
+		}, nil
 	}
 
 	if len(masters) > 1 {

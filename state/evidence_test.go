@@ -669,3 +669,41 @@ func TestAStateFileFromTheFutureGrantsNothing(t *testing.T) {
 		t.Errorf("the measured cost was discarded along with the clock: %d", ps.SizingBytes())
 	}
 }
+
+// TestAClockCorrectionDoesNotReleaseTheReloadBrake.
+//
+// LastAppliedAt is a brake: hysteresis reads it to refuse a reload within five
+// minutes of the last one. Dropping it along with the other future timestamps
+// says "nothing has ever been applied", which releases the brake — so an NTP
+// correction of five minutes backwards, just after an apply, let the next round
+// reload a pool it had reloaded a moment earlier.
+//
+// Clamped rather than cleared. For a value whose only job is to make the tool
+// wait, keeping it is the safe direction.
+func TestAClockCorrectionDoesNotReleaseTheReloadBrake(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	// Written by a host whose clock was five minutes fast.
+	ahead := time.Now().Add(5 * time.Minute)
+	body := `{"version":1,"pools":{"shop":{"pool":"shop","typical_peak_bytes":104857600,` +
+		`"last_applied_max_children":12,` +
+		`"last_applied_at":"` + ahead.Format(time.RFC3339) + `"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ps := s.Pools["shop"]
+	if ps.LastAppliedAt.IsZero() {
+		t.Error("the record of when this pool was last applied was thrown away with the " +
+			"clock; hysteresis now believes nothing has ever been applied, and the next " +
+			"round may reload a pool that was reloaded a minute ago")
+	}
+	if ps.LastAppliedAt.After(time.Now().Add(time.Minute)) {
+		t.Errorf("LastAppliedAt is still in the future: %v", ps.LastAppliedAt)
+	}
+}

@@ -110,6 +110,16 @@ MUTATIONS = [
      "state/state.go",
      "	recycled := mature == 0 && worked &&",
      "	recycled := mature == 0 && worked && ps.TypicalPeakBytes == 0 &&"),
+    ("state: a scoped daemon forgets another master's pools",
+     "state/state.go",
+     '		if scope != "" && ps.MasterConfig != scope {\n			continue\n		}\n', ""),
+    ("state: a clock correction releases the reload brake",
+     "state/state.go",
+     "	if ps.LastAppliedAt.After(horizon) {\n		ps.LastAppliedAt = now\n	}",
+     "	if ps.LastAppliedAt.After(horizon) {\n		ps.LastAppliedAt = time.Time{}\n	}"),
+    ("serve: a remembered master is reused for another directory",
+     "serve/serve.go",
+     '		if dropInDir != "" && filepath.Clean(remembered.DropInDir) != filepath.Clean(dropInDir) {\n			return apply.Master{}, ErrNoMaster\n		}\n', ""),
     ("apply: the master note is not keyed by pool directory",
      "apply/remembered.go",
      "	if filepath.Clean(ref.DropInDir) != filepath.Clean(dropInDir) {\n		return rememberedMasterRef{}\n	}\n",
@@ -212,8 +222,8 @@ MUTATIONS = [
      "		_ = rememberedMaster"),
     ("serve: the lock does not follow the directory being written",
      "serve/serve.go",
-     '	if !l.holdResource(master.DropInDir) {\n		return\n	}\n	if !l.reconciled {\n		l.log.Warn("The pool directory changed under this process; reconciling before "+\n			"writing to it", "dir", master.DropInDir)\n\n		return\n	}\n\n	l.metrics.SetApplyBlocked("")',
-     '	l.metrics.SetApplyBlocked("")'),
+     '	if !l.holdResource(master.DropInDir) {\n		return\n	}\n	if !l.reconciled {\n		l.log.Warn("The pool directory changed under this process; reconciling before "+\n			"writing to it", "dir", master.DropInDir)\n\n		return\n	}\n',
+     ""),
     ("serve: a blocked apply publishes nothing",
      "serve/serve.go", "		l.metrics.SetApplyBlocked(\"no_master\")", "		l.metrics.SetApplyBlocked(\"\")"),
     ("serve: the metrics bind failure is a log line",
@@ -293,6 +303,23 @@ for label, path, old, new in MUTATIONS:
     else:
         caught.append(label)
         print(f"caught       {label}")
+
+# The master note's two layers, removed together: the keyed filename and the
+# payload re-check. Either alone keeps a repair off another master.
+src = open("apply/remembered.go").read()
+shutil.copy("apply/remembered.go", "/tmp/mut.bak")
+together = src
+for o, n in [
+    ('	return hex.EncodeToString(sum[:4]) + "-master.json"', '	_ = sum\n\n	return "master.json"'),
+    ('	if filepath.Clean(ref.DropInDir) != filepath.Clean(dropInDir) {\n		return rememberedMasterRef{}\n	}\n', ""),
+]:
+    together = together.replace(o, n, 1)
+open("apply/remembered.go", "w").write(together)
+r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+shutil.copy("/tmp/mut.bak", "apply/remembered.go")
+label = "apply: both master-note layers removed together"
+(survived if r.returncode == 0 else caught).append(label)
+print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
 
 # The recycled waiver, all three conditions removed together.
 src = open("state/state.go").read()

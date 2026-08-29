@@ -504,7 +504,7 @@ func TestForgetDropsRemovedPools(t *testing.T) {
 			t.Fatalf("the pool was forgotten after %d rounds of absence; a discovery "+
 				"failure lasting one round costs a week of learning", i)
 		}
-		dropped = s.Forget([]string{"kept-a", "kept-b"})
+		dropped = s.Forget([]string{"kept-a", "kept-b"}, "")
 	}
 
 	if len(dropped) != 1 || dropped[0] != "removed" {
@@ -531,11 +531,11 @@ func TestATransientDiscoveryFailureDoesNotForget(t *testing.T) {
 		// b vanishes every other round, the way a master that intermittently
 		// fails to parse does.
 		if i%2 == 0 {
-			s.Forget([]string{"a"})
+			s.Forget([]string{"a"}, "")
 
 			continue
 		}
-		s.Forget([]string{"a", "b"})
+		s.Forget([]string{"a", "b"}, "")
 	}
 
 	if _, still := s.Pools["b"]; !still {
@@ -1284,4 +1284,45 @@ func inodeOf(t *testing.T, path string) (uint64, error) {
 	}
 
 	return uint64(sys.Ino), nil
+}
+
+// TestAScopedDaemonDoesNotForgetAnotherMastersPools.
+//
+// A state file can be shared by two daemons, each scoped to one master, and
+// each sees only its own pools. Without knowing which master a pool belongs to,
+// "not in this round's views" is indistinguishable from "belongs to somebody
+// else" — so a scoped daemon deleted the other master's baselines after five
+// rounds, and that daemon then sized those pools from a table.
+func TestAScopedDaemonDoesNotForgetAnotherMastersPools(t *testing.T) {
+	s := New()
+	opts := Options{}.Defaults()
+	base := time.Now().Add(-time.Hour)
+
+	learn := func(pool, master string) {
+		obs := busyObs(pool, base)
+		obs.MasterConfig = master
+		s.Learn(obs, opts)
+	}
+	learn("shop", "/etc/php/8.3/php-fpm.conf")
+	learn("api", "/etc/php/8.2/php-fpm.conf")
+
+	// Ten rounds of a daemon that only ever sees 8.3's pools.
+	for i := 0; i < 10; i++ {
+		s.Forget([]string{"shop"}, "/etc/php/8.3/php-fpm.conf")
+	}
+
+	if _, still := s.Pools["api"]; !still {
+		t.Error("a daemon scoped to one master deleted another master's baseline out of " +
+			"a shared state file; that pool is now sized from a profile guess, and a " +
+			"week of the other daemon's learning is gone")
+	}
+
+	// Its own pool that really has gone is still forgotten.
+	for i := 0; i < forgetAfterMissedRounds; i++ {
+		s.Forget([]string{}, "/etc/php/8.3/php-fpm.conf")
+	}
+	if _, still := s.Pools["shop"]; still {
+		t.Error("a pool of this daemon's own master was never forgotten; a host that has " +
+			"had sites come and go for years carries every one of them")
+	}
 }

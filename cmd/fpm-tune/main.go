@@ -411,6 +411,21 @@ func runApply(args []string) error {
 		return err
 	}
 
+	// A budget nobody could confirm is not a budget to write from.
+	//
+	// The detection falls back to the machine when php-fpm's own cgroup cannot
+	// be read, and the two numbers are indistinguishable — so a service capped
+	// at 3GiB gets sized against 32GiB and grown into a ceiling it never sees.
+	// Reading it and reporting it is right; ACTING on it is not, and --memory is
+	// how an operator says what the real number is.
+	if lerr := result.Budget.LookupErr; lerr != nil {
+		return fmt.Errorf("refusing to write: php-fpm's own memory limit could not be "+
+			"read (%w), so the only budget available is the machine's %s. If php-fpm is "+
+			"capped below that, sizing to it grows the pools into a ceiling they never "+
+			"see. Pass --memory with the real limit, or make /proc/<pid>/cgroup readable",
+			lerr, budget.HumanBytes(result.Budget.MemoryBytes))
+	}
+
 	st.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
 	applied, applyErr := apply.Apply(ctx, result.Plan, master, st, opts, log)

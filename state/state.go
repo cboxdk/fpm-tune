@@ -50,6 +50,10 @@ type Observation struct {
 	ActiveNow int
 	Accepted  int64
 	At        time.Time
+	// MasterConfig is the php-fpm configuration this pool belongs to. Optional:
+	// it exists so a daemon scoped to one master does not forget another's pools
+	// out of a shared state file.
+	MasterConfig string
 }
 
 // PoolState is what has been learned about one pool.
@@ -148,6 +152,17 @@ type PoolState struct {
 	// the ones discovered, so a transient discovery failure does not delete a
 	// week of learning.
 	MissedRounds int `json:"missed_rounds,omitempty"`
+
+	// MasterConfig is the php-fpm configuration this pool was learned from.
+	//
+	// A state file can be shared by two daemons, each scoped to one master, and
+	// each sees only its own pools. Without knowing which master a pool belongs
+	// to, "not in this round's views" is indistinguishable from "belongs to
+	// somebody else" — so a scoped daemon deleted the other master's baselines
+	// after five rounds, and the other daemon then sized those pools from a
+	// table. Empty means a version that did not record it, and such a pool is
+	// never forgotten by a scoped daemon.
+	MasterConfig string `json:"master_config,omitempty"`
 
 	// ImmatureRounds counts consecutive rounds in which this pool had workers
 	// and none of them had served enough requests to count. It is the evidence
@@ -427,11 +442,23 @@ func (ps *PoolState) forgetTheFuture(now time.Time) {
 	horizon := now.Add(skew)
 	for _, t := range []*time.Time{
 		&ps.FirstSeen, &ps.LastUpdated, &ps.FirstBusyAt, &ps.LastBusyAt,
-		&ps.LastPeakAt, &ps.PeakAt, &ps.LastAppliedAt,
+		&ps.LastPeakAt, &ps.PeakAt,
 	} {
 		if t.After(horizon) {
 			*t = time.Time{}
 		}
+	}
+
+	// LastAppliedAt is CLAMPED, not cleared, and the difference matters.
+	//
+	// It is a brake: hysteresis reads it to refuse a reload within five minutes
+	// of the last one. Zeroing it says "nothing has ever been applied", which
+	// releases the brake — so an NTP correction of five minutes backwards, after
+	// an apply, let the next round reload a pool it had just reloaded. Clamping
+	// keeps the brake on for the full interval from now, which is the safe
+	// direction for a value whose only job is to make the tool wait.
+	if ps.LastAppliedAt.After(horizon) {
+		ps.LastAppliedAt = now
 	}
 }
 
@@ -571,6 +598,9 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 
 	ps.Samples++
 	ps.LastUpdated = at
+	if obs.MasterConfig != "" {
+		ps.MasterConfig = obs.MasterConfig
+	}
 
 	// The peak is taken over EVERY worker with a reading; maturity decides only
 	// whether the scrape counts at all.
@@ -955,7 +985,7 @@ func (s *State) RecordApplied(pool string, maxChildren int, at time.Time) {
 // sites removed over the years does not carry them forever.
 //
 // Called with the pools that currently exist; anything else goes.
-func (s *State) Forget(current []string) []string {
+func (s *State) Forget(current []string, scope string) []string {
 	keep := make(map[string]bool, len(current))
 	for _, name := range current {
 		keep[name] = true
@@ -966,6 +996,16 @@ func (s *State) Forget(current []string) []string {
 		if keep[name] {
 			ps.MissedRounds = 0
 
+			continue
+		}
+
+		// Not mine to forget.
+		//
+		// A caller scoped to one master sees only that master's pools, so a pool
+		// it cannot see may simply belong to the other daemon sharing this file.
+		// Deleting it took a week of that daemon's learning, and the pool then
+		// came back sized from a profile.
+		if scope != "" && ps.MasterConfig != scope {
 			continue
 		}
 

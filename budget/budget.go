@@ -260,6 +260,10 @@ func (l Limits) WithOverride(memoryBytes int64) Limits {
 	l.MemoryBytes = memoryBytes
 	l.Source = SourceOverride
 
+	// The operator gave the number, so a failed detection no longer matters:
+	// the whole reason to flag it was that nobody had confirmed the budget.
+	l.LookupErr = nil
+
 	return l
 }
 
