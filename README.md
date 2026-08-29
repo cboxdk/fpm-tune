@@ -115,15 +115,23 @@ fpm_tune_pool_demand_unmet{pool}   # this pool wanted more workers than it got
 fpm_tune_capacity_exhausted        # ...and that is true of at least one pool
 ```
 
-These are the same news at two granularities — which pool, and whether any. The
-plan has already taken headroom from the idle pools and given it to the busy
-ones by the time it is published, so a pool still short in the finished plan is
-short because the budget ran out, not because the next run might rearrange
-things. The warning names how far off it is: the free budget against what one
-more worker would cost the pool that needs one.
+These are the same news at two granularities — which pool, and whether any — and
+either one means no configuration change will help: the machine needs more RAM,
+or fewer sites. By the time a plan is published the headroom has already been
+taken from the idle pools and given to the busy ones, so a pool still short in
+it is short because the budget ran out, not because the next run might rearrange
+something. In that state the tool stops rearranging and says so, since moving a
+shortfall between pools costs a reload of each and does not make it smaller.
 
-And the ones to alert on. Capacity exhaustion is logged on the transition rather
-than every interval, so the log will not keep reminding you:
+The warning can fire with headroom still showing, and that is not a
+contradiction: 300MiB free is nothing to a pool whose workers cost 700MiB each.
+It carries both numbers so you can see which it is.
+
+## Alerting
+
+The log reports a persistent condition on the transition rather than every
+interval, which is right for reading and useless for alerting. These are the
+series to build on instead:
 
 ```
 fpm_tune_apply_enabled                    # 0 means this process only watches
@@ -136,16 +144,11 @@ fpm_tune_rollback_failed_total            # worse: a rejected file is still on d
 fpm_tune_repairs_total                    # it had to undo something a run left behind
 ```
 
+`apply_blocked` is the one people forget. A process that is watching and one
+that is acting look identical from outside, and the difference is the whole
+question when a host is not being tuned.
+
 `/metrics` defaults to `:9110`; `/healthz` answers 200 while the process is up.
-
-Either one is the signal that no configuration change will help: the machine
-needs more RAM, or fewer sites. On a host in that state it stops rearranging and
-says so, because moving the shortfall between pools costs a reload of each and
-does not make it smaller.
-
-A note on free budget. The warning can fire with headroom still showing, and
-that is not a contradiction — 300MiB free is nothing to a pool whose workers
-cost 700MiB each. That is why the message carries both numbers.
 
 ## Operating it
 
@@ -174,8 +177,16 @@ It writes production configuration, so it is built to fail safe.
 
 - **Only `pm.*` keys**, in one file of its own — `zz-fpm-tune.conf`, in the
   directory your master already includes. Your pool config is not edited, and
-  deleting that file returns everything to what you configured. The previous
-  version is kept under `/var/lib/fpm-tune/backup` while a change is in flight.
+  deleting that file returns everything to what you configured — the next run
+  writes a fresh one from what it can see, and does not put the old overrides
+  back.
+- **`/var/lib/fpm-tune/backup` is not scratch space.** The previous version of
+  the file lives there while a change is in flight, alongside a record of what
+  was in flight and a note of where php-fpm lives. That note is how the tool
+  repairs a host whose master will not start — the one situation where nothing
+  can be discovered because there is nothing running to discover. A tmpfiles
+  rule that cleans this directory takes away the ability to undo a change and to
+  fix that host.
 - **One file, one atomic rename.** The change set is indivisible: a growth and the
   reduction that funds it reach the host together or not at all.
 - **Validated against a sandboxed copy first**, so a configuration php-fpm would
