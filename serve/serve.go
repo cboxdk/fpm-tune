@@ -354,10 +354,22 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 
 	if err != nil {
 		if len(applied.RollbackFailed) > 0 {
-			// The worst state this tool can reach, and it used to be reported as
-			// an ordinary failure with rolled_back=false, which reads as
-			// reassuring. Nothing is broken yet — the master was never signalled
-			// — but the next reload from any source adopts what is there.
+			// The worst state this tool can reach, and it has to say WHICH of the
+			// two it is. "php-fpm has not been reloaded, so nothing is broken
+			// yet" is true when the change was rejected before the signal, and a
+			// lie when the master was signalled and did not come back — where it
+			// is the difference between restarting php-fpm now and finding out
+			// in the morning. The CLI had the same sentence and the same fault.
+			if errors.Is(err, apply.ErrMasterDidNotSurvive) {
+				l.log.Error("PHP-FPM IS DOWN AND COULD NOT BE PUT BACK. The master did "+
+					"not survive the reload, and the configuration that killed it could "+
+					"not be removed. Remove these by hand, then reset-failed and start "+
+					"php-fpm.",
+					"paths", applied.RollbackFailed, "error", err)
+
+				return
+			}
+
 			l.log.Error("A REJECTED CONFIGURATION IS STILL IN PLACE and could not be "+
 				"removed. php-fpm has not been reloaded, so nothing is broken yet — but "+
 				"the next reload from any source will adopt it, and a master that fails "+
