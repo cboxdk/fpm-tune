@@ -49,13 +49,20 @@ type PoolView struct {
 	// had busy at once since it started.
 	ObservedPeak int
 
-	// ActiveNow is how many workers are busy at this instant.
+	// ActiveNow is how many workers are busy at this instant, and Accepted is
+	// how many connections the pool has taken since it started.
 	//
-	// The difference between a pool that got CHEAPER and one that got QUIETER.
+	// Together they separate a pool that got CHEAPER from one that got QUIETER.
 	// Both show smaller workers — a quiet pool's surviving workers can have
-	// returned their memory to the operating system — and only one of them is
-	// evidence about what the workload costs.
+	// returned their memory to the operating system — and only one says anything
+	// about what the workload costs.
+	//
+	// The counter is the reliable half. How many workers happen to be mid-request
+	// when a scrape lands depends entirely on how long a request takes: a pool
+	// answering in two milliseconds reads as idle almost every time it is looked
+	// at, however much traffic it is carrying.
 	ActiveNow int
+	Accepted  int64
 
 	// QueueDepth is the current listen queue, and MaxChildrenReached is how many
 	// times the pool has hit its ceiling. Together they separate "the ceiling is
@@ -76,7 +83,12 @@ type PoolView struct {
 
 // Observation converts the view into something the learner can fold in.
 func (v PoolView) Observation() state.Observation {
-	return state.Observation{Pool: v.Name, Workers: v.Workers, ActiveNow: v.ActiveNow}
+	return state.Observation{
+		Pool:      v.Name,
+		Workers:   v.Workers,
+		ActiveNow: v.ActiveNow,
+		Accepted:  v.Accepted,
+	}
 }
 
 // Discover finds the pools on this host.
@@ -156,6 +168,7 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 		view.ProcessManager = pool.ProcessManager
 		view.ObservedPeak = int(pool.MaxActiveProcesses)
 		view.ActiveNow = int(pool.ActiveProcesses)
+		view.Accepted = pool.AcceptedConnections
 		view.QueueDepth = pool.ListenQueue
 		view.MaxChildrenReached = pool.MaxChildrenReached
 		view.CurrentMaxChildren, view.MaxChildrenKnown = configuredMaxChildren(pool)

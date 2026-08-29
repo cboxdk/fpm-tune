@@ -848,3 +848,131 @@ func TestAnOutlierDoesNotFloorTheSizingForever(t *testing.T) {
 			"and its neighbours are held short by one scrape", ps.SizingBytes()>>20)
 	}
 }
+
+// TestAFastPoolIsNotPinnedHighForever.
+//
+// The mirror of the fault the decay gate exists to prevent, reached from the
+// other side. Gating on how many workers are busy at the instant of a scrape
+// measures request DURATION as much as load: a pool answering in two
+// milliseconds has nobody mid-request at almost any moment, however much traffic
+// it carries. Its estimate would then never be allowed to fall — pinned to
+// whatever peak it once reached, for ever, reserving memory nothing needs.
+func TestAFastPoolIsNotPinnedHighForever(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	accepted := int64(0)
+	// Expensive to begin with, and busy — 400 requests between scrapes.
+	for i := range 15 {
+		accepted += 400
+		st.Learn(Observation{Pool: "api", At: now.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 0, // nothing is ever caught mid-request: the work is fast
+			Accepted:  accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 200 << 20, Requests: 5000},
+				{RSSBytes: 200 << 20, Requests: 5000},
+			}}, opts)
+	}
+
+	// A deploy halves the cost. Still fast, still busy, still never caught.
+	cheap := now.Add(10 * time.Minute)
+	for i := range 90 {
+		accepted += 400
+		st.Learn(Observation{Pool: "api", At: cheap.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 0,
+			Accepted:  accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 100 << 20, Requests: 5000},
+				{RSSBytes: 100 << 20, Requests: 5000},
+			}}, opts)
+	}
+
+	// 45 minutes is a minute and a half of half-lives, so the model predicts
+	// about 135MiB on the way from 200 to 100. What is being checked is that it
+	// is MOVING — a pool gated on instantaneous concurrency would still read 200,
+	// pinned to its worst hour for as long as its requests stay short.
+	if got := st.Pools["api"].SizingBytes(); got > 145<<20 {
+		t.Errorf("after 45 minutes of measuring 100MiB the estimate is %dMiB; a pool "+
+			"whose requests are too short to be caught mid-flight is pinned to its "+
+			"worst hour", got>>20)
+	}
+}
+
+// TestAQuietPoolStillHoldsItsEstimate: the counter must not let a lull through
+// either. A pool serving almost nothing teaches nothing downward, however small
+// its idle survivors read.
+func TestAQuietPoolStillHoldsItsEstimate(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	accepted := int64(0)
+	for i := range 15 {
+		accepted += 400
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 6, Accepted: accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 200 << 20, Requests: 5000},
+				{RSSBytes: 200 << 20, Requests: 5000},
+			}}, opts)
+	}
+	settled := st.Pools["shop"].SizingBytes()
+
+	// A quiet night: one request every few minutes, and the survivors have given
+	// their memory back.
+	quiet := now.Add(10 * time.Minute)
+	for i := range 96 {
+		accepted++
+		st.Learn(Observation{Pool: "shop", At: quiet.Add(time.Duration(i) * 5 * time.Minute),
+			ActiveNow: 0, Accepted: accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 15 << 20, Requests: 5000},
+				{RSSBytes: 14 << 20, Requests: 5000},
+			}}, opts)
+	}
+
+	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
+		t.Errorf("a quiet night pulled the estimate from %dMiB to %dMiB; the morning "+
+			"would find the pool sized for workers that do not exist",
+			settled>>20, got>>20)
+	}
+}
+
+// TestAReloadResettingTheCounterIsNotReadAsWork: php-fpm resets its counters on
+// reload, and this tool causes reloads. A counter that has gone backwards is
+// unknown, not evidence either way.
+func TestAReloadResettingTheCounterIsNotReadAsWork(t *testing.T) {
+	st := New()
+	opts := Options{}.Defaults()
+	now := time.Now()
+
+	accepted := int64(0)
+	for i := range 15 {
+		accepted += 400
+		st.Learn(Observation{Pool: "shop", At: now.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 6, Accepted: accepted,
+			Workers: []WorkerSample{
+				{RSSBytes: 200 << 20, Requests: 5000},
+				{RSSBytes: 200 << 20, Requests: 5000},
+			}}, opts)
+	}
+	settled := st.Pools["shop"].SizingBytes()
+
+	// A reload: the counter starts again, and the fresh survivors read small
+	// while nothing is being served.
+	after := now.Add(10 * time.Minute)
+	for i := range 20 {
+		st.Learn(Observation{Pool: "shop", At: after.Add(time.Duration(i) * 30 * time.Second),
+			ActiveNow: 0, Accepted: int64(i),
+			Workers: []WorkerSample{
+				{RSSBytes: 18 << 20, Requests: 5000},
+				{RSSBytes: 17 << 20, Requests: 5000},
+			}}, opts)
+	}
+
+	if got := st.Pools["shop"].SizingBytes(); got < settled/2 {
+		t.Errorf("a reload reset the counter and the estimate collapsed from %dMiB to "+
+			"%dMiB; this tool causes those reloads", settled>>20, got>>20)
+	}
+}

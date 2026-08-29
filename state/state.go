@@ -39,9 +39,16 @@ type Observation struct {
 	Pool    string
 	Workers []WorkerSample
 
-	// ActiveNow is how many workers were busy at this instant. A smaller reading
-	// from a pool with nobody working is a quiet pool, not a cheaper one.
+	// ActiveNow is how many workers were busy at this instant, and Accepted is
+	// the pool's lifetime connection counter.
+	//
+	// A smaller reading from a pool doing no work is a quiet pool, not a cheaper
+	// one. The counter is the reliable way to tell: how many workers happen to be
+	// mid-request when a scrape lands depends on how long a request takes, so a
+	// pool answering in two milliseconds reads as idle almost every time it is
+	// looked at however much traffic it carries.
 	ActiveNow int
+	Accepted  int64
 	At        time.Time
 }
 
@@ -111,6 +118,14 @@ type PoolState struct {
 	// that triples worker cost would otherwise let a pool be grown against a
 	// figure the workers no longer resemble.
 	LastPeakBytes int64 `json:"last_peak_bytes,omitempty"`
+
+	// LastAccepted is the pool's connection counter as of the last scrape, so
+	// the next one can tell whether any work happened in between.
+	//
+	// A counter that has gone BACKWARDS means php-fpm reset it — a reload, which
+	// this tool causes — and that is treated as unknown rather than as negative
+	// work.
+	LastAccepted int64 `json:"last_accepted,omitempty"`
 
 	// PeakWorkers is the most workers this pool has had busy at once, as
 	// remembered by us rather than by PHP-FPM.
@@ -225,15 +240,21 @@ type Options struct {
 	// a shorter one safe.
 	HalfLifeDown time.Duration
 
-	// MinActiveToDecay is how many workers must be busy for a smaller reading to
-	// count as evidence.
+	// MinRequestsToDecay is how many requests a pool must have served since the
+	// last scrape for a smaller reading to count as evidence.
 	//
 	// This is the distinction the half-life alone could not make. A pool that got
 	// CHEAPER and a pool that got QUIETER both show smaller workers — PHP returns
 	// large allocations to the operating system, so an idle survivor genuinely
 	// shrinks — and only one of them says anything about what the workload costs.
-	// Concurrency tells them apart.
-	MinActiveToDecay int
+	//
+	// Counted in REQUESTS rather than in workers caught mid-flight, because the
+	// latter measures request duration as much as load: a pool answering in two
+	// milliseconds has nobody busy at almost any instant, and gating on that
+	// would pin its estimate to whatever peak it once reached, for ever. Which is
+	// the same fault as the one this gate exists to prevent, arrived at from the
+	// other side.
+	MinRequestsToDecay int64
 
 	// ConfidenceSamples and ConfidenceSpan are what a baseline needs before it
 	// is trusted enough to size a pool DOWN.
@@ -256,8 +277,8 @@ func (o Options) Defaults() Options {
 	if o.MinRequestsPerWorker <= 0 {
 		o.MinRequestsPerWorker = 20
 	}
-	if o.MinActiveToDecay <= 0 {
-		o.MinActiveToDecay = 2
+	if o.MinRequestsToDecay <= 0 {
+		o.MinRequestsToDecay = 5
 	}
 	if o.MinMatureWorkers <= 0 {
 		o.MinMatureWorkers = 2
@@ -418,9 +439,16 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if ps.FirstBusyAt.IsZero() {
 		ps.FirstBusyAt = at
 	}
+	// Whether the pool did any work is decided BEFORE the counter is advanced.
+	// Storing it first would compare the reading against itself, so the
+	// difference would always be zero and the estimate could never fall — the
+	// same shape of mistake as the ceiling counter that never fired.
+	worked := didWork(ps, obs, opts)
+
 	ps.LastBusyAt = at
 	ps.LastPeakBytes = peak
 	ps.LastPeakAt = at
+	ps.LastAccepted = obs.Accepted
 	if peak > ps.HighWaterBytes {
 		ps.HighWaterBytes = peak
 	}
@@ -432,7 +460,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		switch {
 		case peak > ps.TypicalPeakBytes:
 			alpha = opts.AlphaUp
-		case obs.ActiveNow < opts.MinActiveToDecay:
+		case !worked:
 			// Smaller, from a pool that is not working. That is what a quiet
 			// stretch looks like, and believing it is how a quiet night leaves
 			// the morning sized for workers that do not exist. The high-water
@@ -637,4 +665,30 @@ func (s *State) Names() []string {
 	sort.Strings(names)
 
 	return names
+}
+
+// didWork reports whether the pool served anything since the last scrape.
+//
+// The counter first, because it is the honest measure of load: it rises with
+// throughput whatever a request costs in time. The instantaneous busy count is a
+// fallback for a scrape that did not report the counter, and on its own it
+// measures request duration as much as traffic.
+//
+// A counter that has gone backwards means php-fpm reset it, which happens on
+// every reload — including the ones this tool performs. Unknown, not negative:
+// the reading is neither believed nor used to block, so the pool keeps whatever
+// estimate it had until the next scrape can compare properly.
+func didWork(ps *PoolState, obs Observation, opts Options) bool {
+	if obs.Accepted > 0 && ps.LastAccepted > 0 {
+		served := obs.Accepted - ps.LastAccepted
+		if served < 0 {
+			// Counter reset. Fall through to the instantaneous count rather than
+			// treating a reload as evidence either way.
+			return obs.ActiveNow > 0
+		}
+
+		return served >= opts.MinRequestsToDecay
+	}
+
+	return obs.ActiveNow > 0
 }
