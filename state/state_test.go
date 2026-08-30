@@ -1462,3 +1462,45 @@ func TestAScopedRoundDoesNotKeepAnotherMastersRemovedPoolAlive(t *testing.T) {
 			"for whatever pool is next given that name")
 	}
 }
+
+// TestSaveKeepsThePermissionsTheFileAlreadyHad.
+//
+// A rename installs the temporary file's permissions over the name, and this
+// forced 0644 on every save — so an operator who deliberately chmodded the
+// state file to 0600 on a shared host had it widened again within five minutes,
+// silently, for as long as the daemon ran.
+//
+// What is in the file is pool names and memory numbers rather than secrets,
+// which is why 0644 is a fine default and a bad thing to insist on.
+func TestSaveKeepsThePermissionsTheFileAlreadyHad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := New()
+	s.Learn(busyObs("app", time.Now().Add(-time.Hour)), Options{})
+
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o644 {
+		t.Fatalf("a new state file is %04o, want 0644", info.Mode().Perm())
+	}
+
+	// The operator's choice.
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %04o after a save, want the 0600 it was set to: the daemon "+
+			"widens it again every five minutes for as long as it runs",
+			info.Mode().Perm())
+	}
+}

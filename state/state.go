@@ -550,7 +550,19 @@ func (s *State) Save(path string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("cannot close state: %w", err)
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	// The mode the file already has, when it has one.
+	//
+	// A rename installs the temp file's permissions over the name, and this
+	// forced 0644 every time — so an operator who deliberately chmodded the
+	// state file to 0600 on a shared host had it widened again within five
+	// minutes, silently, for as long as the daemon ran. What is in here is pool
+	// names and memory numbers rather than secrets, which is why 0644 is a fine
+	// DEFAULT and a bad thing to insist on.
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
 		return fmt.Errorf("cannot set state permissions: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
