@@ -163,7 +163,17 @@ or choose somewhere you own:
         *":$install_dir:"*) ;;
         *) say ""
            say "note: $install_dir is not on your PATH. Add it with:"
-           say "  export PATH=\"$install_dir:\$PATH\"" ;;
+           say "  export PATH=\"$install_dir:\$PATH\""
+           # A conventional system directory that exists but was not writable is
+           # usually why this landed off-PATH. Offer the system-wide install as an
+           # explicit sudo command for the user to run — printed, never invoked,
+           # the same stance as the not-writable path above: escalation stays in
+           # their hands, not the installer's.
+           if [ "$install_dir" != "/usr/local/bin" ] && [ -d /usr/local/bin ] && [ ! -w /usr/local/bin ]; then
+               say ""
+               say "or, to put it on the system PATH instead:"
+               say "  sudo install -m 0755 $install_dir/$BIN /usr/local/bin/$BIN"
+           fi ;;
     esac
 
     say ""
