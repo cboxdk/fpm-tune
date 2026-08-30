@@ -1,6 +1,6 @@
 ---
 title: Dividing the budget
-weight: 3
+weight: 4
 description: The allocator — floors first, then the pools a shortage is actually hurting, cheapest fix first; and what happens when the floors do not fit.
 ---
 

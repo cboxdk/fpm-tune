@@ -169,9 +169,25 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 	fmt.Fprintf(&b, "; %s\n", result.Budget.Describe())
 	fmt.Fprintf(&b, "; reserved for the system: %s (%s)\n",
 		budget.HumanBytes(result.Reserve), result.ReserveReason)
+	if result.ChildReserve > 0 {
+		fmt.Fprintf(&b, "; reserved for spawned children: %s (%s)\n",
+			budget.HumanBytes(result.ChildReserve), result.ChildReserveReason)
+	}
 	fmt.Fprintf(&b, "; allocated %s of %s\n",
 		budget.HumanBytes(result.Plan.AllocatedBytes),
 		budget.HumanBytes(result.Plan.TotalBytes-result.Reserve))
+
+	// The cgroup's own high-water, where there is one. It counts the children
+	// the per-worker numbers below miss, so it is the honest ceiling to read the
+	// allocation against — and if it sits well above what the workers sum to,
+	// this host is spending memory on spawned processes that the sizing does not
+	// yet see.
+	if result.HasCgroupUsage {
+		fmt.Fprintf(&b, "; cgroup used %s now, %s at its peak (workers AND everything "+
+			"they spawned — the number the OOM killer enforces against)\n",
+			budget.HumanBytes(result.CgroupUsage.CurrentBytes),
+			budget.HumanBytes(result.CgroupUsage.PeakBytes))
+	}
 
 	for _, w := range result.Plan.Warnings {
 		fmt.Fprintf(&b, ";\n; WARNING: %s\n", w)
@@ -205,6 +221,21 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 				"(%d readings)\n",
 				budget.HumanBytes(d.P50), budget.HumanBytes(d.P95),
 				budget.HumanBytes(d.P99), budget.HumanBytes(d.WorstSeen), d.Samples)
+
+			// The children line appears only for a pool that actually spawned
+			// something, so a plain web pool's recommendation is not cluttered
+			// with a zero. Where it does appear, it is the memory this pool costs
+			// beyond its workers — an ffmpeg, an imagemagick — which the per-worker
+			// numbers above do not include and which sizing, today, does not yet
+			// account for. Read it as a warning that the worker numbers understate
+			// this pool.
+			if child := d.ChildBytes(); child > 0 {
+				fmt.Fprintf(&b, ";   spawned children add up to %s at their worst "+
+					"(worker %s, worker+children %s) — NOT yet in the sizing below\n",
+					budget.HumanBytes(child),
+					budget.HumanBytes(d.WorkerHighWater),
+					budget.HumanBytes(d.SubtreeHighWater))
+			}
 		}
 		if bootstrapped[p.Name] {
 			fmt.Fprintf(&b, ";   NOT YET MEASURED — this is a profile's guess, not this "+

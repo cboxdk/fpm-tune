@@ -25,6 +25,12 @@ type PoolView struct {
 	Name   string
 	Target phpfpm.Target
 
+	// Workload is the pool's own workload marker, read from its configuration —
+	// "subprocess-heavy", "bursty", "web" — or empty when it declared none, in
+	// which case the plan's global default applies. It decides how much memory to
+	// keep for the children a worker spawns before any has been observed.
+	Workload string
+
 	// CurrentMaxChildren is the configured pm.max_children, read from the
 	// effective configuration rather than inferred from the process count — a
 	// pool that has never been busy runs fewer workers than it is allowed.
@@ -205,6 +211,7 @@ func Sample(ctx context.Context, targets []phpfpm.Target, log *slog.Logger) []Po
 			views = append(views, PoolView{
 				Name:               outcome.Name,
 				Target:             target,
+				Workload:           target.Workload,
 				CurrentMaxChildren: target.MaxChildren,
 				MaxChildrenKnown:   target.MaxChildren > 0,
 				ProcessManager:     target.ProcessManager,
@@ -221,7 +228,7 @@ func Sample(ctx context.Context, targets []phpfpm.Target, log *slog.Logger) []Po
 }
 
 func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView {
-	view := PoolView{Name: outcome.Name, Target: target}
+	view := PoolView{Name: outcome.Name, Target: target, Workload: target.Workload}
 
 	// What discovery already knew, carried before anything can return early.
 	//
@@ -299,8 +306,9 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 		view.Workers = make([]state.WorkerSample, 0, len(pool.Processes))
 		for _, proc := range pool.Processes {
 			view.Workers = append(view.Workers, state.WorkerSample{
-				RSSBytes: proc.CurrentRSS,
-				Requests: proc.Requests,
+				RSSBytes:        proc.CurrentRSS,
+				SubtreeRSSBytes: proc.SubtreeRSS,
+				Requests:        proc.Requests,
 			})
 		}
 

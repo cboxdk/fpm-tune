@@ -48,6 +48,56 @@ func TestIdlePoolTeachesNothing(t *testing.T) {
 	}
 }
 
+// TestSubtreeHighWaterCapturesChildren: a worker that spawned an ffmpeg has a
+// subtree far larger than its own RSS, and the high-water of that subtree is
+// what tells an operator the pool costs more than its workers show. It must
+// never come out below the worker high-water — "children" is their difference.
+func TestSubtreeHighWaterCapturesChildren(t *testing.T) {
+	s := New()
+
+	s.Learn(Observation{
+		Pool: "media",
+		At:   time.Now(),
+		Workers: []WorkerSample{
+			// A worker at 90MiB that shelled out to a 600MiB ffmpeg.
+			{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500},
+			{RSSBytes: 85 * mb, SubtreeRSSBytes: 85 * mb, Requests: 620}, // no child
+		},
+	}, Options{})
+
+	ps := s.Pools["media"]
+	if ps.HighWaterBytes != 90*mb {
+		t.Errorf("worker high-water = %d, want 90MiB", ps.HighWaterBytes)
+	}
+	if ps.SubtreeHighWaterBytes != 690*mb {
+		t.Errorf("subtree high-water = %d, want 690MiB — the ffmpeg's memory is being lost",
+			ps.SubtreeHighWaterBytes)
+	}
+	if ps.SubtreeHighWaterBytes < ps.HighWaterBytes {
+		t.Error("subtree high-water fell below worker high-water; children would read negative")
+	}
+}
+
+// TestSubtreeHighWaterNeverBelowWorker: an older scrape with no subtree readings
+// must not drag the subtree high-water below the worker one.
+func TestSubtreeHighWaterNeverBelowWorker(t *testing.T) {
+	s := New()
+
+	s.Learn(Observation{
+		Pool: "app",
+		At:   time.Now(),
+		Workers: []WorkerSample{
+			{RSSBytes: 120 * mb, SubtreeRSSBytes: 0, Requests: 500}, // no subtree measured
+		},
+	}, Options{})
+
+	ps := s.Pools["app"]
+	if ps.SubtreeHighWaterBytes < ps.HighWaterBytes {
+		t.Errorf("subtree high-water %d below worker high-water %d with no subtree reading",
+			ps.SubtreeHighWaterBytes, ps.HighWaterBytes)
+	}
+}
+
 // TestMatureWorkersAreLearnedFrom is the other half: once workers have done real
 // work, their memory is the number to size against.
 func TestMatureWorkersAreLearnedFrom(t *testing.T) {

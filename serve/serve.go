@@ -92,6 +92,11 @@ type Config struct {
 	MemoryOverride int64
 	ReserveBytes   int64
 
+	// Workload is the default class for pools that do not declare one, deciding
+	// how much to hold back for the processes their workers spawn. The zero value
+	// reserves nothing (WorkloadWeb), the behaviour before workloads existed.
+	Workload plan.Workload
+
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
@@ -135,6 +140,12 @@ type Loop struct {
 	exhausted        bool
 	boundAddr        string
 	recommendBlocked bool
+
+	// cgroupPeak is the running high-water of the master cgroup's usage. The
+	// kernel keeps its own peak on newer kernels, but not on older ones, so the
+	// largest CurrentBytes seen is accumulated here to stand in — and it survives
+	// a scrape where the reading briefly dips, which a raw current never would.
+	cgroupPeak int64
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -316,18 +327,38 @@ func (l *Loop) round(ctx context.Context) {
 	if l.cfg.DetectBudget != nil {
 		detect = l.cfg.DetectBudget
 	}
-	limits := detect(MasterPIDOf(views))
+	masterPID := MasterPIDOf(views)
+	limits := detect(masterPID)
 	if l.cfg.MemoryOverride > 0 {
 		limits = limits.WithOverride(l.cfg.MemoryOverride)
 	}
 
+	// The cgroup's actual usage, beside its limit. This is reporting only — the
+	// number the OOM killer enforces against, counting the children a per-worker
+	// sample can miss — and it is absent on a bare VM, where subtree RSS is the
+	// only view. The peak is kept as a running high-water so an older kernel with
+	// no memory.peak still accumulates one, and a momentary dip cannot lower it.
+	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
+	if hasCgroup {
+		if usage.CurrentBytes > l.cgroupPeak {
+			l.cgroupPeak = usage.CurrentBytes
+		}
+		if usage.PeakBytes > l.cgroupPeak {
+			l.cgroupPeak = usage.PeakBytes
+		}
+		usage.PeakBytes = l.cgroupPeak
+	}
+
 	result, err := plan.Build(plan.Input{
-		At:           now,
-		Limits:       limits,
-		Views:        views,
-		State:        l.state,
-		ReserveBytes: l.cfg.ReserveBytes,
-		StateOptions: l.cfg.StateOptions,
+		At:             now,
+		Limits:         limits,
+		Views:          views,
+		State:          l.state,
+		ReserveBytes:   l.cfg.ReserveBytes,
+		StateOptions:   l.cfg.StateOptions,
+		Workload:       l.cfg.Workload,
+		CgroupUsage:    usage,
+		HasCgroupUsage: hasCgroup,
 	})
 	if err != nil {
 		// A host that cannot fit its pools is exactly where the metrics matter,

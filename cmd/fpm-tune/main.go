@@ -93,6 +93,7 @@ type commonFlags struct {
 	statePath   *string
 	memory      *string
 	reserve     *string
+	workload    *string
 	timeout     *time.Duration
 	verbose     *bool
 	noLearn     *bool
@@ -100,13 +101,30 @@ type commonFlags struct {
 	confSpan    *time.Duration
 }
 
+// resolveWorkload turns the --workload flag into a class, warning on a name it
+// does not know rather than silently treating a typo as the default — "medai"
+// should tell the operator, not quietly stop reserving for children.
+func resolveWorkload(name string, log *slog.Logger) plan.Workload {
+	w, ok := plan.WorkloadByName(name, plan.WorkloadWeb)
+	if !ok {
+		log.Warn("Unknown --workload; using the default (web)",
+			"given", name, "known", "web, bursty, subprocess-heavy")
+	}
+
+	return w
+}
+
 func registerCommon(fs *flag.FlagSet) commonFlags {
 	return commonFlags{
 		statePath: fs.String("state", state.DefaultPath, "path to the learned baselines"),
 		memory:    fs.String("memory", "", "override the detected memory limit (e.g. 8G)"),
 		reserve:   fs.String("reserve", "", "memory to hold back from workers (e.g. 1G)"),
-		timeout:   fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
-		verbose:   fs.Bool("verbose", false, "log what is being read"),
+		workload: fs.String("workload", "", "default class for pools that do not declare one, deciding how much to keep for the "+
+			"processes workers spawn: web (spawn nothing — the default), bursty (a child now and then), "+
+			"subprocess-heavy (a child on most requests, e.g. ffmpeg). A pool overrides this with "+
+			"env[FPM_TUNE_WORKLOAD] in its own config. Measurement refines it once a baseline exists."),
+		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
+		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
 			"do not record this scrape. Both commands learn by default, so running plan "+
 				"on a schedule before ever running apply builds a real baseline"),
@@ -224,10 +242,12 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	// scrape. On a VM the cap lives on php-fpm's own systemd slice and the root
 	// cgroup has none, so reading it here sized a 3GiB service against a 20GiB
 	// machine.
-	limits := budget.DetectFor(serve.MasterPIDOf(views))
+	masterPID := serve.MasterPIDOf(views)
+	limits := budget.DetectFor(masterPID)
 	if overrideBytes > 0 {
 		limits = limits.WithOverride(overrideBytes)
 	}
+	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 
 	stateOpts := state.Options{
 		ConfidenceSamples: *c.confSamples,
@@ -242,12 +262,15 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	}
 
 	result, buildErr := plan.Build(plan.Input{
-		At:           now,
-		Limits:       limits,
-		Views:        views,
-		State:        st,
-		ReserveBytes: reserveBytes,
-		StateOptions: stateOpts,
+		At:             now,
+		Limits:         limits,
+		Views:          views,
+		State:          st,
+		ReserveBytes:   reserveBytes,
+		StateOptions:   stateOpts,
+		Workload:       resolveWorkload(*c.workload, log),
+		CgroupUsage:    usage,
+		HasCgroupUsage: hasCgroup,
 	})
 
 	// After the plan, for the same reason as in serve: these counters are the
@@ -790,6 +813,7 @@ func runServe(args []string) error {
 		BackupDir:      *backupDir,
 		MemoryOverride: memoryOverride,
 		ReserveBytes:   reserveBytes,
+		Workload:       resolveWorkload(*c.workload, log),
 		ScrapeTimeout:  *c.timeout,
 		ApplyOptions: apply.Options{
 			MinInterval: *minInterval,

@@ -1,6 +1,6 @@
 ---
 title: Hysteresis
-weight: 4
+weight: 5
 description: When a change is worth a reload and when it is not, and why growing and shrinking are held to different caution.
 ---
 

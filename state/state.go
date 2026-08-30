@@ -29,6 +29,14 @@ const formatVersion = 1
 // WorkerSample is one worker as seen in one scrape.
 type WorkerSample struct {
 	RSSBytes int64
+
+	// SubtreeRSSBytes is the worker plus everything it spawned — the ffmpeg or
+	// imagemagick a request shelled out to, which RSSBytes does not include. It
+	// is always at least RSSBytes; the difference is what the children cost.
+	// Zero means it was not measured (no process snapshot), distinct from a
+	// measured subtree equal to RSSBytes because nothing was spawned.
+	SubtreeRSSBytes int64
+
 	// Requests is how many requests this worker has served since it started.
 	// It is the maturity signal — see Learn.
 	Requests int64
@@ -78,6 +86,13 @@ type PoolState struct {
 	// for sizing: it never comes down, so one pathological request would pin the
 	// pool's size forever.
 	HighWaterBytes int64 `json:"high_water_bytes"`
+
+	// SubtreeHighWaterBytes is the largest worker-plus-its-children ever seen —
+	// the same high-water as HighWaterBytes but over each worker's whole subtree,
+	// so the gap between the two is what the children (an ffmpeg, an imagemagick)
+	// cost at their worst. Reported, not yet used for sizing. Zero until a scrape
+	// carried subtree readings.
+	SubtreeHighWaterBytes int64 `json:"subtree_high_water_bytes"`
 
 	// Samples counts every scrape; BusySamples counts only those that taught us
 	// something. The gap between them is how much of the watching was wasted on
@@ -713,11 +728,24 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// for being young. The reason for the filter is that a young worker has not
 	// loaded the application and reads small — and a small reading cannot move a
 	// maximum, so the filter was never doing that job here.
-	var peak int64
+	var peak, subtreePeak int64
 	mature := 0
 	for _, w := range obs.Workers {
 		if w.RSSBytes <= 0 {
 			continue
+		}
+
+		// The subtree peak travels beside the own-RSS peak, over the same
+		// readings, so the two high-waters are comparable and their difference is
+		// the worst the children ever cost. A worker with no subtree reading
+		// (an older scrape, or the process table was unreadable) falls back to its
+		// own RSS, so this can never come out below the own-RSS peak.
+		subtree := w.SubtreeRSSBytes
+		if subtree < w.RSSBytes {
+			subtree = w.RSSBytes
+		}
+		if subtree > subtreePeak {
+			subtreePeak = subtree
 		}
 
 		// Every reading goes into the description of what was seen, including
@@ -886,6 +914,15 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	ps.LastPeakAt = at
 	if peak > ps.HighWaterBytes {
 		ps.HighWaterBytes = peak
+	}
+	// Never below the own-RSS high-water: the two are the same maximum over
+	// different scopes, and "children" is their difference — it must not read
+	// negative because an old scrape carried no subtree.
+	if subtreePeak > ps.SubtreeHighWaterBytes {
+		ps.SubtreeHighWaterBytes = subtreePeak
+	}
+	if ps.SubtreeHighWaterBytes < ps.HighWaterBytes {
+		ps.SubtreeHighWaterBytes = ps.HighWaterBytes
 	}
 
 	if ps.TypicalPeakBytes == 0 {

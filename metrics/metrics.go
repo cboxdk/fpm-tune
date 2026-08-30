@@ -24,12 +24,15 @@ type Collectors struct {
 	workersConfigured  *prometheus.GaugeVec
 	workersRecommended *prometheus.GaugeVec
 	workerRSS          *prometheus.GaugeVec
+	subtreeRSS         *prometheus.GaugeVec
+	childRSS           *prometheus.GaugeVec
 	confidence         *prometheus.GaugeVec
 	demandUnmet        *prometheus.GaugeVec
 	poolMeasured       *prometheus.GaugeVec
 
 	poolsAmbiguous    prometheus.Gauge
 	budgetBytes       *prometheus.GaugeVec
+	cgroupBytes       *prometheus.GaugeVec
 	capacityExhausted prometheus.Gauge
 	poolsUnreachable  prometheus.Gauge
 	lastRun           prometheus.Gauge
@@ -61,6 +64,10 @@ func New() *Collectors {
 			// and "typical_peak" is not a quantile in any case — it is an
 			// asymmetric moving estimate.
 			"Per-worker memory. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen; \"p50\"/\"p95\"/\"p99\" are the measured spread, which is what to graph when a host misbehaves at its busiest minute rather than on average.", "pool", "estimate"),
+		subtreeRSS: gaugeVec(reg, "fpm_tune_pool_subtree_rss_bytes",
+			"The high-water mark of a worker AND everything it spawned — an ffmpeg, an imagemagick — which fpm_tune_pool_worker_rss_bytes does not include. Compare it to that metric's high_water: the gap is what children cost. A point-in-time sample misses a child that lived and died between scrapes; the cgroup high-water, where there is a cgroup, is what catches those.", "pool"),
+		childRSS: gaugeVec(reg, "fpm_tune_pool_child_rss_bytes",
+			"What a pool's spawned children cost at their worst: subtree high-water minus worker high-water. Zero for a pool whose workers never shell out — a plain web pool — and large for one doing media work. This is the memory an autotuner that only reads worker RSS is blind to.", "pool"),
 		confidence: gaugeVec(reg, "fpm_tune_pool_baseline_confidence",
 			// Corrected: it used to say a pool below 1 is "sized from an
 			// estimate", which stopped being true when the cost and the
@@ -77,6 +84,9 @@ func New() *Collectors {
 
 		budgetBytes: gaugeVec(reg, "fpm_tune_budget_bytes",
 			"The memory budget, by state: total, reserved, allocated to workers, or free.", "state"),
+
+		cgroupBytes: gaugeVec(reg, "fpm_tune_cgroup_memory_bytes",
+			"What the master's cgroup has actually used, by state: \"current\" now, \"peak\" at its high-water. Counts every process in the cgroup — workers AND the children they spawned — so it is the ground truth the OOM killer enforces against, and the number to compare fpm_tune_budget_bytes against. Absent on a host with no cgroup, where the per-pool subtree metrics are the only view.", "state"),
 
 		capacityExhausted: gauge(reg, "fpm_tune_capacity_exhausted",
 			"1 when a pool wants more workers and there is nowhere left to get them — no free budget and no neighbour holding memory it is not using. "+
@@ -171,6 +181,8 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 	c.workersConfigured.Reset()
 	c.workersRecommended.Reset()
 	c.workerRSS.Reset()
+	c.subtreeRSS.Reset()
+	c.childRSS.Reset()
 	c.confidence.Reset()
 	c.demandUnmet.Reset()
 	c.poolMeasured.Reset()
@@ -205,6 +217,14 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 				conf = ps.Confidence(opts)
 				c.workerRSS.WithLabelValues(p.Name, "typical_peak").Set(float64(ps.TypicalPeakBytes))
 				c.workerRSS.WithLabelValues(p.Name, "high_water").Set(float64(ps.HighWaterBytes))
+
+				// Only once a subtree has actually been measured, so a pool on an
+				// older scrape (or one whose process table could not be read) does
+				// not publish a zero that reads as "children cost nothing".
+				if ps.SubtreeHighWaterBytes > 0 {
+					c.subtreeRSS.WithLabelValues(p.Name).Set(float64(ps.SubtreeHighWaterBytes))
+					c.childRSS.WithLabelValues(p.Name).Set(float64(ps.SubtreeHighWaterBytes - ps.HighWaterBytes))
+				}
 			}
 		}
 		c.confidence.WithLabelValues(p.Name).Set(conf)
@@ -212,8 +232,21 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 
 	c.budgetBytes.WithLabelValues("total").Set(float64(result.Plan.TotalBytes))
 	c.budgetBytes.WithLabelValues("reserved").Set(float64(result.Reserve))
+	// The child reserve as its own series, so a dashboard can show how much of a
+	// host is being kept for spawned processes rather than workers. Zero, and
+	// harmlessly present, on a host whose pools spawn nothing.
+	c.budgetBytes.WithLabelValues("reserved_children").Set(float64(result.ChildReserve))
 	c.budgetBytes.WithLabelValues("allocated").Set(float64(result.Plan.AllocatedBytes))
 	c.budgetBytes.WithLabelValues("free").Set(float64(result.Plan.FreeBytes))
+
+	// Cleared and set only when there is a cgroup, so a bare VM does not publish
+	// a zero that reads as "the cgroup used no memory" rather than "there is no
+	// cgroup". The per-pool subtree metrics carry the child memory there.
+	c.cgroupBytes.Reset()
+	if result.HasCgroupUsage {
+		c.cgroupBytes.WithLabelValues("current").Set(float64(result.CgroupUsage.CurrentBytes))
+		c.cgroupBytes.WithLabelValues("peak").Set(float64(result.CgroupUsage.PeakBytes))
+	}
 
 	c.capacityExhausted.Set(boolValue(result.Plan.CapacityExhausted))
 	c.poolsUnreachable.Set(float64(len(result.Unreachable)))

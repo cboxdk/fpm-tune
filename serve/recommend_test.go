@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cboxdk/fpm-tune/allocate"
+	"github.com/cboxdk/fpm-tune/plan"
 	"github.com/cboxdk/phpfpm"
 )
 
@@ -124,4 +126,48 @@ func TestRecommendInsideThePoolDirectoryIsRefusedAtStartup(t *testing.T) {
 		t.Fatalf("a recommendation path outside the pool directory was refused: %v", err)
 	}
 	loop.Close()
+}
+
+// TestRecommendationShowsChildrenWhenAPoolSpawnsThem: the whole point of the
+// subtree measurement is that a media pool's ffmpeg shows up somewhere a person
+// reading the recommendation can see it. A plain pool that spawns nothing gets
+// no children line, so the file is not cluttered with zeroes.
+func TestRecommendationShowsChildrenWhenAPoolSpawnsThem(t *testing.T) {
+	const mb = 1 << 20
+
+	result := plan.Result{
+		Plan: allocate.Plan{
+			Pools: []allocate.PoolPlan{
+				{Name: "media", MaxChildren: 4, WorkerBytes: 90 * mb, Reason: "measured 90MiB"},
+				{Name: "web", MaxChildren: 8, WorkerBytes: 60 * mb, Reason: "measured 60MiB"},
+			},
+			TotalBytes:     8192 * mb,
+			AllocatedBytes: 840 * mb,
+		},
+		Reserve:       512 * mb,
+		ReserveReason: "the operating system",
+		Distribution: []plan.PoolDistribution{
+			{
+				Name: "media", P50: 60 * mb, P95: 90 * mb, P99: 95 * mb, WorstSeen: 95 * mb,
+				Samples: 100, WorkerHighWater: 90 * mb, SubtreeHighWater: 690 * mb, // 600MiB ffmpeg
+			},
+			{
+				Name: "web", P50: 55 * mb, P95: 60 * mb, P99: 62 * mb, WorstSeen: 62 * mb,
+				Samples: 100, WorkerHighWater: 60 * mb, SubtreeHighWater: 60 * mb, // nothing spawned
+			},
+		},
+	}
+
+	file, _ := renderRecommendation(result, time.Unix(1_700_000_000, 0))
+
+	if !strings.Contains(file, "spawned children add up to") {
+		t.Errorf("the media pool's children are not shown; an operator sizing by hand "+
+			"cannot see the ffmpeg:\n%s", file)
+	}
+	// The web pool spawns nothing, so its section must carry no children line.
+	// Both pool sections mention "spawned children" only if wrongly rendered; the
+	// count of that phrase must be exactly one.
+	if n := strings.Count(file, "spawned children add up to"); n != 1 {
+		t.Errorf("children line rendered %d times, want exactly 1 (only the media pool):\n%s", n, file)
+	}
 }

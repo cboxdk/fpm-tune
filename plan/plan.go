@@ -54,6 +54,21 @@ type Input struct {
 	State   *state.State
 	Profile Profile
 
+	// Workload is the default assumption about what pools do — whether their
+	// workers spawn subprocesses — used to reserve for children before any has
+	// been observed. A pool overrides it with a marker in its own config
+	// (PoolView.Workload). The zero value reserves nothing, which is WorkloadWeb
+	// and the behaviour before workloads existed.
+	Workload Workload
+
+	// CgroupUsage is what the master's cgroup has actually used, where there is
+	// a cgroup. HasCgroupUsage is false on a bare VM or dedicated host without
+	// one — there the per-worker subtree measurement stands alone. Reporting
+	// only: it is carried to Result for the metrics and the recommendation, not
+	// used to size anything (yet).
+	CgroupUsage    budget.CgroupUsage
+	HasCgroupUsage bool
+
 	// ReserveBytes overrides the profile's reserve when non-zero.
 	ReserveBytes int64
 
@@ -80,6 +95,25 @@ type PoolDistribution struct {
 	// largest-worker-ever of zero.
 	WorstSeen int64
 	Samples   int64
+
+	// WorkerHighWater and SubtreeHighWater are the largest worker ever seen on
+	// its own and with everything it spawned. The gap between them, ChildBytes,
+	// is what the pool's children (an ffmpeg, an imagemagick) cost at their
+	// worst — zero for a plain web pool, large for one doing media work.
+	// SubtreeHighWater is zero until a scrape carried subtree readings.
+	WorkerHighWater  int64
+	SubtreeHighWater int64
+}
+
+// ChildBytes is what this pool's spawned children cost at their worst: the gap
+// between the subtree high-water and the worker high-water. Zero when nothing
+// was spawned, or when subtree was never measured.
+func (d PoolDistribution) ChildBytes() int64 {
+	if d.SubtreeHighWater <= d.WorkerHighWater {
+		return 0
+	}
+
+	return d.SubtreeHighWater - d.WorkerHighWater
 }
 
 // Result is a plan plus the reasoning that produced it.
@@ -87,9 +121,16 @@ type Result struct {
 	Plan   allocate.Plan
 	Budget budget.Limits
 
-	// Reserve is what was held back from workers, and why.
+	// Reserve is what was held back from workers for the system, and why.
 	Reserve       int64
 	ReserveReason string
+
+	// ChildReserve is what was held back, on top of the system reserve, for the
+	// processes pool workers spawn — an ffmpeg, an imagemagick — and why. Zero on
+	// a host whose pools spawn nothing. It is additive: it only ever reduces what
+	// workers are given, so it cannot make a host more overcommitted than it was.
+	ChildReserve       int64
+	ChildReserveReason string
 
 	// Bootstrapped names the pools sized from a profile rather than from
 	// measurement, so the output can say which numbers are guesses.
@@ -119,6 +160,14 @@ type Result struct {
 	// with the most expensive worker ever seen from it. Advisory: sizing to it
 	// would pin the host to its worst minute.
 	WorstCaseBytes int64
+
+	// CgroupUsage is what the master's cgroup has actually used — every process
+	// in it, children included — and HasCgroupUsage says whether there was a
+	// cgroup to read. It is the ground truth the OOM killer enforces against, and
+	// the one number that catches a child a per-worker sample missed. Reporting
+	// only. Absent on a bare VM or dedicated host, where subtree RSS stands alone.
+	CgroupUsage    budget.CgroupUsage
+	HasCgroupUsage bool
 
 	// Views is what was observed, kept so the rendered plan can show each pool's
 	// current setting beside the proposed one. A plan that shows only the new
@@ -168,9 +217,17 @@ func Build(in Input) (Result, error) {
 	sort.Strings(result.Bootstrapped)
 	sort.Strings(result.Unreachable)
 
+	// The child reserve is held back on TOP of the system reserve, before the
+	// workers are sized against what is left. It is additive by construction, so
+	// it can only ever produce fewer workers — never more — and cannot make a
+	// host more overcommitted than it already was.
+	childReserve, childReason := childReserveFor(in.Views, in.State, pools, in.Workload, in.CgroupUsage, in.HasCgroupUsage)
+	result.ChildReserve = childReserve
+	result.ChildReserveReason = childReason
+
 	allocation, err := allocate.Compute(allocate.Budget{
 		TotalBytes:   in.Limits.MemoryBytes,
-		ReserveBytes: reserve,
+		ReserveBytes: reserve + childReserve,
 		CPUs:         in.Limits.CPUs,
 	}, pools, in.AllocateOptions)
 	if err != nil {
@@ -181,6 +238,8 @@ func Build(in Input) (Result, error) {
 	result.Views = in.Views
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
+	result.CgroupUsage = in.CgroupUsage
+	result.HasCgroupUsage = in.HasCgroupUsage
 	for name := range ambiguous {
 		result.Ambiguous = append(result.Ambiguous, name)
 	}
@@ -234,6 +293,9 @@ func distributionOf(views []observe.PoolView, st *state.State) []PoolDistributio
 			// thing and disagreeing is worse than either alone.
 			WorstSeen: ps.Percentile(1),
 			Samples:   ps.RSSSamples,
+
+			WorkerHighWater:  ps.HighWaterBytes,
+			SubtreeHighWater: ps.SubtreeHighWaterBytes,
 		})
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Name < out[b].Name })

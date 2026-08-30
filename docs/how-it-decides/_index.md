@@ -19,10 +19,14 @@ Read it in order:
    what one worker costs, why it separates "what it costs" from "may I shrink
    it", and why it will believe an expensive reading instantly but a cheap one
    only slowly.
-3. **[Dividing the budget](dividing-the-budget.md)** — the allocator: floors
+3. **[Spawned children](spawned-children.md)** — the memory a worker's own RSS
+   does not include: the ffmpeg it shelled out to. How that is measured, why the
+   cgroup is the ground truth where there is one, and how a workload declaration
+   keeps a media pool safe on the run before it has been measured.
+4. **[Dividing the budget](dividing-the-budget.md)** — the allocator: floors
    first, then demand to the pools a shortage is actually hurting, cheapest fix
    first; and what it does when the floors themselves do not fit.
-4. **[Hysteresis](hysteresis.md)** — when a change is worth a reload and when it
+5. **[Hysteresis](hysteresis.md)** — when a change is worth a reload and when it
    is not, and why growing and shrinking are not held to the same caution.
 
 The allocator ([dividing the budget](dividing-the-budget.md)) is pure
