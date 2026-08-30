@@ -3,13 +3,10 @@
 .claude/settings.local.json
 /data/
 
-# Test coverage files
+# Coverage
 coverage.out
 coverage.html
-/coverage*
 
 # Build output
 /build/
 /dist/
-/fpm-exporter
-/phpeek-fpm-exporter
