@@ -290,6 +290,9 @@ It writes production configuration, so it is built to fail safe.
 - **One writer at a time**, enforced with a lock on the pool directory as well as
   on the state file.
 
+Found a way past one of these? See [SECURITY.md](SECURITY.md) — please report it
+privately.
+
 ## Testing
 
 Beyond the unit tests, CI runs two suites against a real php-fpm:
