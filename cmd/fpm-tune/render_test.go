@@ -13,6 +13,7 @@ import (
 
 	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/phpfpm"
 )
 
 // TestTheOutcomeAnOperatorHasToActOnIsPrinted.
@@ -89,7 +90,7 @@ func TestTheOutcomeAnOperatorHasToActOnIsPrinted(t *testing.T) {
 // running, and sending an operator to check their privileges first costs them
 // the obvious answer.
 func TestNoPoolsDoesNotBlameRootFirst(t *testing.T) {
-	err := noPoolsError()
+	err := noMasterError()
 
 	msg := err.Error()
 	if !strings.Contains(msg, "systemctl status php-fpm") && !strings.Contains(msg, "pgrep") {
@@ -97,6 +98,30 @@ func TestNoPoolsDoesNotBlameRootFirst(t *testing.T) {
 	}
 	if root := strings.Index(msg, "root"); root >= 0 && root < strings.Index(msg, "running") {
 		t.Errorf("permissions are blamed before the process is even looked for:\n%s", msg)
+	}
+}
+
+// TestUnstatusedPoolsErrorPointsToEnableStatus: when a master IS running but its
+// pools have no status page, the message must name that, not send the operator to
+// look for a master that is up — and it must name the command that fixes it.
+func TestUnstatusedPoolsErrorPointsToEnableStatus(t *testing.T) {
+	err := unstatusedPoolsError([]phpfpm.Unstatused{
+		// The same pool twice, as a host mid-reload reports it from two masters.
+		{Name: "www", ConfigPath: "/etc/php/8.4/fpm/php-fpm.conf"},
+		{Name: "www", ConfigPath: "/etc/php/8.4/fpm/php-fpm.conf"},
+	})
+
+	msg := err.Error()
+	for _, want := range []string{"a php-fpm master is running", "pm.status_path", "fpm-tune enable-status", "www"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the message does not mention %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "no php-fpm master is running") {
+		t.Errorf("the message blames a missing master while one is running:\n%s", msg)
+	}
+	if strings.Contains(msg, "www, www") {
+		t.Errorf("a pool reported by two masters is listed twice:\n%s", msg)
 	}
 }
 

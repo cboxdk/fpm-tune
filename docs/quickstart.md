@@ -45,6 +45,17 @@ On a first run every pool is `estimated`, not measured — the numbers are a
 profile's guess until the tool has watched real traffic. That is expected, and
 the plan says so.
 
+If instead `plan` says a pool **has no `pm.status_path`**, that is a stock
+php-fpm: it sizes each pool from its live status page, and that page ships off.
+Turn it on and the pool becomes visible — then run `plan` again:
+
+```bash
+fpm-tune enable-status      # validated drop-in + reload; rolled back if it fails
+```
+
+(`apply` and `serve --apply` do this for you; you only need it by hand to `plan`
+first. See [First run](getting-started/first-run.md).)
+
 ## 3. Let it advise, permanently
 
 ```bash

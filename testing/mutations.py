@@ -384,6 +384,11 @@ MUTATIONS = [
     # the plan comparing a round's own reading against itself.
     ("serve: the counters are recorded before the plan", "serve/serve.go", "@@MOVE@@", ""),
     ("apply: the sandbox validation is bypassed", "apply/apply.go", "@@FUNC@@validateSandboxed", ""),
+    ("apply: the status sandbox validation is bypassed", "apply/status.go", "@@FUNC@@validateStatusSandboxed", ""),
+    ("apply: a status change is not taken back when the master dies",
+     "apply/status.go",
+     "		if rerr := restore(b, log); rerr != nil {\n			return StatusResult{RollbackFailed: []string{path}},\n				fmt.Errorf(\"%w: %w; AND the file could not be taken back out of %s\",\n					reason, err, path)\n		}\n",
+     ""),
     ("apply: the live tree is not validated after the write",
      "apply/apply.go",
      "	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {",

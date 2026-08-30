@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,6 +58,8 @@ func run(args []string) error {
 		return runPlan(args[1:])
 	case "apply":
 		return runApply(args[1:])
+	case "enable-status":
+		return runEnableStatus(args[1:])
 	case "serve":
 		return runServe(args[1:])
 	case "version", "--version", "-v":
@@ -80,6 +83,10 @@ func usage() {
   fpm-tune plan     show what would change, and why. Changes no PHP-FPM
                     configuration; records the observation (see -no-learn).
   fpm-tune apply    write the pool settings and reload PHP-FPM.
+  fpm-tune enable-status
+                    turn on the pm.status_path fpm-tune scrapes, for pools that
+                    have none, and reload — validated first, rolled back if the
+                    master does not come back.
   fpm-tune serve    keep measuring, with metrics on /metrics. Add -apply to act
                     on what it finds.
   fpm-tune version
@@ -215,7 +222,7 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		return plan.Result{}, nil, err
 	}
 	if len(targets) == 0 {
-		return plan.Result{}, nil, noPoolsError()
+		return plan.Result{}, nil, noPoolsError(ctx, log)
 	}
 	log.Debug("Discovered pools", "count", len(targets))
 
@@ -482,6 +489,22 @@ func runApply(args []string) error {
 	// would otherwise be invisible to the scrape that follows.
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
 
+	// Turn the status page on for any pool that has none, before measuring. A pool
+	// fpm-tune cannot scrape is one it cannot size, and apply is the point at which
+	// the operator has asked it to change the pools it manages — so it is the right
+	// place to bootstrap the page a stock php-fpm ships off. Best effort: a pool
+	// whose page could not be enabled is left to the ones whose could, not a reason
+	// to refuse the whole apply. EnableStatus invalidates the parse cache on its own
+	// reload, so the scrape below sees what it turned on.
+	if !*dryRun {
+		if res, serr := serve.EnsureStatus(ctx, master, apply.DefaultStatusPath, opts.BackupDir, log); serr != nil {
+			log.Warn("Could not enable the status page on pools that lack one; they will "+
+				"not be sized until it is on", "error", serr)
+		} else if len(res.Enabled) > 0 {
+			log.Info("Enabled the status page on pools that lacked one", "pools", res.Enabled)
+		}
+	}
+
 	result, st, err := gather(ctx, c, master.DropInDir, log)
 	if err != nil {
 		return err
@@ -574,15 +597,160 @@ func reportUnsavedApply(err error, path string) error {
 		"immediately. Fix the path and run again", path, err)
 }
 
+// runEnableStatus turns on the pm.status_path fpm-tune scrapes, for the pools on a
+// master that have none, and reloads — validated first, and rolled back if the
+// master does not come back. It is the onboarding step a stock php-fpm needs before
+// anything can be measured, offered explicitly so a read-only `plan` never has to
+// mutate a pool to make itself useful.
+func runEnableStatus(args []string) error {
+	fs := flag.NewFlagSet("enable-status", flag.ContinueOnError)
+	c := registerCommon(fs)
+	var (
+		dropInDir  = fs.String("drop-in-dir", "", "which master to act on, on a host running several (default: the directory the master includes)")
+		statusPath = fs.String("status-path", apply.DefaultStatusPath, "the pm.status_path to set on pools that have none")
+		backupDir  = fs.String("backup-dir", apply.DefaultBackupDir, "where the previous drop-in is kept while the change is in flight")
+		dryRun     = fs.Bool("dry-run", false, "render and validate, but write nothing and reload nothing")
+	)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "fpm-tune enable-status — turn on the pm.status_path fpm-tune "+
+			"scrapes, for pools that have none, and reload PHP-FPM.\n\nfpm-tune sizes each pool "+
+			"from its live status page; a stock php-fpm ships that page off, so there is nothing "+
+			"to measure until it is on. This writes a validated drop-in enabling it and reloads, "+
+			"rolling back if the master does not come back.\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := noPositionalArgs(fs); err != nil {
+		return err
+	}
+
+	log := newLogger(*c.verbose)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	// A reload and a settle window, so it gets the same room as apply.
+	ctx, cancelTimeout := context.WithTimeout(ctx, *c.timeout+30*time.Second)
+	defer cancelTimeout()
+
+	remembered := state.MasterRef{}
+	if prior, err := state.Load(*c.statePath); err == nil {
+		remembered = prior.Master
+	}
+
+	master, err := serve.MasterFromMemory(*dropInDir, remembered, log)
+	if err != nil {
+		if errors.Is(err, serve.ErrNoMaster) {
+			return errors.New("no php-fpm master is running, so there is no status page to " +
+				"enable. Start php-fpm and run this again")
+		}
+
+		return err
+	}
+
+	toEnable, exists, err := serve.UnstatusedFor(ctx, master, log)
+	if err != nil {
+		return err
+	}
+	if len(toEnable) == 0 {
+		fmt.Println("Every pool on this master already exposes a status page — nothing to do.")
+
+		return nil
+	}
+
+	// The pool-directory lock, so this does not race a `serve --apply` or an
+	// `apply` writing the same directory.
+	releaseResource, err := lock.Acquire(lock.ResourcePath(master.DropInDir))
+	if err != nil {
+		return err
+	}
+	defer releaseResource()
+
+	opts := apply.Options{BackupDir: *backupDir, DryRun: *dryRun}
+	res, err := apply.EnableStatus(ctx, master, toEnable, exists, *statusPath, opts, log)
+
+	renderEnableStatus(res, toEnable, *statusPath, *dryRun, err)
+
+	return err
+}
+
+// renderEnableStatus reports what enable-status did.
+func renderEnableStatus(res apply.StatusResult, requested []string, statusPath string, dryRun bool, err error) {
+	label := strings.Join(requested, ", ")
+
+	switch {
+	case err != nil:
+		if len(res.RollbackFailed) > 0 {
+			fmt.Fprintf(os.Stderr, "fpm-tune: the status page could not be enabled, and the "+
+				"rejected file is still in place: %s\n", strings.Join(res.RollbackFailed, ", "))
+		} else if res.RolledBack {
+			fmt.Fprintln(os.Stderr, "fpm-tune: the status page could not be enabled; the "+
+				"previous configuration is back in place.")
+		}
+	case dryRun:
+		fmt.Printf("Would enable pm.status_path %s on %s (validated; nothing written).\n", statusPath, label)
+	case res.Reloaded:
+		fmt.Printf("Enabled pm.status_path %s on %s and reloaded php-fpm. "+
+			"Run `fpm-tune plan` to size them.\n", statusPath, label)
+	default:
+		fmt.Printf("Enabled pm.status_path %s on %s.\n", statusPath, label)
+	}
+}
+
 // noPoolsError explains an empty discovery in the order the causes actually
 // occur. It used to name permissions and nothing else, which sends someone to
 // check their privileges when the answer is usually that php-fpm is not
 // running — and the two look identical from here.
-func noPoolsError() error {
+//
+// The most common cause on a fresh install is neither: a master IS running, but
+// its pools ship with pm.status_path commented out, so there is nothing to scrape.
+// That reads as "no pools" and sends the operator looking for a master that is up
+// the whole time — so it is named specifically, with the one command that fixes it.
+func noPoolsError(ctx context.Context, log *slog.Logger) error {
+	if unstatused, err := phpfpm.UnstatusedPools(ctx, log); err == nil && len(unstatused) > 0 {
+		return unstatusedPoolsError(unstatused)
+	}
+
+	return noMasterError()
+}
+
+// noMasterError is the fallback: nothing on the host at all.
+func noMasterError() error {
 	return errors.New("no PHP-FPM pools found. " +
 		"Either no php-fpm master is running — check with `systemctl status php-fpm` " +
 		"or `pgrep -a php-fpm` — or this process cannot see it: discovery reads the " +
 		"process table, and inspecting another user's processes needs root")
+}
+
+// unstatusedPoolsError names the pools a master is serving that have no status
+// page, and the one command that turns it on — the honest form of "no pools found"
+// when a master is running the whole time.
+func unstatusedPoolsError(unstatused []phpfpm.Unstatused) error {
+	// Deduped by name: a host mid-reload carries two masters for the same config,
+	// each reporting the same pool, and "pools www, www" reads as a bug.
+	seen := map[string]bool{}
+	names := make([]string, 0, len(unstatused))
+	for _, u := range unstatused {
+		if !seen[u.Name] {
+			seen[u.Name] = true
+			names = append(names, u.Name)
+		}
+	}
+	sort.Strings(names)
+
+	label := "pool " + names[0]
+	if len(names) > 1 {
+		label = "pools " + strings.Join(names, ", ")
+	}
+
+	return fmt.Errorf("a php-fpm master is running, but %s has no pm.status_path — "+
+		"fpm-tune reads each pool's live status page to size it, and cannot measure "+
+		"one without it. Turn it on and they become visible:\n"+
+		"  fpm-tune enable-status\n"+
+		"(fpm-tune adds it in a validated drop-in and reloads, rolling back if the "+
+		"master does not come back; or set pm.status_path in each pool's config and "+
+		"reload php-fpm yourself)", label)
 }
 
 func renderApplied(res apply.Result, dryRun bool, err error) {

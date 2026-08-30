@@ -606,6 +606,22 @@ func (l *Loop) reconcile(ctx context.Context) {
 	// A repair the reconcile just made would otherwise be invisible to the
 	// scrape that follows, because the parsed configuration is cached.
 	phpfpm.InvalidateConfigCache(master.Binary, master.ConfigPath)
+
+	// Turn the status page on for any pool that has none, so the loop can measure
+	// it. Once per process, beside the reconcile: a daemon started straight onto a
+	// stock php-fpm — the systemd unit's ordinary case — would otherwise find
+	// nothing to size and report "no pools" every round while a master runs. Best
+	// effort: a pool whose page could not be enabled is left to the ones whose
+	// could, and EnableStatus invalidates the parse cache on its own reload.
+	if master.PID > 0 {
+		if res, err := EnsureStatus(ctx, master, apply.DefaultStatusPath, l.cfg.BackupDir, l.log); err != nil {
+			l.log.Warn("Could not enable the status page on pools that lack one; they will "+
+				"not be sized until it is on", "error", err)
+		} else if len(res.Enabled) > 0 {
+			l.log.Info("Enabled the status page on pools that lacked one", "pools", res.Enabled)
+		}
+	}
+
 	l.reconciled = true
 }
 

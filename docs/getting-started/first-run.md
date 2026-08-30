@@ -29,6 +29,30 @@ Two things in its output are worth knowing on a first run:
   trust; `via /proc/meminfo` on a bare VM means it is sizing against the whole
   machine, which is correct only if php-fpm really has no cap.
 
+## `enable-status` turns on what it measures
+
+fpm-tune sizes each pool from its **live status page** — the `pm.status` php-fpm
+exposes over the pool's own socket. A stock php-fpm ships that page off: the
+default `www` pool has `pm.status_path` commented out. So on a fresh host `plan`
+finds a running master but nothing it can measure, and says exactly that:
+
+```
+a php-fpm master is running, but pool www has no pm.status_path — …
+  fpm-tune enable-status
+```
+
+Turn it on and the pool becomes visible:
+
+```bash
+fpm-tune enable-status
+```
+
+This writes a small drop-in enabling `pm.status_path` and reloads — through the
+same chain `apply` uses: validated against a sandbox first, and rolled back if the
+master does not come back. It changes no `pm.max_children`; it only opens the page.
+`apply` and `serve --apply` do this for you as their first step, so you need
+`enable-status` yourself only when you want to `plan` before you ever apply.
+
 ## `apply` acts immediately
 
 ```bash
