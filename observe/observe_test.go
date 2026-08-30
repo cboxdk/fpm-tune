@@ -162,3 +162,49 @@ func TestAPoolWithNoResultStillCarriesItsCeiling(t *testing.T) {
 			view.CurrentMaxChildren, view.MaxChildrenKnown)
 	}
 }
+
+// TestAPoolIsNotTwoPoolsBecauseTwoProcessesServeIt.
+//
+// Discovery scans the process table, and a host can carry more than one master
+// for the same configuration: an old one still holding a wedged worker after a
+// restart, or the moment during a daemonized reload when the re-execed master
+// and its predecessor are both up. Each reports the same pools from the same
+// file.
+//
+// Counted twice, every one of those pools is planned twice and the budget is
+// divided among twice as many entries. Measured on a five-pool host with a
+// lingering master: ten rows, every pool cut to half the workers it should have
+// had, and an `allocated` figure that agreed with itself all the way down.
+func TestAPoolIsNotTwoPoolsBecauseTwoProcessesServeIt(t *testing.T) {
+	same := []phpfpm.Target{
+		{Name: "shop", ConfigPath: "/etc/php-fpm.conf", PID: 100},
+		{Name: "www", ConfigPath: "/etc/php-fpm.conf", PID: 100},
+		// The same two pools, from a master that has not exited yet.
+		{Name: "shop", ConfigPath: "/etc/php-fpm.conf", PID: 200},
+		{Name: "www", ConfigPath: "/etc/php-fpm.conf", PID: 200},
+		// A spelling of the same path, which is the same file.
+		{Name: "shop", ConfigPath: "/etc/./php-fpm.conf", PID: 300},
+	}
+
+	got := dedupeTargets(same)
+	if len(got) != 2 {
+		names := make([]string, 0, len(got))
+		for _, g := range got {
+			names = append(names, g.Name+"@"+g.ConfigPath)
+		}
+		t.Errorf("two pools served by three processes came back as %d targets (%v); each "+
+			"duplicate takes a share of the budget, so every pool is planned at a "+
+			"fraction of what it should have", len(got), names)
+	}
+
+	// Two masters with DIFFERENT configurations are different pools, and merging
+	// them would be the opposite mistake.
+	different := dedupeTargets([]phpfpm.Target{
+		{Name: "www", ConfigPath: "/etc/php/8.2/php-fpm.conf"},
+		{Name: "www", ConfigPath: "/etc/php/8.3/php-fpm.conf"},
+	})
+	if len(different) != 2 {
+		t.Errorf("two masters' pools of the same name were merged into %d; they are "+
+			"different sites with different applications", len(different))
+	}
+}

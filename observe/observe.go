@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,16 +114,69 @@ func Discover(ctx context.Context, log *slog.Logger) ([]phpfpm.Target, error) {
 		return nil, fmt.Errorf("discovery was interrupted: %w", cerr)
 	}
 
-	targets := make([]phpfpm.Target, 0, len(found))
-	for _, d := range found {
-		targets = append(targets, phpfpm.TargetFromDiscovered(d))
-	}
+	// One target per (master, pool), because a pool is not two pools just
+	// because two processes are serving it.
+	//
+	// Discovery scans the process table, and a host can carry more than one
+	// master for the same configuration: an old one still holding a wedged
+	// worker after a restart, or the moment during a daemonized reload when the
+	// re-execed master and its predecessor are both up. Each reports the same
+	// pools from the same file.
+	//
+	// Counted twice, every one of those pools was planned twice and the budget
+	// was divided among twice as many entries — measured on a five-pool host
+	// with a lingering master: ten rows, every pool cut to half the workers it
+	// should have had, and an `allocated` figure that agreed with itself.
+	//
+	// Two masters with DIFFERENT configurations are a different matter entirely,
+	// and are refused elsewhere rather than merged here.
+	targets := dedupeTargets(targetsFrom(found))
 
 	// Sorted so that repeated runs report pools in the same order; process-table
 	// order is not stable.
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 
 	return targets, nil
+}
+
+func targetsFrom(found []phpfpm.Discovered) []phpfpm.Target {
+	out := make([]phpfpm.Target, 0, len(found))
+	for _, d := range found {
+		out = append(out, phpfpm.TargetFromDiscovered(d))
+	}
+
+	return out
+}
+
+// dedupeTargets keeps one target per (master, pool).
+//
+// A pool is not two pools because two processes are serving it. A host can
+// carry more than one master for the same configuration — an old one still
+// holding a wedged worker after a restart, or the moment during a daemonized
+// reload when the re-execed master and its predecessor are both up — and each
+// reports the same pools from the same file.
+//
+// Counted twice, every one of those pools is planned twice and the budget is
+// divided among twice as many entries. Measured on a five-pool host with a
+// lingering master: ten rows, every pool cut to half the workers it should have
+// had, and an `allocated` figure that agreed with itself all the way down.
+//
+// Two masters with DIFFERENT configurations are a different matter entirely,
+// and are refused elsewhere rather than merged here.
+func dedupeTargets(targets []phpfpm.Target) []phpfpm.Target {
+	seen := make(map[string]bool, len(targets))
+	out := make([]phpfpm.Target, 0, len(targets))
+	for _, t := range targets {
+		key := filepath.Clean(t.ConfigPath) + "\x00" + t.Name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		out = append(out, t)
+	}
+
+	return out
 }
 
 // Sample scrapes every target and returns one view per pool, in the order given.
