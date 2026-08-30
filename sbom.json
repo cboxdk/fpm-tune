@@ -5,11 +5,11 @@
   "version": 1,
   "metadata": {
     "component": {
-      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830130621-b73c425eb589?type=module",
+      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.1.0.devel?type=module",
       "type": "application",
       "name": "github.com/cboxdk/fpm-tune",
-      "version": "v0.0.0-20260830130621-b73c425eb589",
-      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830130621-b73c425eb589?goarch=arm64&goos=darwin&type=module",
+      "version": "v0.1.0-beta.1.0.devel",
+      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.1.0.devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/fpm-tune",
@@ -40,7 +40,7 @@
           "content": "5656ca2a735f57c6c9cdeaa86b870e2aa3ba6d8af75a0299c4ef19d7afa1b0e3"
         }
       ],
-      "purl": "pkg:golang/github.com/beorn7/perks@v1.0.1?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/beorn7/perks",
@@ -69,7 +69,7 @@
           "content": "a81c7d0b47708b8130e1458b4aa7de5075500ef08f8f06f8bbdabd78249424b1"
         }
       ],
-      "purl": "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/fcgx",
@@ -98,7 +98,7 @@
           "content": "5a2acfb6f553ce0ed11d14411eae3765a913f78e5744378045e1fc344d997c6a"
         }
       ],
-      "purl": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/phpfpm",
@@ -127,7 +127,7 @@
           "content": "50bf35e7153d4aab059626f3ba08338d786883b6cbea85fd05b3599cbd9416fb"
         }
       ],
-      "purl": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cespare/xxhash",
@@ -156,7 +156,7 @@
           "content": "fc5a5fea814fa1e16293db72eec8a86f41ba29ef10bd012e55cb82869c17ce96"
         }
       ],
-      "purl": "pkg:golang/github.com/go-ole/go-ole@v1.2.6?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/go-ole/go-ole",
@@ -174,10 +174,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-20211012122336-39d0f177ccd0?type=module",
+      "bom-ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
       "type": "library",
       "name": "github.com/lufia/plan9stats",
-      "version": "v0.0.0-20211012122336-39d0f177ccd0",
+      "version": "v0.0.0-devel",
       "scope": "required",
       "hashes": [
         {
@@ -185,7 +185,7 @@
           "content": "e84fb86b418ee736449d9f35a48af4c8bbed51693689ff7cdaa037177403e87e"
         }
       ],
-      "purl": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-20211012122336-39d0f177ccd0?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/lufia/plan9stats",
@@ -203,10 +203,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822?type=module",
+      "bom-ref": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
       "type": "library",
       "name": "github.com/munnerz/goautoneg",
-      "version": "v0.0.0-20191010083416-a7dc8b61c822",
+      "version": "v0.0.0-devel",
       "scope": "required",
       "hashes": [
         {
@@ -214,7 +214,7 @@
           "content": "0b7c3d3ea208d35fceab57359d4026f3c30e1dc402f65e6622548c02964cac70"
         }
       ],
-      "purl": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/munnerz/goautoneg",
@@ -232,10 +232,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-20210106213030-5aafc221ea8c?type=module",
+      "bom-ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
       "type": "library",
       "name": "github.com/power-devops/perfstat",
-      "version": "v0.0.0-20210106213030-5aafc221ea8c",
+      "version": "v0.0.0-devel",
       "scope": "required",
       "hashes": [
         {
@@ -243,7 +243,7 @@
           "content": "9dcabf98fc1017826380396b5449f70b5d55a061d937b9bcaa287080c12dcd8c"
         }
       ],
-      "purl": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-20210106213030-5aafc221ea8c?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/power-devops/perfstat",
@@ -272,7 +272,7 @@
           "content": "2672644445f35b151d0ae3c5a4859988f8aca53f71555e7dba2bb24766cf9675"
         }
       ],
-      "purl": "pkg:golang/github.com/prometheus/client_golang@v1.24.1?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/prometheus/client_golang@v1.24.1?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/prometheus/client_golang",
@@ -301,7 +301,7 @@
           "content": "a01b20c291acee257388cbeb1a1139ddcfc6acb52c65d1e7a8dc2a3cbc706729"
         }
       ],
-      "purl": "pkg:golang/github.com/prometheus/client_model@v0.6.2?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/prometheus/client_model@v0.6.2?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/prometheus/client_model",
@@ -330,7 +330,7 @@
           "content": "d47be33f80f9a0bdedf11b0f970c40f689efbd2b63b481d81395eebb03a2fcf6"
         }
       ],
-      "purl": "pkg:golang/github.com/prometheus/common@v0.70.1?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/prometheus/common@v0.70.1?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/prometheus/common",
@@ -359,7 +359,7 @@
           "content": "1a58d90adfb34934be359abcf1cc90d4b8d9f91087a77b95b9a6c1580e7e3892"
         }
       ],
-      "purl": "pkg:golang/github.com/prometheus/procfs@v0.21.1?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/prometheus/procfs",
@@ -388,7 +388,7 @@
           "content": "8b4b7c90bfa4413be90184e87ae8959374e00de28e162a193b766dcff899f692"
         }
       ],
-      "purl": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/shirou/gopsutil",
@@ -417,7 +417,7 @@
           "content": "9f174a40d70407abf3800d84d9bbf3288611b8d8fb5cd2784bf6914b02b316d3"
         }
       ],
-      "purl": "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/shoenig/go-m1cpu",
@@ -446,7 +446,7 @@
           "content": "d1068650539d41a21574f81f2136336937a066f7428e660ee767121401159aa5"
         }
       ],
-      "purl": "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/tklauser/go-sysconf",
@@ -475,7 +475,7 @@
           "content": "9e0f6c7184bb6b3d019383992efacd5cd4803b63f1af55d74403f28e1231f859"
         }
       ],
-      "purl": "pkg:golang/github.com/tklauser/numcpus@v0.6.1?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/tklauser/numcpus@v0.6.1?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/tklauser/numcpus",
@@ -504,7 +504,7 @@
           "content": "cc550acde840151790c0bcacd5bfe248c97e2501920928ed56a427f5b06b3e8d"
         }
       ],
-      "purl": "pkg:golang/github.com/yusufpapurcu/wmi@v1.2.4?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/yusufpapurcu/wmi@v1.2.4?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/yusufpapurcu/wmi",
@@ -533,7 +533,7 @@
           "content": "a3b5c63af6500800c1410e18ed536ad9d456411ec998e516f0ac71e19b0d816b"
         }
       ],
-      "purl": "pkg:golang/golang.org/x/sys@v0.47.0?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
       "evidence": {
         "licenses": [
           {
@@ -556,7 +556,7 @@
           "content": "7d5e99c21368703c812cad1d8fe7e0f1e92d7157a0041b84a25a5b4d0c813551"
         }
       ],
-      "purl": "pkg:golang/google.golang.org/protobuf@v1.36.11?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/google.golang.org/protobuf@v1.36.11?type=module",
       "evidence": {
         "licenses": [
           {
@@ -570,7 +570,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830130621-b73c425eb589?type=module",
+      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.1.0.devel?type=module",
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
@@ -588,8 +588,8 @@
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
-        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-20211012122336-39d0f177ccd0?type=module",
-        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-20210106213030-5aafc221ea8c?type=module",
+        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
         "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
         "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?type=module",
         "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?type=module",
@@ -608,13 +608,13 @@
       ]
     },
     {
-      "ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-20211012122336-39d0f177ccd0?type=module"
+      "ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module"
     },
     {
-      "ref": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822?type=module"
+      "ref": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module"
     },
     {
-      "ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-20210106213030-5aafc221ea8c?type=module",
+      "ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
       "dependsOn": [
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
       ]
@@ -624,7 +624,7 @@
       "dependsOn": [
         "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module",
         "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module",
-        "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822?type=module",
+        "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
         "pkg:golang/github.com/prometheus/client_model@v0.6.2?type=module",
         "pkg:golang/github.com/prometheus/common@v0.70.1?type=module",
         "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
@@ -643,7 +643,7 @@
       "dependsOn": [
         "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module",
         "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module",
-        "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822?type=module",
+        "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
         "pkg:golang/github.com/prometheus/client_golang@v1.24.1?type=module",
         "pkg:golang/github.com/prometheus/client_model@v0.6.2?type=module",
         "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
@@ -661,8 +661,8 @@
       "ref": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
       "dependsOn": [
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
-        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-20211012122336-39d0f177ccd0?type=module",
-        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-20210106213030-5aafc221ea8c?type=module",
+        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
         "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?type=module",
         "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?type=module",
         "pkg:golang/github.com/tklauser/numcpus@v0.6.1?type=module",

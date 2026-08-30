@@ -70,11 +70,20 @@ mutations: ## Remove each safety guard in turn; the suite must fail every time
 
 # A CycloneDX bill of materials for the dependency tree, written to sbom.json.
 #
-# Deterministic on purpose: the serial number is omitted and the timestamp and
-# generator are stripped, so the file changes only when the DEPENDENCIES change,
-# never merely because it was regenerated. That is what lets sbom-check below
-# fail a build whose committed SBOM has drifted from go.mod.
-SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | 	jq 'del(.metadata.timestamp) | del(.metadata.tools)'
+# Deterministic on purpose, so the file changes only when the DEPENDENCIES change
+# — which is what lets sbom-check below fail a build whose committed SBOM has
+# drifted from go.mod. Three things make it not so by default and are undone here:
+#
+#   - the serial number (-noserial), the timestamp and the generator, which move
+#     every run;
+#   - goos/goarch stamped into every purl, which differ between a developer's Mac
+#     and a Linux CI runner, so the SBOM committed from one never matched the
+#     other;
+#   - the MAIN module's own pseudo-version (v0.0.0-<time>-<hash>), which changes on
+#     every commit, so the committed SBOM referenced the PREVIOUS commit and the
+#     check failed on the next push. Normalised to "devel".
+SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
+SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | 	jq '$(SBOM_CLEAN)'
 
 sbom: ## Regenerate the CycloneDX SBOM (needs cyclonedx-gomod and jq)
 	@command -v cyclonedx-gomod >/dev/null || { echo "install: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest"; exit 1; }

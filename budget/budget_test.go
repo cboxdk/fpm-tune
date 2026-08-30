@@ -285,6 +285,12 @@ func TestDetectForReadsTheManagedProcessCgroup(t *testing.T) {
 		}
 	}
 
+	// The machine the service runs on, larger than its cgroup cap — otherwise
+	// the cgroup limit is not the tighter of the two and there is nothing to
+	// prove. On Linux this is the only source of a base reading (no sysctl), so
+	// without it the base is zero and the cgroup override has nothing to beat.
+	write(t, filepath.Join(root, "proc", "meminfo"), "MemTotal:       67108864 kB\n")
+
 	restore := swapRoots(cg, filepath.Join(root, "proc"))
 	defer restore()
 
@@ -332,6 +338,9 @@ func TestDetectForTakesTheTightestLimitInThePath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	// A machine larger than either cap, so the tightest cgroup limit is what wins.
+	write(t, filepath.Join(root, "proc", "meminfo"), "MemTotal:       67108864 kB\n")
 
 	restore := swapRoots(cg, filepath.Join(root, "proc"))
 	defer restore()
