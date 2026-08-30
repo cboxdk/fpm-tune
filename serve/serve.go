@@ -92,6 +92,10 @@ type Config struct {
 	MemoryOverride int64
 	ReserveBytes   int64
 
+	// ReserveFraction overrides the default reserve fraction when non-zero, letting
+	// an operator set the target utilisation. Ignored when ReserveBytes is set.
+	ReserveFraction float64
+
 	// Workload is the default class for pools that do not declare one, deciding
 	// how much to hold back for the processes their workers spawn. The zero value
 	// reserves nothing (WorkloadWeb), the behaviour before workloads existed.
@@ -349,6 +353,10 @@ func (l *Loop) round(ctx context.Context) {
 	if l.cfg.MemoryOverride > 0 {
 		limits = limits.WithOverride(l.cfg.MemoryOverride)
 	}
+	// Good neighbour: on a bare VM, leave the memory other services are using to
+	// them rather than sizing php-fpm against the whole machine. A no-op under a
+	// cgroup limit or an explicit --memory.
+	limits = limits.WithNeighbors(observe.SubtreeRSS(views))
 
 	// The cgroup's actual usage, beside its limit. This is reporting only — the
 	// number the OOM killer enforces against, counting the children a per-worker
@@ -367,15 +375,16 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	result, err := plan.Build(plan.Input{
-		At:             now,
-		Limits:         limits,
-		Views:          views,
-		State:          l.state,
-		ReserveBytes:   l.cfg.ReserveBytes,
-		StateOptions:   l.cfg.StateOptions,
-		Workload:       l.cfg.Workload,
-		CgroupUsage:    usage,
-		HasCgroupUsage: hasCgroup,
+		At:              now,
+		Limits:          limits,
+		Views:           views,
+		State:           l.state,
+		ReserveBytes:    l.cfg.ReserveBytes,
+		ReserveFraction: l.cfg.ReserveFraction,
+		StateOptions:    l.cfg.StateOptions,
+		Workload:        l.cfg.Workload,
+		CgroupUsage:     usage,
+		HasCgroupUsage:  hasCgroup,
 	})
 	if err != nil {
 		// A host that cannot fit its pools is exactly where the metrics matter,

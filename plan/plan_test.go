@@ -180,17 +180,19 @@ func TestHitCeilingUsesTheDelta(t *testing.T) {
 	}
 }
 
-// TestReserveScalesWithTheHost: a quarter of a big machine is plenty; a quarter
-// of a small one is not enough to run an operating system.
+// TestReserveScalesWithTheHost: a fraction of a big machine is plenty headroom; a
+// fraction of a small one is not enough to run an operating system, so the floor
+// wins there.
 func TestReserveScalesWithTheHost(t *testing.T) {
 	profile := DefaultProfile
 
 	t.Run("large host uses the fraction", func(t *testing.T) {
 		got, why := reserveFor(budget.Limits{MemoryBytes: 32 * gb}, profile, 0)
-		if got != 8*gb {
-			t.Errorf("reserve = %s, want 8GiB", budget.HumanBytes(got))
+		want := int64(float64(32*gb) * DefaultProfile.ReserveFraction) // 15% -> 85% utilisation
+		if got != want {
+			t.Errorf("reserve = %s, want %s (15%%)", budget.HumanBytes(got), budget.HumanBytes(want))
 		}
-		if !strings.Contains(why, "25%") {
+		if !strings.Contains(why, "15%") {
 			t.Errorf("reason %q does not explain the fraction", why)
 		}
 	})

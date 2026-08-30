@@ -20,8 +20,16 @@ func (r Result) Render(w io.Writer) error {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "%s\n", r.Budget.Describe())
-	fmt.Fprintf(&b, "  reserved for the system: %s (%s)\n",
-		budget.HumanBytes(r.Reserve), r.ReserveReason)
+	// The reserve is a percentage headroom plus, on a shared host, the memory other
+	// services and the OS are using. Shown apart so the smaller "available to
+	// workers" is not a mystery: one line the operator tunes (the headroom), one
+	// they cannot (what the neighbours hold).
+	if r.Budget.NeighborBytes > 0 {
+		fmt.Fprintf(&b, "  used by other services:  %s (left for them; cap php-fpm's cgroup for a hard limit)\n",
+			budget.HumanBytes(r.Budget.NeighborBytes))
+	}
+	fmt.Fprintf(&b, "  headroom kept:           %s (%s)\n",
+		budget.HumanBytes(r.Reserve-r.Budget.NeighborBytes), r.ReserveReason)
 	fmt.Fprintf(&b, "  available to workers:    %s\n\n",
 		budget.HumanBytes(r.Plan.TotalBytes-r.Reserve))
 

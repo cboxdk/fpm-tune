@@ -41,10 +41,18 @@ type Profile struct {
 }
 
 // DefaultProfile is used when no other is given.
+//
+// ReserveFraction 0.15 targets ~85% of the budget for workers — a stable
+// utilisation that leaves headroom for the OS, page cache and per-request spikes
+// without stranding memory. It applies to php-fpm's budget: on a bare VM that is
+// already what the good-neighbour cap left after other services (budget.WithNeighbors),
+// and the per-worker cost the allocator divides it by folds in the memory a
+// worker's spawned children use. Raise it with --reserve for a more cautious host,
+// or set a fixed amount.
 var DefaultProfile = Profile{
 	Name:              "default",
 	WorkerBytes:       48 << 20,
-	ReserveFraction:   0.25,
+	ReserveFraction:   0.15,
 	ReserveFloorBytes: 256 << 20,
 }
 
@@ -72,6 +80,11 @@ type Input struct {
 
 	// ReserveBytes overrides the profile's reserve when non-zero.
 	ReserveBytes int64
+
+	// ReserveFraction overrides the profile's reserve fraction when non-zero, so an
+	// operator can set the target utilisation (e.g. 0.20 to keep 20% back, 80% for
+	// workers) without a fixed byte amount. Ignored when ReserveBytes is set.
+	ReserveFraction float64
 
 	StateOptions    state.Options
 	AllocateOptions allocate.Options
@@ -180,7 +193,21 @@ func Build(in Input) (Result, error) {
 		at = time.Now()
 	}
 
+	// The operator can retarget the utilisation without a fixed byte amount.
+	if in.ReserveFraction > 0 {
+		profile.ReserveFraction = in.ReserveFraction
+	}
+
 	reserve, reason := reserveFor(in.Limits, profile, in.ReserveBytes)
+
+	// The good-neighbour reserve: on top of the percentage headroom, hold back what
+	// other services and the OS are using, so the host as a whole stays under the
+	// target — not just php-fpm's own share. Zero unless budget.WithNeighbors found
+	// non-php-fpm memory in use, and skipped entirely when the operator set a fixed
+	// reserve, which is their own total.
+	if in.ReserveBytes == 0 && in.Limits.NeighborBytes > 0 {
+		reserve += in.Limits.NeighborBytes
+	}
 
 	result := Result{
 		Budget:        in.Limits,

@@ -322,6 +322,25 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 	return view
 }
 
+// SubtreeRSS sums php-fpm's own current memory across the views — each worker plus
+// the processes it spawned. It is what budget.WithNeighbors adds back so the
+// good-neighbour budget is "free memory plus php-fpm's own", not just the free
+// memory a neighbour's growth would otherwise ratchet it down by.
+func SubtreeRSS(views []PoolView) int64 {
+	var total int64
+	for _, v := range views {
+		for _, w := range v.Workers {
+			rss := w.SubtreeRSSBytes
+			if rss <= 0 {
+				rss = w.RSSBytes
+			}
+			total += rss
+		}
+	}
+
+	return total
+}
+
 // configuredMaxChildren reads pm.max_children from the effective configuration.
 //
 // The live process count is not a substitute: a pool that has never been busy

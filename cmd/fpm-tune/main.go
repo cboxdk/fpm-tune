@@ -133,7 +133,9 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 	return commonFlags{
 		statePath: fs.String("state", state.DefaultPath, "path to the learned baselines"),
 		memory:    fs.String("memory", "", "override the detected memory limit (e.g. 8G)"),
-		reserve:   fs.String("reserve", "", "memory to hold back from workers (e.g. 1G)"),
+		reserve: fs.String("reserve", "", "memory to hold back from workers: a fixed amount "+
+			"(e.g. 1G) or a percentage of the budget (e.g. 20%). The default keeps 15% — 85% "+
+			"utilisation — plus, on a shared host, whatever other services are using"),
 		workload: fs.String("workload", "", "default class for pools that do not declare one, deciding how much to keep for the "+
 			"processes workers spawn: web (spawn nothing — the default), bursty (a child now and then), "+
 			"subprocess-heavy (a child on most requests, e.g. ffmpeg). A pool overrides this with "+
@@ -217,9 +219,10 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	}
 
 	var reserveBytes int64
+	var reserveFraction float64
 	if *c.reserve != "" {
 		var err error
-		if reserveBytes, err = parseBytes(*c.reserve); err != nil {
+		if reserveBytes, reserveFraction, err = parseReserve(*c.reserve); err != nil {
 			return plan.Result{}, nil, fmt.Errorf("--reserve: %w", err)
 		}
 	}
@@ -262,6 +265,11 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	if overrideBytes > 0 {
 		limits = limits.WithOverride(overrideBytes)
 	}
+	// Good neighbour: on a bare VM, leave the memory other services are using to
+	// them instead of sizing php-fpm against the whole machine. A no-op under a
+	// cgroup limit or an explicit --memory.
+	limits = limits.WithNeighbors(observe.SubtreeRSS(views))
+
 	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 
 	stateOpts := state.Options{
@@ -277,15 +285,16 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	}
 
 	result, buildErr := plan.Build(plan.Input{
-		At:             now,
-		Limits:         limits,
-		Views:          views,
-		State:          st,
-		ReserveBytes:   reserveBytes,
-		StateOptions:   stateOpts,
-		Workload:       resolveWorkload(*c.workload, log),
-		CgroupUsage:    usage,
-		HasCgroupUsage: hasCgroup,
+		At:              now,
+		Limits:          limits,
+		Views:           views,
+		State:           st,
+		ReserveBytes:    reserveBytes,
+		ReserveFraction: reserveFraction,
+		StateOptions:    stateOpts,
+		Workload:        resolveWorkload(*c.workload, log),
+		CgroupUsage:     usage,
+		HasCgroupUsage:  hasCgroup,
 	})
 
 	// After the plan, for the same reason as in serve: these counters are the
@@ -879,6 +888,29 @@ func loggerAt(level slog.Level, verbose bool) *slog.Logger {
 // success, so --reserve 512MB parsed as 512 BYTES and silently handed the whole
 // host to workers — the one outcome this tool exists to prevent, produced by a
 // spelling of the unit that looks entirely reasonable.
+// parseReserve reads a --reserve value as either a byte amount (2G, the fixed
+// reserve) or a percentage of the budget (20%, the reserve fraction — so the
+// operator can retarget utilisation without a fixed number). Exactly one is
+// returned non-zero.
+func parseReserve(raw string) (bytes int64, fraction float64, err error) {
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasSuffix(trimmed, "%") {
+		pct, perr := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(trimmed, "%")), 64)
+		if perr != nil || pct <= 0 || pct >= 100 {
+			return 0, 0, fmt.Errorf("a reserve percentage must be between 0 and 100, got %q", raw)
+		}
+
+		return 0, pct / 100, nil
+	}
+
+	b, berr := parseBytes(trimmed)
+	if berr != nil {
+		return 0, 0, berr
+	}
+
+	return b, 0, nil
+}
+
 func parseBytes(raw string) (int64, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -985,6 +1017,7 @@ func runServe(args []string) error {
 	defer cancel()
 
 	var memoryOverride, reserveBytes int64
+	var reserveFraction float64
 	if *c.memory != "" {
 		var err error
 		if memoryOverride, err = parseBytes(*c.memory); err != nil {
@@ -993,7 +1026,7 @@ func runServe(args []string) error {
 	}
 	if *c.reserve != "" {
 		var err error
-		if reserveBytes, err = parseBytes(*c.reserve); err != nil {
+		if reserveBytes, reserveFraction, err = parseReserve(*c.reserve); err != nil {
 			return fmt.Errorf("--reserve: %w", err)
 		}
 	}
@@ -1006,14 +1039,15 @@ func runServe(args []string) error {
 		NoLearn:       *c.noLearn,
 		RecommendPath: *recommend,
 
-		MetricsAddr:    *metricsAddr,
-		DropInDir:      *dropInDir,
-		BackupDir:      *backupDir,
-		MemoryOverride: memoryOverride,
-		ReserveBytes:   reserveBytes,
-		Workload:       resolveWorkload(*c.workload, log),
-		ScrapeTimeout:  *c.timeout,
-		HeartbeatEvery: *heartbeat,
+		MetricsAddr:     *metricsAddr,
+		DropInDir:       *dropInDir,
+		BackupDir:       *backupDir,
+		MemoryOverride:  memoryOverride,
+		ReserveBytes:    reserveBytes,
+		ReserveFraction: reserveFraction,
+		Workload:        resolveWorkload(*c.workload, log),
+		ScrapeTimeout:   *c.timeout,
+		HeartbeatEvery:  *heartbeat,
 		ApplyOptions: apply.Options{
 			MinInterval: *minInterval,
 			MinChange:   *minChange,

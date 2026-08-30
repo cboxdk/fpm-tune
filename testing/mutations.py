@@ -428,6 +428,10 @@ MUTATIONS = [
      "serve/serve.go",
      "		return nil, fmt.Errorf(\"cannot serve metrics on %s: %w\", l.cfg.MetricsAddr, err)",
      "		l.log.Error(\"no metrics\", \"error\", err)\n\n		return nil, nil"),
+    ("plan: the good-neighbour reserve does not hold back what other services use",
+     "plan/plan.go",
+     "	if in.ReserveBytes == 0 && in.Limits.NeighborBytes > 0 {\n		reserve += in.Limits.NeighborBytes\n	}\n",
+     ""),
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")

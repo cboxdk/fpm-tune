@@ -50,6 +50,18 @@ type Limits struct {
 	// Source names where MemoryBytes came from.
 	Source Source
 
+	// AvailableBytes is /proc/meminfo's MemAvailable — memory free for new
+	// allocations after everything else's use — when it was read. Zero on a cgroup
+	// limit (the neighbours are elsewhere), on darwin, and on kernels too old to
+	// report it. It is the input to WithNeighbors.
+	AvailableBytes int64
+
+	// NeighborBytes is the memory left to OTHER services (mysql, redis, the OS) by
+	// WithNeighbors — the difference between the machine total and php-fpm's budget.
+	// Zero unless the good-neighbour cap actually reduced the budget, so a non-zero
+	// value both drives the report and marks that the cap was applied.
+	NeighborBytes int64
+
 	// LookupErr is set when the managed process's OWN limit could not be read,
 	// and MemoryBytes therefore fell back to the machine.
 	//
@@ -260,8 +272,8 @@ func detectWith(p sysPaths) Limits {
 		limits.MemoryBytes, limits.Containerized, limits.Source = bytes, true, SourceCgroupV2
 	} else if bytes, ok := readCgroupV1Memory(p.cgroupV1Memory); ok {
 		limits.MemoryBytes, limits.Containerized, limits.Source = bytes, true, SourceCgroupV1
-	} else if bytes, ok := readMemInfo(p.memInfo); ok {
-		limits.MemoryBytes, limits.Source = bytes, SourceMemInfo
+	} else if total, available, ok := readMemInfo(p.memInfo); ok {
+		limits.MemoryBytes, limits.AvailableBytes, limits.Source = total, available, SourceMemInfo
 	} else if bytes, ok := readSysctlMemory(); ok {
 		limits.MemoryBytes, limits.Source = bytes, SourceSysctl
 	}
@@ -291,6 +303,39 @@ func (l Limits) WithOverride(memoryBytes int64) Limits {
 	// The operator gave the number, so a failed detection no longer matters:
 	// the whole reason to flag it was that nobody had confirmed the budget.
 	l.LookupErr = nil
+
+	return l
+}
+
+// WithNeighbors records the memory in use OUTSIDE php-fpm's own workers — the OS,
+// the page cache that cannot be reclaimed, and other services like MySQL and Redis —
+// so the plan reserves it and the host as a whole stays under the target
+// utilisation, not just php-fpm's own share of it.
+//
+// This is the good-neighbour default on a bare VM. It is deliberately a no-op where
+// it would be wrong: a cgroup limit already excludes the neighbours (they run in
+// other cgroups), an explicit --memory is the operator's own number, and a kernel
+// that does not report MemAvailable gives nothing to reason from.
+//
+// The figure is `MemTotal − MemAvailable − phpfpmRSS`: everything used, less what
+// the kernel can hand out and less php-fpm's own (which the reserve must not
+// double-count, since the allocator is about to size the workers that hold it).
+//
+// It measures what neighbours use NOW. A service still warming up — MySQL's InnoDB
+// buffer pool filling toward its configured maximum — uses less now than it will, so
+// on a shared VM the honest hard guarantee is still a cgroup cap on php-fpm (systemd
+// MemoryMax) or an explicit --reserve.
+func (l Limits) WithNeighbors(phpfpmRSS int64) Limits {
+	if l.Source != SourceMemInfo || l.AvailableBytes <= 0 || phpfpmRSS < 0 {
+		return l
+	}
+
+	nonWorker := l.MemoryBytes - l.AvailableBytes - phpfpmRSS
+	if nonWorker <= 0 {
+		// Nothing meaningful in use outside php-fpm: a dedicated host, left as it was.
+		return l
+	}
+	l.NeighborBytes = nonWorker
 
 	return l
 }
@@ -359,29 +404,35 @@ func plausible(raw string) (int64, bool) {
 	return v, true
 }
 
-func readMemInfo(path string) (int64, bool) {
+// readMemInfo returns the machine's total memory and, when the kernel reports it
+// (3.14+), MemAvailable — the memory free for new allocations after what every
+// other process is using, which is how the good-neighbour budget leaves room for
+// services like MySQL and Redis on a bare VM. available is 0 when the field is
+// absent, and the caller falls back to the dedicated assumption there.
+func readMemInfo(path string) (total, available int64, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 
 	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "MemTotal:") {
-			continue
-		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return 0, false
+			continue
 		}
-		kb, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil || kb <= 0 {
-			return 0, false
+		kb, perr := strconv.ParseInt(fields[1], 10, 64)
+		if perr != nil || kb < 0 {
+			continue
 		}
-
-		return kb * 1024, true
+		switch fields[0] {
+		case "MemTotal:":
+			total = kb * 1024
+		case "MemAvailable:":
+			available = kb * 1024
+		}
 	}
 
-	return 0, false
+	return total, available, total > 0
 }
 
 // readSysctlMemory covers macOS, where there is no /proc. Development happens

@@ -56,13 +56,48 @@ A host with genuinely no cgroup limit anywhere — a bare VM, or a platform with
 cgroups at all — is not a failed lookup. There the machine's memory is the honest
 answer, and the tool uses it.
 
+## A good neighbour on a shared host
+
+On a bare VM with no cgroup cap, php-fpm is rarely the only thing using memory —
+MySQL, Redis and the OS want their share. Sizing php-fpm against the whole machine
+would tune it to claim memory those services need, and the first busy moment OOMs
+one of them.
+
+So on the `/proc/meminfo` path — and only there, since a cgroup limit already
+excludes them — the budget leaves room for whatever else is running. It reads
+`MemAvailable`, the memory the kernel has free for new allocations after everything
+else's use, and holds back `MemTotal − MemAvailable − php-fpm's own` on top of the
+percentage headroom. The effect is that the host **as a whole** stays under the
+target utilisation, not just php-fpm's share of it. On a dedicated box, where almost
+everything is free, this reserves nothing extra and the behaviour is unchanged.
+
+The plan shows what it left:
+
+```
+host memory 7.5GiB, 4 CPU(s) (via /proc/meminfo)
+  used by other services:  3.1GiB (left for them; cap php-fpm's cgroup for a hard limit)
+  headroom kept:           1.1GiB (15% of 7.5GiB)
+  available to workers:    3.3GiB
+```
+
+It sizes against what those services use **now**. A service still warming up —
+MySQL's InnoDB buffer pool filling toward its configured maximum — will use more
+later, so on a shared VM the honest hard guarantee is still a cgroup cap on php-fpm
+(`systemd MemoryMax=`) or an explicit `--reserve`. The good-neighbour reserve is the
+safe default; a cap is the promise.
+
 ## Overriding it
 
 `--memory 8G` replaces the detection entirely, for when php-fpm is not the only
-tenant of its cgroup, or when the detection cannot see the real limit and you
-know it. `--reserve 1G` sets how much to hold back from workers for the operating
-system and everything else; without it, a sensible fraction (with a floor on
-small hosts) is kept back automatically.
+tenant of its cgroup, or when the detection cannot see the real limit and you know
+it.
+
+`--reserve` sets how much to hold back from workers. It takes a fixed amount
+(`--reserve 1G`) or a percentage of the budget (`--reserve 20%`, so 80%
+utilisation). Without it, the default keeps **15% back — 85% utilisation** — plus,
+on a shared host, whatever other services are using (above). The 85% matches the
+`cboxdk/laravel-queue-autoscale` default, so a host running both sizes to one
+utilisation target rather than two that disagree.
 
 ## Reading the budget line
 
