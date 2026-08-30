@@ -299,3 +299,58 @@ func TestTheDaemonSaysWhatItIsDoing(t *testing.T) {
 		}
 	}
 }
+
+// TestAnInterruptedReloadIsNotReportedAsDone.
+//
+// If a one-shot apply is interrupted after the signal but before the settle
+// window proves the master survived, Apply returns Inconclusive with no error.
+// The switch's res.Reloaded case then printed "Reloaded PHP-FPM" and the command
+// exited 0 — telling an operator, and any script, that the master came back when
+// nothing proved it did.
+//
+// The daemon already handles this by reconciling next round; the CLI has to tell
+// the same truth in its output and its exit status.
+func TestAnInterruptedReloadIsNotReportedAsDone(t *testing.T) {
+	res := apply.Result{
+		Outcomes:     []apply.Outcome{{Pool: "shop", Action: "applied", Reason: "12 to 8"}},
+		Reloaded:     true,
+		Wrote:        true,
+		Inconclusive: true,
+	}
+
+	out := capture(t, func() { renderApplied(res, false, nil) })
+	if strings.Contains(out, "Reloaded PHP-FPM") {
+		t.Errorf("an interrupted reload was reported as a completed one:\n%s", out)
+	}
+	if !strings.Contains(out, "interrupted") || !strings.Contains(out, "apply again") {
+		t.Errorf("the output does not tell the operator what state they are in or what to "+
+			"do:\n%s", out)
+	}
+}
+
+// TestApplyExitReportsBothTroubleStates.
+//
+// applyExit is the status a completed apply hands back. Two of its cases are
+// the ones a script must not read as done, and neither shows up in the exit
+// status by accident: a failed state save after a good apply (the hysteresis
+// brake is not on disk), and an unconfirmed reload (the master was signalled and
+// the run ended before it was seen to survive).
+func TestApplyExitReportsBothTroubleStates(t *testing.T) {
+	// Clean apply, clean save: zero.
+	if err := applyExit(apply.Result{Reloaded: true}, nil, "/x"); err != nil {
+		t.Errorf("a clean apply exited non-zero: %v", err)
+	}
+
+	// The save failed. That is the more urgent of the two and is reported first.
+	err := applyExit(apply.Result{Reloaded: true, Inconclusive: true}, os.ErrPermission, "/x")
+	if err == nil || !strings.Contains(err.Error(), "was applied") {
+		t.Errorf("a failed save after a live apply was not reported: %v", err)
+	}
+
+	// Save fine, reload unconfirmed: still non-zero, so a driving script does
+	// not treat it as finished.
+	if err := applyExit(apply.Result{Reloaded: true, Inconclusive: true}, nil, "/x"); err == nil {
+		t.Error("an interrupted reload exited zero; a script sees it as done when nothing " +
+			"proved the master came back")
+	}
+}

@@ -482,14 +482,42 @@ func runApply(args []string) error {
 	// save with a successful apply is a host that will be reloaded again in a
 	// minute, and the command exited 0. The apply itself stands and the message
 	// says so; what needs saying is that the brake is not on.
+	var saveErr error
 	if !*c.noLearn {
-		if err := reportUnsavedApply(st.Save(*c.statePath), *c.statePath); err != nil {
-			return err
-		}
+		saveErr = st.Save(*c.statePath)
+	}
+
+	return applyExit(applied, saveErr, *c.statePath)
+}
+
+// applyExit is the status a completed apply hands back, extracted so both of
+// its non-obvious cases can be tested without a live master.
+//
+// The order matters. A failed save after a good apply is reported first,
+// because it is the more urgent of the two — the hysteresis baseline is not on
+// disk. An unconfirmed reload is reported after, and only when the save
+// succeeded, because the change WAS written and recording it is still right:
+// the next run needs the baseline to settle the open record.
+func applyExit(applied apply.Result, saveErr error, statePath string) error {
+	if err := reportUnsavedApply(saveErr, statePath); err != nil {
+		return err
+	}
+
+	// A non-zero exit for an unconfirmed reload, so a script driving apply does
+	// not read it as done. renderApplied has already explained it in words; this
+	// is for the caller that only checks the status.
+	if applied.Inconclusive {
+		return errInconclusiveReload
 	}
 
 	return nil
 }
+
+// errInconclusiveReload is returned when the master was signalled and the run
+// ended before it was seen to survive. The change stands and the record is
+// open; a rerun confirms it. Its message is deliberately short — renderApplied
+// has already said the whole of it.
+var errInconclusiveReload = errors.New("the reload was signalled but not confirmed before the run ended; rerun apply to settle it")
 
 // reportUnsavedApply turns a failed save AFTER a successful apply into an error
 // rather than a warning.
@@ -578,6 +606,17 @@ func renderApplied(res apply.Result, dryRun bool, err error) {
 		fmt.Printf("\nNothing was applied: %v\n", err)
 	case dryRun:
 		fmt.Println("\nDry run: the configuration was rendered and validated, then discarded.")
+	case res.Inconclusive:
+		// Signalled, and the settle window did not finish — the run was
+		// interrupted, or the deadline fired. Delivery is not survival, so this
+		// is neither success nor failure, and printing "Reloaded PHP-FPM" here
+		// tells an operator the master came back when nothing proved it did. The
+		// change is on disk and the recovery record is open; the next run
+		// settles it.
+		fmt.Printf("\nThe configuration was written and PHP-FPM was signalled, but the run " +
+			"was interrupted before the master was seen to survive the reload. It probably " +
+			"did. The change is in place and recorded; run apply again to confirm it, and " +
+			"if PHP-FPM is not serving, check `systemctl status php-fpm`.\n")
 	case res.Reloaded:
 		fmt.Printf("\nReloaded PHP-FPM (%d pool(s) changed).\n", len(res.Changed()))
 	case len(res.Changed()) > 0:
