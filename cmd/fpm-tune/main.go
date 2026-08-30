@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -331,6 +332,18 @@ func runPlan(args []string) error {
 			fmt.Fprintln(os.Stderr,
 				"fpm-tune: another fpm-tune is running, so this will report without "+
 					"recording what it observes")
+			learn = false
+		case errors.Is(err, os.ErrPermission):
+			// The ordinary first run: someone installs the binary and runs `plan`
+			// as themselves, so the state directory under /var/lib is not theirs to
+			// create. Reporting needs no lock — only the learning write does — so
+			// print the plan and say plainly why no baseline is being recorded,
+			// rather than failing on a permission error before showing anything.
+			// This is the read-only promise the quickstart makes, kept.
+			fmt.Fprintf(os.Stderr,
+				"fpm-tune: cannot write %s, so this reports without recording a "+
+					"baseline — run it as the service user, or pass -state to a path "+
+					"you can write, to build one\n", filepath.Dir(*c.statePath))
 			learn = false
 		default:
 			return err

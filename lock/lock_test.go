@@ -99,6 +99,36 @@ func TestLockChildHelper(t *testing.T) {
 	release()
 }
 
+// TestAcquireOnAnUnwritableDirectoryIsAPermissionError pins the contract `plan`
+// relies on. `plan` is read-only apart from recording a baseline, so when it
+// cannot create the state directory — the ordinary first run, installed and run
+// by a user who does not own /var/lib — it branches on os.ErrPermission to report
+// without recording, rather than fail on a filesystem error before it has shown
+// anything. The type is the assertion, as with ErrHeld above: if Acquire stops
+// wrapping the mkdir failure so errors.Is can see it, that branch goes dead and
+// the read-only promise the quickstart makes breaks on the very first command.
+func TestAcquireOnAnUnwritableDirectoryIsAPermissionError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can create a directory under a mode-0555 parent, so this cannot be provoked as root")
+	}
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	// So t.TempDir's own cleanup can remove it again.
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	_, err := Acquire(filepath.Join(parent, "sub", "fpm-tune.lock"))
+	if err == nil {
+		t.Fatal("acquire under an unwritable directory unexpectedly succeeded")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("acquire under an unwritable directory returned %v, which is not an "+
+			"os.ErrPermission; plan branches on that to keep its read-only promise", err)
+	}
+}
+
 // TestTheResourceLockDoesNotFollowTMPDIR.
 //
 // The lock that stops two processes writing the same pool files has to be at a
