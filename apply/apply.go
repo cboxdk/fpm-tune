@@ -954,13 +954,35 @@ func writeDropIn(master Master, pools []allocate.PoolPlan, opts Options, log *sl
 	rendered := Render(pools)
 
 	b := backup{path: path}
-	if content, err := os.ReadFile(path); err == nil {
+	content, rerr := os.ReadFile(path)
+	switch {
+	case rerr == nil:
 		b.content, b.existed = content, true
 		b.saved = filepath.Join(opts.BackupDir, backupName(master.DropInDir, path))
 
 		if err := writeAtomic(b.saved, content); err != nil {
 			return backup{}, fmt.Errorf("cannot back up %s: %w", path, err)
 		}
+
+	case os.IsNotExist(rerr):
+		// Nothing there, which is the first apply on this host. b.existed stays
+		// false and a rollback removes the file rather than restoring one.
+
+	default:
+		// A file that EXISTS and cannot be read is not the same as no file, and
+		// treating them alike is how a rollback deletes a configuration instead
+		// of putting it back: `existed` stays false, so the undo path removes
+		// the file rather than restoring its contents.
+		//
+		// Layered, and deliberately so. A drop-in that is unreadable when the
+		// run STARTS is already refused by parseOurs, several steps earlier —
+		// which is what the test covering this actually exercises. What is left
+		// for this branch is the window between that check and this write: a
+		// permission change, a replaced mount, a filesystem going read-only. No
+		// test can stage that race, and the cost of the guard is one branch.
+		return backup{}, fmt.Errorf("cannot read the existing %s to back it up, and "+
+			"writing over a file that could not be preserved is how a rollback deletes "+
+			"a configuration instead of restoring it: %w", path, rerr)
 	}
 
 	txn := transaction{

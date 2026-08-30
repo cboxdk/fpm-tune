@@ -28,6 +28,7 @@ type Collectors struct {
 	demandUnmet        *prometheus.GaugeVec
 	poolMeasured       *prometheus.GaugeVec
 
+	poolsAmbiguous    prometheus.Gauge
 	budgetBytes       *prometheus.GaugeVec
 	capacityExhausted prometheus.Gauge
 	poolsUnreachable  prometheus.Gauge
@@ -70,6 +71,9 @@ func New() *Collectors {
 			"1 when a pool wants more workers than it was given, and could not be. fpm_tune_capacity_exhausted is 1 whenever any pool is in this state — the two are the same news at different granularity, which pool and whether any.", "pool"),
 		poolMeasured: gaugeVec(reg, "fpm_tune_pool_measured",
 			"1 when a pool is sized from its own observed memory rather than a bootstrap estimate.", "pool"),
+
+		poolsAmbiguous: gauge(reg, "fpm_tune_pools_ambiguous",
+			"How many pool names are shared by more than one PHP-FPM master this round. Above zero, those pools are NOT published: every per-pool series is labelled by name, so two pools called www would set the same series twice and the endpoint would report whichever ran last. Name a pool directory with --drop-in-dir."),
 
 		budgetBytes: gaugeVec(reg, "fpm_tune_budget_bytes",
 			"The memory budget, by state: total, reserved, allocated to workers, or free.", "state"),
@@ -151,6 +155,19 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 		masters[v.Name] = v.Target.ConfigPath
 	}
 
+	// Pools whose NAME is shared by another master this round are not published
+	// at all.
+	//
+	// Every per-pool series is labelled by name, so two pools called `www` set
+	// the same series twice and the endpoint reports whichever plan row ran
+	// last — silently, and differently on each scrape. A missing series is
+	// visible; a wrong one is not. The count below is what says why.
+	ambiguous := make(map[string]bool, len(result.Ambiguous))
+	for _, name := range result.Ambiguous {
+		ambiguous[name] = true
+	}
+	c.poolsAmbiguous.Set(float64(len(result.Ambiguous)))
+
 	c.workersConfigured.Reset()
 	c.workersRecommended.Reset()
 	c.workerRSS.Reset()
@@ -164,6 +181,10 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 	}
 
 	for _, p := range result.Plan.Pools {
+		if ambiguous[p.Name] {
+			continue
+		}
+
 		c.workersRecommended.WithLabelValues(p.Name).Set(float64(p.MaxChildren))
 		c.workersConfigured.WithLabelValues(p.Name).Set(float64(configured[p.Name]))
 		c.demandUnmet.WithLabelValues(p.Name).Set(boolValue(p.DemandUnmet))

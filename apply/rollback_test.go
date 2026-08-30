@@ -808,3 +808,48 @@ func TestADaemonWithNoDirectoryOnlyGuessesWhenThereIsOneAnswer(t *testing.T) {
 			"tell which one is down, and repairing the wrong one is its own outage", got)
 	}
 }
+
+// TestAnUnreadableExistingFileIsNotTreatedAsNoFile.
+//
+// A file that EXISTS and cannot be read is not the same as no file, and
+// treating them alike is how a rollback DELETES a configuration instead of
+// putting it back: `existed` stays false, so the undo path removes the file
+// rather than restoring its contents.
+//
+// What this test proves is that such a run is REFUSED — by parseOurs, which
+// reaches the file first. The same reasoning is repeated at the backup step for
+// the window between the two, and nothing can stage that race from a test; the
+// comment there says so rather than leaving it looking covered.
+func TestAnUnreadableExistingFileIsNotTreatedAsNoFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file with mode 000")
+	}
+
+	dir := t.TempDir()
+	configPath := masterConfigAt(t, dir)
+	path := DropInPath(dir)
+
+	if err := os.WriteFile(path,
+		Render([]allocate.PoolPlan{{Name: "www", MaxChildren: 5}}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	_, err := Apply(context.Background(), allocate.Plan{
+		Pools: []allocate.PoolPlan{{Name: "www", MaxChildren: 50, Current: 5}},
+	}, Master{
+		Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir,
+		NoMasterExpected: true,
+	}, state.New(), Options{BackupDir: filepath.Join(t.TempDir(), "backup")}, nil)
+
+	if err == nil {
+		t.Fatal("a file that could not be read was written over as though it were not " +
+			"there; a rollback would now delete the configuration rather than restore it")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the error does not name the file it could not read:\n%v", err)
+	}
+}

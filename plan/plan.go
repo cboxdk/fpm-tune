@@ -86,6 +86,12 @@ type Result struct {
 	// budget handed to its neighbours.
 	Unreachable []string
 
+	// Ambiguous names pool names that appear more than once in this round,
+	// because two masters each have one. Nothing keyed on the name alone can
+	// represent them — not the metrics labels, not the plan table — so both say
+	// so rather than showing whichever came last.
+	Ambiguous []string
+
 	// WorstCaseBytes is what this plan costs if every pool fills its ceiling
 	// with the most expensive worker ever seen from it. Advisory: sizing to it
 	// would pin the host to its worst minute.
@@ -151,6 +157,10 @@ func Build(in Input) (Result, error) {
 	result.Plan = allocation
 	result.Views = in.Views
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
+	for name := range ambiguous {
+		result.Ambiguous = append(result.Ambiguous, name)
+	}
+	sort.Strings(result.Ambiguous)
 
 	return result, nil
 }

@@ -252,7 +252,15 @@ func repairIfOursIsBroken(ctx context.Context, master Master, opts Options, log 
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
 		// Put it back: removing it did not help after all, and leaving the host
 		// both broken AND untuned is worse than broken alone.
-		_ = writeAtomic(path, body)
+		// The put-back, and its own failure, which used to be thrown away. It is
+		// the worse of the two outcomes: this tool has removed its file, php-fpm
+		// still will not start, and now nothing says the file is gone.
+		if werr := writeAtomic(path, body); werr != nil {
+			return true, fmt.Errorf("%w: removing this tool's file did not make the "+
+				"configuration valid (%w), AND it could not be put back — %s no longer "+
+				"exists and those pools are at whatever their own files say: %w",
+				ErrUnreconciled, err, path, werr)
+		}
 
 		return true, fmt.Errorf("%w: removing this tool's file did not make the "+
 			"configuration valid: %w", ErrUnreconciled, err)
@@ -306,7 +314,22 @@ func removeOursIfThatFixesIt(ctx context.Context, master Master, path string, lo
 	_ = syncDir(filepath.Dir(path))
 
 	if err := phpfpm.Validate(ctx, master.Binary, master.ConfigPath); err != nil {
-		_ = writeAtomic(path, body)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Cancelled, not rejected. Putting the file back is still right —
+			// it was removed on the strength of a check that did not finish —
+			// but the reason has to say so, or an operator reads it as php-fpm
+			// having refused the configuration without its file.
+			err = fmt.Errorf("the check was interrupted: %w", ctxErr)
+		}
+
+		// The put-back's own failure was thrown away, and it is the worse of
+		// the two: this tool has removed its file, php-fpm still will not start,
+		// and now nothing anywhere says the file is gone.
+		if werr := writeAtomic(path, body); werr != nil {
+			return fmt.Errorf("removing it did not make the configuration valid (%w), AND "+
+				"it could not be put back: %s no longer exists and the pools are at "+
+				"whatever their own files say: %w", err, path, werr)
+		}
 		if log != nil {
 			log.Error("Removing this tool's file did not help after all; put back", "path", path)
 		}

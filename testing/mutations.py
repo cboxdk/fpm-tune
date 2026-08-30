@@ -186,6 +186,24 @@ MUTATIONS = [
      "state/state.go",
      '	if master == "" {\n		// Legacy, and the unscoped case: a single-master host, or a record\n		// written before this existed.\n		return pool\n	}\n\n	return master + "::" + pool',
      "	return pool"),
+    # NOT listed: the backup step's refusal to write over an unreadable file.
+    # It is layered behind parseOurs, which reaches the file first and refuses
+    # the run — so removing the later branch changes nothing a test can see. It
+    # exists for the window between the two, which no test can stage, and
+    # listing it here would report a survivor every run and teach people to
+    # ignore the output.
+    ("state: a scoped round resets another master's absence counter",
+     "state/state.go", "@@SCOPEORDER@@", ""),
+    ("serve: an unconfirmed reload advances the last-apply timestamp",
+     "serve/serve.go",
+     "	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote && !applied.Inconclusive,",
+     "	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote,"),
+    ("cmd: a failed save after a successful apply is a warning",
+     "cmd/fpm-tune/main.go",
+     "	if err == nil {\n		return nil\n	}\n\n	return fmt.Errorf(\"the configuration was applied",
+     "	if true {\n		return nil\n	}\n\n	return fmt.Errorf(\"the configuration was applied"),
+    ("metrics: ambiguous pool names are published anyway",
+     "metrics/metrics.go", "		if ambiguous[p.Name] {\n			continue\n		}\n\n", ""),
     ("state: a scoped daemon forgets another master's pools",
      "state/state.go",
      '		if scope != "" && ps.MasterConfig != scope {\n			continue\n		}\n', ""),
@@ -379,6 +397,20 @@ for label, path, old, new in MUTATIONS:
             anchor, anchor + "	plan.RecordCounters(l.state, views)\n", 1)
         stash(path)
         open(path, "w").write(moved)
+        failed = suite_fails(path)
+        unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
+        continue
+    if old == "@@SCOPEORDER@@":
+        # The guard MOVED back after the keep check, which is where it was.
+        guard = ('		if scope != "" && ps.MasterConfig != scope {\n'
+                 "			continue\n		}\n\n")
+        i = src.index(guard + "		if keep[ps.Pool] {")
+        moved = src[:i] + src[i + len(guard):]
+        j = moved.index("		name := key\n", i) + len("		name := key\n")
+        stash(path)
+        open(path, "w").write(moved[:j] + "\n" + guard + moved[j:])
         failed = suite_fails(path)
         unstash(path)
         (caught if failed else survived).append(label)

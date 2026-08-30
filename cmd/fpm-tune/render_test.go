@@ -242,3 +242,26 @@ func TestAWriteIsRefusedFromABudgetNobodyConfirmed(t *testing.T) {
 		t.Errorf("a budget read straight from php-fpm's own cgroup was refused: %v", err)
 	}
 }
+
+// TestAFailedSaveAfterASuccessfulApplyIsAnError.
+//
+// The record carries LastAppliedAt, which is what stops the next run reloading
+// a pool this one just reloaded. A failed save after a successful apply is
+// therefore a host that will be reloaded again in a minute — and the command
+// exited 0, with a warning in a log nobody was watching.
+func TestAFailedSaveAfterASuccessfulApplyIsAnError(t *testing.T) {
+	err := reportUnsavedApply(os.ErrPermission, "/var/lib/fpm-tune/state.json")
+	if err == nil {
+		t.Fatal("a failed save after a live apply was reported as success")
+	}
+	for _, want := range []string{"was applied", "reload them again", "state.json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not mention %q, so it reads either as a total "+
+				"failure or as nothing at all:\n%v", want, err)
+		}
+	}
+
+	if err := reportUnsavedApply(nil, "/x"); err != nil {
+		t.Errorf("a successful save was reported as an error: %v", err)
+	}
+}

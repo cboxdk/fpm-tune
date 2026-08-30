@@ -1097,22 +1097,29 @@ func (s *State) Forget(current []string, scope string) []string {
 
 	var dropped []string
 	for key, ps := range s.Pools {
+		// Not mine to touch, and the check comes FIRST.
+		//
+		// A caller scoped to one master sees only that master's pools, so a pool
+		// it cannot see may simply belong to the other daemon sharing this file.
+		// Deleting it took a week of that daemon's learning, and the pool then
+		// came back sized from a profile.
+		//
+		// It used to sit AFTER the keep check, which is a second bug in the same
+		// shape: a scoped round reset the absence counter of another master's
+		// pool that happened to share the name — `www` in both, which is the
+		// case this scoping exists for. A pool genuinely removed from 8.2 had
+		// its counter cleared by every 8.3 round, was never forgotten, and its
+		// stale baseline sat waiting for the next pool given that name.
+		if scope != "" && ps.MasterConfig != scope {
+			continue
+		}
+
 		if keep[ps.Pool] {
 			ps.MissedRounds = 0
 
 			continue
 		}
 		name := key
-
-		// Not mine to forget.
-		//
-		// A caller scoped to one master sees only that master's pools, so a pool
-		// it cannot see may simply belong to the other daemon sharing this file.
-		// Deleting it took a week of that daemon's learning, and the pool then
-		// came back sized from a profile.
-		if scope != "" && ps.MasterConfig != scope {
-			continue
-		}
 
 		// Missing from ONE round is not the same as gone.
 		//

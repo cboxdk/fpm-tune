@@ -1414,3 +1414,51 @@ func TestALegacyRecordIsAdoptedRatherThanDiscarded(t *testing.T) {
 		t.Errorf("the history was not carried over: %+v", adopted)
 	}
 }
+
+// TestAScopedRoundDoesNotKeepAnotherMastersRemovedPoolAlive.
+//
+// The scope check sat after the keep check, which is the same fault as sharing
+// a record, one line later. A scoped 8.3 round reset the absence counter of an
+// 8.2 pool that happened to share the name — `www` in both, which is the case
+// the scoping exists for — so a pool genuinely removed from 8.2 was never
+// forgotten, and its stale baseline sat waiting for the next pool given that
+// name.
+func TestAScopedRoundDoesNotKeepAnotherMastersRemovedPoolAlive(t *testing.T) {
+	s := New()
+	opts := Options{}.Defaults()
+	base := time.Now().Add(-time.Hour)
+
+	const eight2 = "/etc/php/8.2/php-fpm.conf"
+	const eight3 = "/etc/php/8.3/php-fpm.conf"
+
+	for _, m := range []string{eight2, eight3} {
+		obs := busyObs("www", base)
+		obs.MasterConfig = m
+		s.Learn(obs, opts)
+	}
+
+	// 8.2's www is removed, and 8.2's own daemon notices it four times.
+	for i := 0; i < forgetAfterMissedRounds-1; i++ {
+		s.Forget(nil, eight2)
+	}
+
+	// Meanwhile 8.3's daemon runs, and it sees a pool of the same name every
+	// round. Its rounds must not touch 8.2's record at all — not to delete it,
+	// which is the scoping working, and not to RESET its progress either.
+	for i := 0; i < 20; i++ {
+		s.Forget([]string{"www"}, eight3)
+	}
+
+	if s.Lookup(eight3, "www") == nil {
+		t.Error("the running daemon's own pool was forgotten while it was being seen")
+	}
+
+	// One more round from 8.2's own daemon finishes the job.
+	s.Forget(nil, eight2)
+	if s.Lookup(eight2, "www") != nil {
+		t.Error("a pool removed from 8.2 four rounds ago was not forgotten on the fifth; " +
+			"8.3's rounds reset its counter by matching the NAME before the scope was " +
+			"checked, so it can never be forgotten at all and its stale baseline waits " +
+			"for whatever pool is next given that name")
+	}
+}

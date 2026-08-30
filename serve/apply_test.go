@@ -16,6 +16,7 @@ import (
 	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
+	"github.com/cboxdk/fpm-tune/plan"
 	"github.com/cboxdk/fpm-tune/state"
 	"github.com/cboxdk/phpfpm"
 )
@@ -482,4 +483,93 @@ func TestTheDaemonWillNotWriteFromABudgetItCouldNotConfirm(t *testing.T) {
 			"decided not to do; the way out is a one-shot apply with --memory, and that " +
 			"lock refuses it")
 	}
+}
+
+// TestAnUnconfirmedReloadDoesNotAdvanceTheLastApplyTimestamp.
+//
+// fpm_tune_last_apply_timestamp_seconds is the series an alert reads as "the
+// last time a change reached this host and stuck". A reload whose settle window
+// was cut short delivered the signal and proved nothing — the recovery record is
+// deliberately left open for the next round to resolve — so advancing the
+// timestamp says the opposite of what the record says, and the alert built on
+// "not advancing while changes are pending" goes quiet on exactly the round
+// where something might be wrong.
+func TestAnUnconfirmedReloadDoesNotAdvanceTheLastApplyTimestamp(t *testing.T) {
+	tr := poolTree(t, "8.5")
+	defer swapDiscovery([]phpfpm.Master{
+		{PID: livingMaster(t, tr.configPath), ConfigPath: tr.configPath, Binary: trueBinary(t)},
+	})()
+
+	loop := applyingLoop(t, tr.poolDir, tr.configPath)
+	// Long enough that the context below expires inside it, which is what an
+	// interrupted settle window is.
+	loop.cfg.ApplyOptions.SettleTime = 30 * time.Second
+
+	// The lock FIRST, then the flag: holdResource clears `reconciled` when it
+	// keys the directory for the first time, which is correct — a tree this
+	// process has never looked at may carry an unfinished record — and it undoes
+	// a flag set before it. Setting it the other way round made this test
+	// return before it reached the reload at all, and pass for that reason.
+	if !loop.holdResource(tr.poolDir) {
+		t.Fatal("could not take the pool-directory lock")
+	}
+	loop.reconciled = true
+
+	result := planFor(t, loop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	loop.applyPlan(ctx, result, time.Now())
+
+	// It has to have got as far as writing, or the assertion below is about a
+	// round that never reloaded anything.
+	if _, err := os.Stat(apply.DropInPath(tr.poolDir)); err != nil {
+		t.Fatalf("nothing was written, so this round never reached the reload: %v", err)
+	}
+
+	if got := gaugeValue(t, loop, "fpm_tune_last_apply_timestamp_seconds"); got != 0 {
+		t.Errorf("last_apply advanced to %v after a reload whose settle window was cut "+
+			"short; the signal was delivered and nothing was confirmed, and the record "+
+			"is still open for the next round to resolve", got)
+	}
+}
+
+// planFor runs one round's planning without applying, so a test can hand
+// applyPlan a real plan.
+func planFor(t *testing.T, l *Loop) plan.Result {
+	t.Helper()
+
+	targets, err := l.discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := l.sample(context.Background(), targets)
+	res, err := plan.Build(plan.Input{
+		At: time.Now(), Limits: budget.Limits{MemoryBytes: 4096 * mb, CPUs: 8},
+		Views: views, State: l.State(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return res
+}
+
+func gaugeValue(t *testing.T, l *Loop, name string) float64 {
+	t.Helper()
+
+	families, err := l.Metrics().Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			return m.GetGauge().GetValue()
+		}
+	}
+
+	return 0
 }

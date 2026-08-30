@@ -422,8 +422,15 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		l.reconciled = false
 	}
 
-	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote, applied.RolledBack,
-		len(applied.RollbackFailed), err)
+	// Inconclusive is not written-and-adopted.
+	//
+	// last_apply_timestamp_seconds is the series an alert reads as "the last
+	// time a change reached the host and stuck". A reload whose settle window
+	// was cut short delivered the signal and proved nothing — the record is
+	// deliberately left open for the next round to resolve — so advancing the
+	// timestamp says the opposite of what the record says.
+	l.metrics.RecordApply(float64(now.Unix()), applied.Wrote && !applied.Inconclusive,
+		applied.RolledBack, len(applied.RollbackFailed), err)
 
 	if err != nil {
 		if len(applied.RollbackFailed) > 0 {
@@ -561,7 +568,17 @@ func (l *Loop) save(now time.Time, force bool) {
 	}
 
 	if err := l.state.Save(l.cfg.StatePath); err != nil {
-		l.log.Warn("Could not save state", "path", l.cfg.StatePath, "error", err)
+		// Published, not only logged, and specifically because of what the
+		// forced save carries: LastAppliedAt, the record that stops the next
+		// round reloading a pool this one just reloaded. A daemon that cannot
+		// save has lost its brake, and a log line once every five minutes is not
+		// how anyone finds that out.
+		if force {
+			l.metrics.SetApplyBlocked("state_unsaved")
+		}
+		l.log.Error("Could not save state; the record of what was applied is not on disk, "+
+			"so a restart returns to bootstrap and the reload damping has nothing to "+
+			"read", "path", l.cfg.StatePath, "error", err)
 
 		return
 	}

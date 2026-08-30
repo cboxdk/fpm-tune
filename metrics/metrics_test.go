@@ -310,3 +310,31 @@ func describe(t *testing.T, c *Collectors) string {
 
 	return b.String()
 }
+
+// TestAmbiguousPoolNamesAreNotPublishedAtAll.
+//
+// Every per-pool series is labelled by name. Two pools called `www` — one on
+// PHP 8.2, one on 8.3, which is what an upgrade looks like for as long as it
+// takes — set the same series twice, so the endpoint reports whichever plan row
+// ran last, silently and differently on each scrape.
+//
+// A missing series is visible. A wrong one is not. The count is what says why.
+func TestAmbiguousPoolNamesAreNotPublishedAtAll(t *testing.T) {
+	c := New()
+
+	r := result(poolPlan("www", 12, false), poolPlan("shop", 8, false))
+	r.Ambiguous = []string{"www"}
+	c.Update(r, state.New(), state.Options{}, 1)
+
+	if exposes(t, c, `fpm_tune_pool_workers_recommended{pool="www"}`) {
+		t.Error("a pool whose name is shared by two masters was published anyway; the " +
+			"series carries whichever of them the plan happened to reach last")
+	}
+	if !exposes(t, c, `fpm_tune_pool_workers_recommended{pool="shop"}`) {
+		t.Error("an unambiguous pool was suppressed along with the ambiguous one")
+	}
+	if !exposes(t, c, `fpm_tune_pools_ambiguous{} 1`) {
+		t.Error("nothing says why the pool is missing, which makes a suppressed series " +
+			"indistinguishable from a pool that has gone away")
+	}
+}

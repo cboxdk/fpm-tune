@@ -476,13 +476,38 @@ func runApply(args []string) error {
 
 	// The applied settings change the hysteresis baseline, so the store has to
 	// record them even though gather already saved once.
+	//
+	// An ERROR, not a warning. The record carries LastAppliedAt, which is what
+	// stops the next run reloading a pool this one just reloaded — so a failed
+	// save with a successful apply is a host that will be reloaded again in a
+	// minute, and the command exited 0. The apply itself stands and the message
+	// says so; what needs saying is that the brake is not on.
 	if !*c.noLearn {
-		if err := st.Save(*c.statePath); err != nil {
-			log.Warn("Could not save state after applying", "error", err)
+		if err := reportUnsavedApply(st.Save(*c.statePath), *c.statePath); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// reportUnsavedApply turns a failed save AFTER a successful apply into an error
+// rather than a warning.
+//
+// The record carries LastAppliedAt, which is what stops the next run reloading
+// a pool this one just reloaded. So a failed save with a successful apply is a
+// host that will be reloaded again in a minute — and the command used to exit
+// 0. The apply itself stands, and the message says so; what needs saying is
+// that the brake is not on.
+func reportUnsavedApply(err error, path string) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("the configuration was applied and php-fpm reloaded, but the record "+
+		"of it could not be saved to %s (%w). Nothing is broken now, and the next run has "+
+		"no way to know these pools were just reloaded — it may reload them again "+
+		"immediately. Fix the path and run again", path, err)
 }
 
 // noPoolsError explains an empty discovery in the order the causes actually
