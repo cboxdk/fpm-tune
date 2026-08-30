@@ -9,8 +9,10 @@
 # drift.
 #
 # The binaries are fully static (CGO disabled), so one Linux archive runs on Alpine
-# and Debian alike; the "musl" in the target name is the tap's convention, not a
-# libc dependency.
+# and Debian alike — there is no libc to match. Archives are named GOOS-GOARCH
+# (linux-amd64, darwin-arm64), the identifiers `go tool dist list` uses, rather than
+# an LLVM target triple that would put a "-musl" this binary does not link against
+# into the name.
 
 set -eu
 
@@ -51,10 +53,10 @@ build_one() {
     rm -rf "$out"
 }
 
-build_one x86_64-unknown-linux-musl  linux  amd64
-build_one aarch64-unknown-linux-musl linux  arm64
-build_one x86_64-apple-darwin        darwin amd64
-build_one aarch64-apple-darwin       darwin arm64
+build_one linux-amd64  linux  amd64
+build_one linux-arm64  linux  arm64
+build_one darwin-amd64 darwin amd64
+build_one darwin-arm64 darwin arm64
 
 # One checksum file over every archive, sorted by name so it is stable across builds.
 ( cd "$DIST" && for f in *.tar.gz; do

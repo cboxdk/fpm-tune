@@ -31,10 +31,10 @@ PLACEHOLDER = "REPLACED_BY_RELEASE_WORKFLOW"
 # The order the formula lists them, so a mismatch is a substitution bug rather than
 # a silently wrong pairing.
 TARGETS = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "aarch64-unknown-linux-musl",
-    "x86_64-unknown-linux-musl",
+    "darwin-arm64",
+    "darwin-amd64",
+    "linux-arm64",
+    "linux-amd64",
 ]
 
 

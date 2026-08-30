@@ -28,18 +28,19 @@ detect_target() {
     arch="$(uname -m)"
 
     case "$os" in
-        Linux)  os_part="unknown-linux-musl" ;;
-        Darwin) os_part="apple-darwin" ;;
+        Linux)  os_part="linux" ;;
+        Darwin) os_part="darwin" ;;
         *) die "unsupported operating system: $os. Build from source: https://github.com/$REPO" ;;
     esac
 
     case "$arch" in
-        x86_64|amd64)  arch_part="x86_64" ;;
-        aarch64|arm64) arch_part="aarch64" ;;
+        x86_64|amd64)  arch_part="amd64" ;;
+        aarch64|arm64) arch_part="arm64" ;;
         *) die "unsupported architecture: $arch. Build from source: https://github.com/$REPO" ;;
     esac
 
-    printf '%s-%s' "$arch_part" "$os_part"
+    # GOOS-GOARCH, matching the archive names build-release.sh emits.
+    printf '%s-%s' "$os_part" "$arch_part"
 }
 
 # First writable directory already on PATH, so the binary is runnable without the

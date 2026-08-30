@@ -16,22 +16,22 @@ class FpmTune < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-darwin-arm64.tar.gz"
       sha256 "REPLACED_BY_RELEASE_WORKFLOW"
     end
     on_intel do
-      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-darwin-amd64.tar.gz"
       sha256 "REPLACED_BY_RELEASE_WORKFLOW"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-aarch64-unknown-linux-musl.tar.gz"
+      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-linux-arm64.tar.gz"
       sha256 "REPLACED_BY_RELEASE_WORKFLOW"
     end
     on_intel do
-      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-x86_64-unknown-linux-musl.tar.gz"
+      url "https://github.com/cboxdk/fpm-tune/releases/download/v#{version}/fpm-tune-#{version}-linux-amd64.tar.gz"
       sha256 "REPLACED_BY_RELEASE_WORKFLOW"
     end
   end
