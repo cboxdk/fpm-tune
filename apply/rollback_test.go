@@ -933,3 +933,80 @@ func TestABackupIsOnlyClaimedByTheDirectoryItCameFrom(t *testing.T) {
 		t.Error("a file that is not one of ours was claimed")
 	}
 }
+
+// TestTheDeadEndRepairStillRefusesAFileItDidNotWrite.
+//
+// The fall-through added for a rejected leftover with no backup takes this
+// tool's file out. It reaches the same decision the ordinary repair makes, and
+// it has to reach the same REFUSALS: "zz-" is exactly where an operator puts
+// their own last-order overrides, so a file with this name is a natural thing
+// for somebody else to have written, and removing theirs to fix a problem would
+// be its own outage.
+//
+// Two branches, both new and neither exercised: a file that is not ours, and a
+// removal the rehearsal says would not help.
+func TestTheDeadEndRepairStillRefusesAFileItDidNotWrite(t *testing.T) {
+	t.Run("not ours", func(t *testing.T) {
+		dir := t.TempDir()
+		configPath := masterConfigAt(t, dir)
+		path := DropInPath(dir)
+
+		theirs := "; hand-written, last in the include order on purpose\n[shop]\npm.max_children = 40\n"
+		if err := os.WriteFile(path, []byte(theirs), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := removeOursIfThatFixesIt(context.Background(),
+			Master{Binary: alwaysRejects(t), ConfigPath: configPath, DropInDir: dir},
+			path, nil)
+		if err == nil {
+			t.Fatal("a file this tool did not write was removed to fix a problem it did " +
+				"not cause; the operator loses their overrides and has no idea what took them")
+		}
+		// The MESSAGE, because without the ownership check the file is removed,
+		// found not to help, and put back — so its presence at the end says
+		// nothing. What differs is which situation the operator is told they are
+		// in, and the two need different actions: "this file is not mine" is a
+		// name collision to resolve, "removing it does not help" is a broken
+		// configuration to find.
+		if !strings.Contains(err.Error(), "not written by this tool") {
+			t.Errorf("the operator is told the wrong thing about their own file:\n%v", err)
+		}
+
+		if _, serr := os.Stat(path); serr != nil {
+			t.Errorf("the file is gone: %v", serr)
+		}
+	})
+
+	t.Run("removing it would not help", func(t *testing.T) {
+		dir := t.TempDir()
+		configPath := masterConfigAt(t, dir)
+		path := DropInPath(dir)
+
+		if err := os.WriteFile(path,
+			Render([]allocate.PoolPlan{{Name: "shop", MaxChildren: 8}}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Rejects whatever it is given, so taking our file out changes nothing.
+		before := inodeOf(t, path)
+
+		err := removeOursIfThatFixesIt(context.Background(),
+			Master{Binary: alwaysRejects(t), ConfigPath: configPath, DropInDir: dir},
+			path, nil)
+		if err == nil {
+			t.Fatal("the file was removed on a host broken by something else, leaving it " +
+				"both broken AND untuned")
+		}
+
+		// The INODE, because the put-back leaves the same bytes at the same
+		// path and the file's presence at the end proves nothing. The rehearsal
+		// exists for the WINDOW: remove first and check after, and anything
+		// reloading php-fpm in between adopts a configuration nobody chose.
+		if after := inodeOf(t, path); after != before {
+			t.Error("the file was removed and put back rather than rehearsed; for as long " +
+				"as a php-fpm -t takes, the pool directory was missing it, and anything " +
+				"reloading in that window adopts a configuration nobody chose")
+		}
+	})
+}
