@@ -150,6 +150,18 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # The mutation sweep runs the whole suite, and several guards are held only
+      # by tests that need a real php-fpm — the repair path validates with
+      # `php-fpm -t`, so without the binary that test skips and the guard it holds
+      # looks unheld. It is present on the developer's machine, which is why the
+      # sweep was green there and survived one guard here.
+      - name: Install PHP-FPM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends php-fpm
+          sudo systemctl stop php*-fpm || true
+          php-fpm8.3 -v || php-fpm -v
+
       - name: Remove each guard and require a failure
         run: python3 testing/mutations.py
 
