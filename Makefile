@@ -1,4 +1,4 @@
-.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check sbom sbom-check license-check mutations
+.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check sbom sbom-check license-check mutations dist
 
 help:
 	@grep -E '^[a-z0-9-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -53,6 +53,9 @@ tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
 
 build: ## Build the binary into build/
 	go build -o build/fpm-tune ./cmd/fpm-tune
+
+dist: ## Build the release archives + SHA256SUMS into dist/ (VERSION=x.y.z)
+	@sh scripts/build-release.sh "$(or $(VERSION),dev)"
 
 e2e: build ## End-to-end against a real php-fpm (needs php-fpm installed)
 	testing/e2e.sh "$$PWD/build/fpm-tune"

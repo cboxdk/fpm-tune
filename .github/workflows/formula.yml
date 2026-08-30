@@ -1,0 +1,75 @@
+name: Homebrew formula
+
+# Deliberately its own workflow rather than a step in the release.
+#
+# publish-formula.py reads the digests from the *published* SHA256SUMS, so it cannot
+# run before the release exists. And a tap that cannot be written to is not a reason
+# to lose a release: the worst case here is that Homebrew serves the previous version
+# until this is re-run — visible, recoverable, and costing nobody their release.
+
+# workflow_run, not `release: published`: the release is created by the release
+# workflow using GITHUB_TOKEN, and events raised by GITHUB_TOKEN do not trigger
+# further workflows, so `release: published` would simply never fire for an automated
+# release. It is kept for a release published by hand, which does trigger.
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish to the tap (must already be published)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish to cboxdk/homebrew-tap
+    runs-on: ubuntu-latest
+    # A failed release has nothing worth publishing a formula for.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    env:
+      HAS_APP_KEY: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY != '' }}
+    steps:
+      # Check out the TAG, not the default branch: packaging/fpm-tune.rb is versioned
+      # with the code it installs, and publishing it as it exists on main would
+      # describe a build that tag never produced.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name || github.event.workflow_run.head_branch }}
+
+      # A GitHub App scoped to the one repository it may write, minting an installation
+      # token that dies an hour later — no long-lived credential on the runner, and
+      # nothing tied to a person who might leave.
+      - name: Mint an installation token
+        id: app-token
+        if: env.HAS_APP_KEY == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23li8OLb7KeHwdoKGw
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: cboxdk
+          repositories: homebrew-tap
+
+      - name: Publish the Homebrew formula
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name || github.event.workflow_run.head_branch }}
+        run: |
+          case "${TAG}" in
+            v[0-9]*) ;;
+            *)
+              echo "::warning::'${TAG}' is not a release tag, so nothing was published to the tap."
+              exit 0
+              ;;
+          esac
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::No installation token, so cboxdk/homebrew-tap still serves the previous release. Check HOMEBREW_APP_PRIVATE_KEY, or publish by hand: python3 scripts/publish-formula.py ${TAG}"
+            exit 0
+          fi
+          gh auth setup-git
+          python3 scripts/publish-formula.py "${TAG}"

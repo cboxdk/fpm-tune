@@ -10,3 +10,6 @@ coverage.html
 # Build output
 /build/
 /dist/
+
+# release artifacts
+dist/
