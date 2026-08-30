@@ -142,13 +142,15 @@ series to build on instead:
 ```
 fpm_tune_apply_enabled                    # 0 means this process only watches
 fpm_tune_apply_blocked{reason}            # asked to apply and cannot: lock, no_master,
-                                          # unrepaired, budget_unconfirmed
+                                          # unrepaired, budget_unconfirmed, state_unsaved
 fpm_tune_last_run_timestamp_seconds       # not advancing means the loop has stalled
 fpm_tune_last_apply_timestamp_seconds     # not advancing while changes are pending
 fpm_tune_applies_failed_total
 fpm_tune_rollbacks_total                  # above zero deserves a look at the log
 fpm_tune_rollback_failed_total            # worse: a rejected file is still on disk
 fpm_tune_repairs_total                    # it had to undo something a run left behind
+fpm_tune_pools_ambiguous                  # pools NOT published, because two masters
+                                          # share their name — see --drop-in-dir
 ```
 
 `apply_blocked` is the one people forget. A process that is watching and one
