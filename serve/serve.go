@@ -100,6 +100,12 @@ type Config struct {
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
+	// HeartbeatEvery re-logs the current recommendation this often even when it has
+	// not changed, so a watching operator sees a steady sign of life rather than a
+	// log that goes silent after startup. Zero disables it. The metrics endpoint is
+	// the continuous view; this is the pulse in the log.
+	HeartbeatEvery time.Duration
+
 	ApplyOptions apply.Options
 	StateOptions state.Options
 }
@@ -147,10 +153,16 @@ type Loop struct {
 	// a scrape where the reading briefly dips, which a raw current never would.
 	cgroupPeak int64
 
-	// lastRec is the pm.max_children last LOGGED for each pool, so the
-	// recommendation is reported the first time it is seen and whenever it moves —
-	// not every round, which trains an operator to stop reading the log.
-	lastRec map[string]int
+	// lastRec is the recommendation last LOGGED for each pool — the value and when —
+	// so it is reported the first time it is seen, whenever it moves, and, as a sign
+	// of life, again after HeartbeatEvery even when it has not.
+	lastRec map[string]rec
+}
+
+// rec is a logged recommendation and when it was logged.
+type rec struct {
+	workers int
+	at      time.Time
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -381,7 +393,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
-	l.logPlan(result)
+	l.logPlan(result, now)
 	l.writeRecommendation(result, now)
 
 	// Logged on the TRANSITION, not every round. A full host stays full, and
@@ -420,9 +432,9 @@ func (l *Loop) round(ctx context.Context) {
 // It runs in every mode, including --apply: the recommendation is what the plan
 // concluded, which is worth seeing even on the rounds hysteresis holds the reload
 // back, and it reads the same whether or not the tool is the one acting on it.
-func (l *Loop) logPlan(result plan.Result) {
+func (l *Loop) logPlan(result plan.Result, now time.Time) {
 	if l.lastRec == nil {
-		l.lastRec = make(map[string]int, len(result.Plan.Pools))
+		l.lastRec = make(map[string]rec, len(result.Plan.Pools))
 	}
 
 	for _, pp := range result.Plan.Pools {
@@ -432,10 +444,17 @@ func (l *Loop) logPlan(result plan.Result) {
 		if pp.Unknown {
 			continue
 		}
-		if prev, seen := l.lastRec[pp.Name]; seen && prev == pp.MaxChildren {
+
+		last, seen := l.lastRec[pp.Name]
+		changed := !seen || last.workers != pp.MaxChildren
+		// The heartbeat: re-log an unchanged recommendation after a while, so the log
+		// shows the tool is alive and what it currently thinks, rather than going
+		// silent. Measured from the last LOG, not the last round.
+		stale := l.cfg.HeartbeatEvery > 0 && seen && now.Sub(last.at) >= l.cfg.HeartbeatEvery
+		if !changed && !stale {
 			continue
 		}
-		l.lastRec[pp.Name] = pp.MaxChildren
+		l.lastRec[pp.Name] = rec{workers: pp.MaxChildren, at: now}
 
 		l.log.Info("Pool recommendation",
 			"pool", pp.Name,

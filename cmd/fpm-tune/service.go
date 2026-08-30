@@ -307,6 +307,11 @@ mode = %s
 # Where /metrics is served. Empty disables it.
 metrics = %s
 
+# How often to re-log the current recommendation as a sign of life, even when
+# nothing changed. The recommendation is always logged the moment it changes; this
+# is the pulse in between. 0 disables it (metrics stay the continuous view).
+# heartbeat = 30m
+
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
 # drop-in-dir =

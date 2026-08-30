@@ -941,6 +941,7 @@ func runServe(args []string) error {
 		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads; 0 means the 5m default, so pass a small value like 1s to force one sooner")
 		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload; 0 means the 0.15 default, so pass a tiny value like 0.001 to apply any change")
 		saveEvery   = fs.Duration("save-every", 5*time.Minute, "how often learned baselines reach disk")
+		heartbeat   = fs.Duration("heartbeat", 30*time.Minute, "re-log the current recommendation this often even when nothing changed, as a sign of life (0 disables; /metrics is the continuous view)")
 		configPath  = fs.String("config", "", "load settings from this file (as `fpm-tune install-service` writes); explicit flags override it")
 	)
 	fs.Usage = func() {
@@ -1012,6 +1013,7 @@ func runServe(args []string) error {
 		ReserveBytes:   reserveBytes,
 		Workload:       resolveWorkload(*c.workload, log),
 		ScrapeTimeout:  *c.timeout,
+		HeartbeatEvery: *heartbeat,
 		ApplyOptions: apply.Options{
 			MinInterval: *minInterval,
 			MinChange:   *minChange,

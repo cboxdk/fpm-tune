@@ -87,10 +87,16 @@ The line worth watching is the recommendation itself:
 level=INFO msg="Pool recommendation" pool=www now=20 recommend=24 why="peak 18 workers busy; raised to 24, measured 52.0MiB/worker"
 ```
 
-It is logged the first time a pool is seen and **only when the recommended
+It is logged the first time a pool is seen and **when the recommended
 `pm.max_children` changes** — not every round, and not on the per-scrape wobble of
-the peak. So in watch mode the log reads as a running account of what it would set
-and why, rather than a wall of identical lines. In `--apply` mode you see this when
-the plan concludes it, and the separate "resized" line when a change actually
-clears the [hysteresis thresholds](../how-it-decides/hysteresis.md) and reaches the
-master.
+the peak. So the log reads as a running account of what it would set and why, rather
+than a wall of identical lines. In `--apply` mode you see this when the plan
+concludes it, and the separate "resized" line when a change actually clears the
+[hysteresis thresholds](../how-it-decides/hysteresis.md) and reaches the master.
+
+To keep the log from going silent on a quiet host, the same line is re-logged as a
+**heartbeat** every `--heartbeat` interval (default 30 minutes; `heartbeat` in the
+config, `0` to disable) even when nothing changed — a steady sign of life, and each
+one carries the current `why`, so you watch the measurement firm up over the first
+hours. For a continuous view rather than a pulse, scrape `/metrics`; for per-scrape
+detail, run with `--verbose`.
