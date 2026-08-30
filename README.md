@@ -159,6 +159,34 @@ question when a host is not being tuned.
 
 `/metrics` defaults to `:9110`; `/healthz` answers 200 while the process is up.
 
+## What one site can do to another
+
+The pools share a budget, so it is fair to ask what a site with expensive
+workers takes from its neighbours. Measured, on a 4GiB host with five pools
+configured for twelve workers each:
+
+| the expensive pool's workers | it gets | a neighbour gets |
+|-----------------------------:|--------:|-----------------:|
+| 48 MiB (same as the rest)    |      12 |               12 |
+| 200 MiB                      |       9 |               10 |
+| 500 MiB                      |       5 |                6 |
+| 1 GiB                        |       3 |                3 |
+
+Growing more expensive costs a pool its own workers first. It does not buy
+them: cost is what the budget is divided by, so an expensive pool gets fewer
+workers, not more, and the pressure it puts on its neighbours is the same
+pressure it puts on itself. That is the property to want from a shared budget,
+and it is worth stating because the opposite would be easy to build by accident.
+
+Past the point where a single worker will not fit on the host at all, no
+arrangement is valid and the tool refuses rather than choosing a loser — naming
+the pool that made it impossible, since on a host with many sites that is the
+only actionable thing in the message.
+
+What the tool trusts is the pool configuration, which is root-owned. A tenant
+who can edit their own pool file can influence the plan, and
+`php_admin_value[memory_limit]` is what bounds how expensive they can become.
+
 ## Operating it
 
 **Resetting the baseline.** `rm /var/lib/fpm-tune/state.json` does nothing while

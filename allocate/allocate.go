@@ -461,9 +461,17 @@ func allocateFloors(pools []Pool, floors []int, allocatable int64, plan *Plan) (
 	// Below PHP-FPM's own minimum of one worker per pool there is no
 	// configuration to write, only a smaller number that is still too large.
 	if minimum > allocatable {
+		// The most expensive pool by name, because on a host with many tenants
+		// that is the one to look at and the total alone does not say which.
+		// One pool whose workers have grown out of proportion is the usual
+		// cause, and without a name an operator has to work it out from the
+		// table above — which is exactly the moment they are least able to.
+		dearest, cost := priciest(pools)
 		return nil, 0, false, fmt.Errorf(
-			"%w: %d pools need at least %s for one worker each, but only %s is available",
-			ErrCannotFit, len(pools), humanBytes(minimum), humanBytes(allocatable))
+			"%w: %d pools need at least %s for one worker each, but only %s is available. "+
+				"The most expensive is %q at %s a worker",
+			ErrCannotFit, len(pools), humanBytes(minimum), humanBytes(allocatable),
+			dearest, humanBytes(cost))
 	}
 
 	// Pools with a TRUSTED baseline give way first.
@@ -756,6 +764,18 @@ func allocateDemand(pools []Pool, wants, granted []int, remaining int64) int64 {
 			return remaining
 		}
 	}
+}
+
+// priciest names the pool with the highest per-worker cost, and what it costs.
+func priciest(pools []Pool) (string, int64) {
+	name, cost := "", int64(0)
+	for _, p := range pools {
+		if p.WorkerBytes > cost {
+			name, cost = p.Name, p.WorkerBytes
+		}
+	}
+
+	return name, cost
 }
 
 // cheapestUnmet is what one more worker would cost the least expensive pool

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -149,5 +150,37 @@ func TestAPerWorkerCostThatCannotBeRealIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("a per-worker cost of 4 exabytes was accepted; two workers of it wrap to " +
 			"a negative total, which reads as a pool that costs less than nothing")
+	}
+}
+
+// TestARefusalNamesThePoolThatMadeItImpossible.
+//
+// When one worker each does not fit, no arrangement helps and refusing is
+// right. But the total alone does not say WHICH pool grew out of proportion,
+// and on a host with many tenants that is the only actionable thing in the
+// message — the operator is otherwise left to work it out from a table, at
+// exactly the moment they are least able to.
+//
+// Measured: a tenant whose workers reach 4GiB each stops the tool planning the
+// whole host. That is honest — nothing fits — and it is one pool's doing.
+func TestARefusalNamesThePoolThatMadeItImpossible(t *testing.T) {
+	opts := Options{}.Defaults()
+
+	pools := []Pool{
+		{Name: "quiet-site", WorkerBytes: 48 * mb, Floor: 12, CurrentMaxChildren: 12},
+		{Name: "runaway", WorkerBytes: 4000 * mb, Floor: 12, CurrentMaxChildren: 12},
+		{Name: "another-site", WorkerBytes: 48 * mb, Floor: 12, CurrentMaxChildren: 12},
+	}
+
+	_, err := Compute(Budget{TotalBytes: 4096 * mb, ReserveBytes: 512 * mb, CPUs: 8},
+		pools, opts)
+	if err == nil {
+		t.Fatal("a host where one worker each does not fit produced a plan")
+	}
+	if !strings.Contains(err.Error(), "runaway") {
+		t.Errorf("the refusal does not name the pool that caused it:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "3.9GiB") && !strings.Contains(err.Error(), "4.0GiB") {
+		t.Errorf("the refusal does not say what that pool costs:\n%v", err)
 	}
 }
