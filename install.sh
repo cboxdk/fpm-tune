@@ -177,15 +177,14 @@ or choose somewhere you own:
     esac
 
     say ""
-    say "fpm-tune manages a running PHP-FPM. It reads the master's cgroup limit, sizes"
-    say "each pool, and reloads without restarting. Start advisory-first — it changes"
-    say "nothing until you add --apply:"
+    say "fpm-tune sizes each PHP-FPM pool from its live status page against the host's"
+    say "memory, and reloads without restarting. It changes nothing until you tell it to."
     say ""
-    say "  $BIN plan               # what it would set, and why"
-    say "  $BIN serve              # keep watching; add --apply to act"
+    say "  $BIN plan                     # what it would set, and why (writes nothing)"
     say ""
-    say "On a server, run it as a service once you trust its recommendations:"
-    say "  $BIN serve --apply --metrics 127.0.0.1:9110"
+    say "Run it in the background under systemd — advisory first, acting when you trust it:"
+    say "  sudo $BIN install-service     # watch and recommend, change nothing"
+    say "  sudo $BIN mode apply          # let it act on what it finds"
 }
 
 main "$@"

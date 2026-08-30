@@ -88,30 +88,18 @@ moment. A pool that sits flat wants a different decision from one that spikes,
 and only the distribution tells them apart. The same three are on `/metrics` as
 `estimate="p50"`, `"p95"` and `"p99"`, and `plan` prints them too.
 
-A unit to start from:
+Run it in the background under systemd — one command, advisory first, acting when
+you trust it:
 
-```ini
-[Unit]
-Description=fpm-tune
-# Wants, not Requires: a supervisor that dies with the thing it supervises
-# cannot repair it.
-Wants=php-fpm.service
-After=php-fpm.service
-
-[Service]
-ExecStart=/usr/local/bin/fpm-tune serve --apply --metrics 127.0.0.1:9110
-Restart=on-failure
-RestartSec=5
-
-# systemd creates and owns /var/lib/fpm-tune. The tool will create it itself,
-# but then its permissions are whatever the umask happened to be — and what
-# lives there is the record of what was changed and how to undo it.
-StateDirectory=fpm-tune
-StateDirectoryMode=0700
-
-[Install]
-WantedBy=multi-user.target
+```sh
+sudo fpm-tune install-service     # watch and recommend, change nothing
+sudo fpm-tune mode apply          # let it act on what it finds
 ```
+
+`install-service` writes `/etc/fpm-tune/config` and a unit that reads it. The mode
+lives in the config, not the unit, so switching is a command — not a unit edit and
+a `daemon-reload`. `fpm-tune install-service --print` shows the unit and config
+without installing them.
 
 On a host with five sites under load, it measured what each one's workers cost
 without being told anything:
