@@ -47,16 +47,23 @@ func (l *Loop) writeRecommendation(result plan.Result, now time.Time) {
 	//
 	// Checked every round rather than once at startup: the master's include
 	// directory is read from its configuration, and that can change under a
-	// running daemon.
+	// running daemon. Logged only on the TRANSITION, though — the same condition
+	// every thirty seconds forever is how an operator learns to stop reading the
+	// log. The startup check in New catches the explicit-directory case; this is
+	// the one that can appear later.
 	if l.recommendationWouldBeLoaded() {
-		l.log.Error("Refusing to write the recommendation: the path is inside a directory "+
-			"PHP-FPM includes, and the file carries this tool's marker — php-fpm would "+
-			"load it and this tool would believe it wrote it. Choose a path outside the "+
-			"pool directory.",
-			"path", l.cfg.RecommendPath)
+		if !l.recommendBlocked {
+			l.recommendBlocked = true
+			l.log.Error("Refusing to write the recommendation: the path is inside a "+
+				"directory PHP-FPM includes, and the file carries this tool's marker — "+
+				"php-fpm would load it and this tool would believe it wrote it. Choose a "+
+				"path outside the pool directory.",
+				"path", l.cfg.RecommendPath)
+		}
 
 		return
 	}
+	l.recommendBlocked = false
 
 	body, settings := renderRecommendation(result, now)
 

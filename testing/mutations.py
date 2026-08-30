@@ -253,6 +253,10 @@ MUTATIONS = [
     ("cmd: the daemon logs at the one-shot commands' level",
      "cmd/fpm-tune/main.go", "	return loggerAt(slog.LevelInfo, verbose)",
      "	return loggerAt(slog.LevelWarn, verbose)"),
+    ("serve: a recommend path inside the pool dir is accepted at startup",
+     "serve/serve.go",
+     '	if cfg.RecommendPath != "" && cfg.DropInDir != "" &&\n		filepath.Clean(filepath.Dir(cfg.RecommendPath)) == filepath.Clean(cfg.DropInDir) {',
+     '	if false {'),
     ("serve: the recommendation is written where php-fpm loads it",
      "serve/serve.go", "@@RECOMMEND@@", ""),
     ("serve: an unchanged recommendation is rewritten every round",
@@ -292,6 +296,8 @@ MUTATIONS = [
     # Whole-body replacement: prepending a WriteFile leaves the rename in place,
     # so the inode still changes and the mutation proves nothing.
     ("state: Save rewrites in place", "state/state.go", "@@BODY@@Save", ""),
+    ("plan: a profile-floored number is called measured",
+     "plan/plan.go", "		pool.Measured = !flooredToProfile", "		pool.Measured = true"),
     ("plan: an unproven measurement may go below the profile",
      "plan/plan.go",
      "		if ps.BusySamples == 0 && measured < profile.WorkerBytes {", "		if false {"),
@@ -428,7 +434,19 @@ def suite_fails(path):
 
 survived, caught, broken = [], [], []
 
+# An optional substring filter, so a single guard can be re-checked in seconds
+# after editing it, instead of waiting out the whole sweep. No argument runs
+# everything, which is what CI and a pre-commit check do.
+only = sys.argv[1] if len(sys.argv) > 1 else ""
+
+
+def want(label):
+    return not only or only in label
+
+
 for label, path, old, new in MUTATIONS:
+    if not want(label):
+        continue
     src = open(path).read()
     if old.startswith("@@FUNC@@"):
         # Whole function body replaced with a bare return, because these are
@@ -540,60 +558,63 @@ for label, path, old, new in MUTATIONS:
 
 # The master note's two layers, removed together: the keyed filename and the
 # payload re-check. Either alone keeps a repair off another master.
-src = open("apply/remembered.go").read()
-stash("apply/remembered.go")
-together = src
-for o, n in [
-    ('	return hex.EncodeToString(sum[:4]) + "-master.json"', '	_ = sum\n\n	return "master.json"'),
-    ('	if filepath.Clean(ref.DropInDir) != filepath.Clean(dropInDir) {\n		return rememberedMasterRef{}\n	}\n', ""),
-]:
-    together = together.replace(o, n, 1)
-open("apply/remembered.go", "w").write(together)
-r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-unstash("apply/remembered.go")
-label = "apply: both master-note layers removed together"
-(survived if r.returncode == 0 else caught).append(label)
-print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+if want("apply: both master-note layers removed together"):
+    src = open("apply/remembered.go").read()
+    stash("apply/remembered.go")
+    together = src
+    for o, n in [
+        ('	return hex.EncodeToString(sum[:4]) + "-master.json"', '	_ = sum\n\n	return "master.json"'),
+        ('	if filepath.Clean(ref.DropInDir) != filepath.Clean(dropInDir) {\n		return rememberedMasterRef{}\n	}\n', ""),
+    ]:
+        together = together.replace(o, n, 1)
+    open("apply/remembered.go", "w").write(together)
+    r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+    unstash("apply/remembered.go")
+    label = "apply: both master-note layers removed together"
+    (survived if r.returncode == 0 else caught).append(label)
+    print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
 
 # The recycled waiver, all three conditions removed together.
-src = open("state/state.go").read()
-stash("state/state.go")
-together = src
-for o, n in [
-    ("	recycled := mature == 0 && servedSomething &&", "	recycled := mature == 0 &&"),
-    ("		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived",
-     "		ps.Samples >= opts.SamplesBeforeMaturityIsWaived"),
-    ("	if recycled && mature == 0 && peak <= ps.SizingBytes() {", "	if false {"),
-]:
-    together = together.replace(o, n, 1)
-open("state/state.go", "w").write(together)
-r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
-unstash("state/state.go")
-label = "state: every recycled-waiver guard removed together"
-(survived if r.returncode == 0 else caught).append(label)
-print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
+if want("state: every recycled-waiver guard removed together"):
+    src = open("state/state.go").read()
+    stash("state/state.go")
+    together = src
+    for o, n in [
+        ("	recycled := mature == 0 && servedSomething &&", "	recycled := mature == 0 &&"),
+        ("		ps.ImmatureRounds >= opts.SamplesBeforeMaturityIsWaived",
+         "		ps.Samples >= opts.SamplesBeforeMaturityIsWaived"),
+        ("	if recycled && mature == 0 && peak <= ps.SizingBytes() {", "	if false {"),
+    ]:
+        together = together.replace(o, n, 1)
+    open("state/state.go", "w").write(together)
+    r = subprocess.run(["go", "test", "./..."], capture_output=True, text=True, env=env)
+    unstash("state/state.go")
+    label = "state: every recycled-waiver guard removed together"
+    (survived if r.returncode == 0 else caught).append(label)
+    print(("SURVIVED     " if r.returncode == 0 else "caught       ") + label)
 
 # The layers, removed together.
-src = open("allocate/allocate.go").read()
-stash("allocate/allocate.go")
-together = src
-for o, n in [
-    ("if unwritableNeed+writableMinimum > allocatable {", "if unwritableNeed >= allocatable {"),
-    ("			return used, false", "			return used, true"),
-    ("	if allocated < 0 || allocated > allocatable {", "	if false {"),
-    ("		if p.WorkerBytes > maxPlausibleWorkerBytes {", "		if false {"),
-    ("		if p.Floor > maxPlausibleChildren || p.Ceiling > maxPlausibleChildren {", "		if false {"),
-]:
-    together = together.replace(o, n, 1)
-open("allocate/allocate.go", "w").write(together)
-r = subprocess.run(["go", "test", "./allocate/"], capture_output=True, text=True, env=env)
-unstash("allocate/allocate.go")
-if r.returncode == 0:
-    survived.append("allocate: EVERY budget guard removed together")
-    print("SURVIVED     allocate: EVERY budget guard removed together")
-else:
-    caught.append("allocate: every budget guard removed together")
-    print("caught       allocate: every budget guard removed together")
+if want("allocate: EVERY budget guard removed together"):
+    src = open("allocate/allocate.go").read()
+    stash("allocate/allocate.go")
+    together = src
+    for o, n in [
+        ("if unwritableNeed+writableMinimum > allocatable {", "if unwritableNeed >= allocatable {"),
+        ("			return used, false", "			return used, true"),
+        ("	if allocated < 0 || allocated > allocatable {", "	if false {"),
+        ("		if p.WorkerBytes > maxPlausibleWorkerBytes {", "		if false {"),
+        ("		if p.Floor > maxPlausibleChildren || p.Ceiling > maxPlausibleChildren {", "		if false {"),
+    ]:
+        together = together.replace(o, n, 1)
+    open("allocate/allocate.go", "w").write(together)
+    r = subprocess.run(["go", "test", "./allocate/"], capture_output=True, text=True, env=env)
+    unstash("allocate/allocate.go")
+    if r.returncode == 0:
+        survived.append("allocate: EVERY budget guard removed together")
+        print("SURVIVED     allocate: EVERY budget guard removed together")
+    else:
+        caught.append("allocate: every budget guard removed together")
+        print("caught       allocate: every budget guard removed together")
 
 survived = [s for s in survived if s not in LAYERED]
 

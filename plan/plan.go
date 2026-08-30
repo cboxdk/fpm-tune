@@ -368,12 +368,23 @@ func poolFor(
 		// the pool has been seen working the measurement stands on its own,
 		// however small: a genuinely cheap application is exactly what this tool
 		// exists to notice.
+		flooredToProfile := false
 		if ps.BusySamples == 0 && measured < profile.WorkerBytes {
 			measured = profile.WorkerBytes
+			flooredToProfile = true
 		}
 
 		pool.WorkerBytes = measured
-		pool.Measured = true
+
+		// Measured means the number is the pool's OWN, not a profile guess.
+		//
+		// When the value above was floored up to the profile, it is the guess,
+		// not a measurement — so calling it "measured" would print "measured
+		// 48MiB" in the plan while the distribution table three lines down shows
+		// a median of 1MiB, which reads as broken. The word, the "not yet
+		// measured" list, and the fpm_tune_pool_measured metric all key on this,
+		// and all three were wrong for an idle first-run pool.
+		pool.Measured = !flooredToProfile
 	}
 
 	// Reducible is the OTHER question, and it travels separately. Handing

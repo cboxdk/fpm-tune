@@ -337,8 +337,8 @@ func runApply(args []string) error {
 			"configuration while a change is in flight, the record of what is in flight, "+
 			"and where php-fpm lives. Not scratch space — a rule that cleans it takes "+
 			"away both")
-		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
-		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
+		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads; 0 means the 5m default, so pass a small value like 1s to force one sooner")
+		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload; 0 means the 0.15 default, so pass a tiny value like 0.001 to apply any change")
 		dryRun      = fs.Bool("dry-run", false, "render and validate, but write nothing and reload nothing")
 	)
 	fs.Usage = func() {
@@ -727,8 +727,8 @@ func runServe(args []string) error {
 			"configuration while a change is in flight, the record of what is in flight, "+
 			"and where php-fpm lives. Not scratch space — a rule that cleans it takes "+
 			"away both")
-		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads (default 5m)")
-		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload (default 0.15)")
+		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads; 0 means the 5m default, so pass a small value like 1s to force one sooner")
+		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload; 0 means the 0.15 default, so pass a tiny value like 0.001 to apply any change")
 		saveEvery   = fs.Duration("save-every", 5*time.Minute, "how often learned baselines reach disk")
 	)
 	fs.Usage = func() {

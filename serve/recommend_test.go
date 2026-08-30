@@ -89,3 +89,39 @@ func TestTheRecommendationIsRewrittenOnlyWhenItChanges(t *testing.T) {
 			"says the daemon is running rather than that its advice moved")
 	}
 }
+
+// TestRecommendInsideThePoolDirectoryIsRefusedAtStartup.
+//
+// A recommendation path inside the pool directory is a file php-fpm would load
+// and this tool would believe it wrote — and the running daemon would refuse it
+// every interval, forever, while looking healthy and producing nothing. The
+// deterministic case is caught at startup, with the fix in the message.
+func TestRecommendInsideThePoolDirectoryIsRefusedAtStartup(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := New(Config{
+		StatePath:     filepath.Join(t.TempDir(), "state.json"),
+		MetricsAddr:   "",
+		DropInDir:     dir,
+		RecommendPath: filepath.Join(dir, "recommended.conf"),
+	}, nil)
+	if err == nil {
+		t.Fatal("a recommendation path inside the pool directory was accepted; php-fpm " +
+			"would load it and the daemon would refuse it every interval forever")
+	}
+	if !strings.Contains(err.Error(), "outside the pool directory") {
+		t.Errorf("the error does not tell the operator the fix:\n%v", err)
+	}
+
+	// A path outside it is fine.
+	loop, err := New(Config{
+		StatePath:     filepath.Join(t.TempDir(), "state.json"),
+		MetricsAddr:   "",
+		DropInDir:     dir,
+		RecommendPath: filepath.Join(t.TempDir(), "recommended.conf"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("a recommendation path outside the pool directory was refused: %v", err)
+	}
+	loop.Close()
+}

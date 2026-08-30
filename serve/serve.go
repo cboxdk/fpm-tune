@@ -127,13 +127,14 @@ type Loop struct {
 	metrics *metrics.Collectors
 	state   *state.State
 
-	lastSaved   time.Time
-	release     lock.Release
-	resource    lock.Release
-	resourceDir string
-	reconciled  bool
-	exhausted   bool
-	boundAddr   string
+	lastSaved        time.Time
+	release          lock.Release
+	resource         lock.Release
+	resourceDir      string
+	reconciled       bool
+	exhausted        bool
+	boundAddr        string
+	recommendBlocked bool
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -141,6 +142,20 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 	cfg = cfg.Defaults()
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+
+	// Caught at startup, the one case that is deterministic: a recommendation
+	// path inside the pool directory this daemon was told to write. What the
+	// recommendation carries is this tool's own marker, so php-fpm would load it
+	// — and the daemon would otherwise refuse it every interval, forever, while
+	// looking healthy and silently producing nothing. Fail now, with the fix.
+	if cfg.RecommendPath != "" && cfg.DropInDir != "" &&
+		filepath.Clean(filepath.Dir(cfg.RecommendPath)) == filepath.Clean(cfg.DropInDir) {
+		return nil, fmt.Errorf("--recommend %s is inside the pool directory %s, where "+
+			"php-fpm would load it — the recommendation carries this tool's marker. "+
+			"Choose a path outside the pool directory, such as "+
+			"/var/lib/fpm-tune/recommended.conf",
+			cfg.RecommendPath, cfg.DropInDir)
 	}
 
 	// Taken before the state is read. Two processes both load the state, both

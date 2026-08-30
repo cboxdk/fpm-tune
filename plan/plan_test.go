@@ -927,3 +927,60 @@ func TestOneTenantsPoolNameDoesNotStopTheHostBeingTuned(t *testing.T) {
 			n.MaxChildren, n.Current)
 	}
 }
+
+// TestAProfileFlooredNumberIsNotCalledMeasured.
+//
+// An idle pool's own readings are blocked from lowering its cost below the
+// bootstrap profile, so its sizing number is floored up to the profile. Setting
+// Measured on that made the plan print "measured 48MiB" while the distribution
+// three lines below showed a median of 1MiB — a contradiction that reads as
+// broken, exactly on the low-traffic host a first trial runs against.
+//
+// Measured means the number is the pool's own. A floored one is the guess.
+func TestAProfileFlooredNumberIsNotCalledMeasured(t *testing.T) {
+	st := state.New()
+	base := time.Now().Add(-time.Hour)
+
+	// A pool observed only while idle: its workers read tiny, and the idle-pool
+	// rule blocks learning that as its cost. Never busy, so BusySamples stays 0.
+	for i := 0; i < 30; i++ {
+		st.Learn(state.Observation{
+			Pool: "shop", At: base.Add(time.Duration(i) * time.Minute),
+			ActiveNow: 0, Accepted: 100, // frozen: no traffic
+			Workers: []state.WorkerSample{{RSSBytes: 1 * mb, Requests: 400}},
+		}, state.Options{})
+	}
+
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 4 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		State:  st,
+		Views: []observe.PoolView{{
+			Name: "shop", ProcessManager: "dynamic",
+			CurrentMaxChildren: 4, MaxChildrenKnown: true,
+			Workers: []state.WorkerSample{{RSSBytes: 1 * mb, Requests: 400}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pp := res.Plan.Pools[0]
+	if pp.Measured {
+		t.Errorf("a pool whose cost was floored to the profile is marked measured; the " +
+			"plan will call the profile guess a measurement")
+	}
+	if strings.Contains(pp.Reason, "measured") {
+		t.Errorf("the reason says %q — that number is the profile's, not the pool's", pp.Reason)
+	}
+	// It must appear in the not-yet-measured list, so the recommendation labels it.
+	found := false
+	for _, n := range res.Bootstrapped {
+		if n == "shop" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the pool is not listed as bootstrapped, so nothing tells the operator " +
+			"its number is a guess")
+	}
+}
