@@ -989,7 +989,20 @@ func TestTheDeadEndRepairStillRefusesAFileItDidNotWrite(t *testing.T) {
 		}
 
 		// Rejects whatever it is given, so taking our file out changes nothing.
-		before := inodeOf(t, path)
+		//
+		// A hardlink pins the inode, rather than remembering its number and
+		// comparing after. An inode NUMBER is reused across unlink+create on some
+		// filesystems (ext4 hands the freed one straight back; the CI runner's
+		// /tmp is ext4) and not others (APFS, tmpfs, btrfs allocate monotonically)
+		// — so "same number afterwards" proved the file was untouched on a Mac and
+		// proved nothing on the runner, where the guard silently went unheld. A
+		// hardlink keeps the inode's link count above zero across a remove, so the
+		// number cannot be recycled: a put-back is then a DIFFERENT inode on every
+		// filesystem.
+		pin := filepath.Join(t.TempDir(), "pinned-drop-in")
+		if err := os.Link(path, pin); err != nil {
+			t.Fatal(err)
+		}
 
 		err := removeOursIfThatFixesIt(context.Background(),
 			Master{Binary: alwaysRejects(t), ConfigPath: configPath, DropInDir: dir},
@@ -1003,7 +1016,7 @@ func TestTheDeadEndRepairStillRefusesAFileItDidNotWrite(t *testing.T) {
 		// path and the file's presence at the end proves nothing. The rehearsal
 		// exists for the WINDOW: remove first and check after, and anything
 		// reloading php-fpm in between adopts a configuration nobody chose.
-		if after := inodeOf(t, path); after != before {
+		if inodeOf(t, path) != inodeOf(t, pin) {
 			t.Error("the file was removed and put back rather than rehearsed; for as long " +
 				"as a php-fpm -t takes, the pool directory was missing it, and anything " +
 				"reloading in that window adopts a configuration nobody chose")
