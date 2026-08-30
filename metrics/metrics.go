@@ -60,7 +60,7 @@ func New() *Collectors {
 			// histogram_quantile and most dashboard tooling treat it specially,
 			// and "typical_peak" is not a quantile in any case — it is an
 			// asymmetric moving estimate.
-			"Learned per-worker memory. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen.", "pool", "estimate"),
+			"Per-worker memory. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen; \"p50\"/\"p95\"/\"p99\" are the measured spread, which is what to graph when a host misbehaves at its busiest minute rather than on average.", "pool", "estimate"),
 		confidence: gaugeVec(reg, "fpm_tune_pool_baseline_confidence",
 			// Corrected: it used to say a pool below 1 is "sized from an
 			// estimate", which stopped being true when the cost and the
@@ -193,6 +193,15 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 		var conf float64
 		if st != nil {
 			if ps := st.Lookup(masters[p.Name], p.Name); ps != nil {
+				// The spread as well as the estimate. Sizing follows typical_peak;
+				// these say what the workers actually measured, which is what an
+				// advisory deployment is for and what a dashboard wants when a host
+				// misbehaves at its busiest minute rather than on average.
+				if ps.RSSSamples > 0 {
+					c.workerRSS.WithLabelValues(p.Name, "p50").Set(float64(ps.Percentile(0.50)))
+					c.workerRSS.WithLabelValues(p.Name, "p95").Set(float64(ps.Percentile(0.95)))
+					c.workerRSS.WithLabelValues(p.Name, "p99").Set(float64(ps.Percentile(0.99)))
+				}
 				conf = ps.Confidence(opts)
 				c.workerRSS.WithLabelValues(p.Name, "typical_peak").Set(float64(ps.TypicalPeakBytes))
 				c.workerRSS.WithLabelValues(p.Name, "high_water").Set(float64(ps.HighWaterBytes))

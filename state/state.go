@@ -153,6 +153,12 @@ type PoolState struct {
 	// week of learning.
 	MissedRounds int `json:"missed_rounds,omitempty"`
 
+	// RSSHistogram counts worker memory readings in log-spaced buckets, and
+	// RSSSamples is how many are in it. See percentile.go: this describes what
+	// has been SEEN, where TypicalPeakBytes decides what to reserve.
+	RSSHistogram []uint32 `json:"rss_histogram,omitempty"`
+	RSSSamples   int64    `json:"rss_samples,omitempty"`
+
 	// MasterConfig is the php-fpm configuration this pool was learned from.
 	//
 	// A state file can be shared by two daemons, each scoped to one master, and
@@ -713,6 +719,23 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		if w.RSSBytes <= 0 {
 			continue
 		}
+
+		// Every reading goes into the description of what was seen, including
+		// the young ones and the ones from a scrape the sizing path will discard.
+		//
+		// The sizing path is choosier — a worker that has not loaded the
+		// application is not evidence about what a warm one costs — but this is
+		// a description, and half the reason to look at a distribution is to see
+		// how much of it is cold.
+		//
+		// HighWaterBytes deliberately stays on the sizing path below, where the
+		// maturity gate applies: SizingBytes reads it, so a cold worker feeding
+		// it would size a pool from a process that has not loaded the
+		// application. What the REPORT calls "worst seen" comes from the
+		// distribution instead — the two questions are different and were being
+		// answered by one field.
+		ps.observeRSS(w.RSSBytes)
+
 		if w.Requests >= opts.MinRequestsPerWorker {
 			mature++
 		}

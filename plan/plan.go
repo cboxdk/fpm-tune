@@ -69,6 +69,19 @@ type Input struct {
 	At time.Time
 }
 
+// PoolDistribution is what one pool's workers have measured.
+type PoolDistribution struct {
+	Name          string
+	P50, P95, P99 int64
+
+	// WorstSeen is the largest worker in the DISTRIBUTION, not PoolState's
+	// HighWaterBytes — that field is a sizing input, fed only by scrapes the
+	// sizing path accepts, so a pool could report a dozen readings and a
+	// largest-worker-ever of zero.
+	WorstSeen int64
+	Samples   int64
+}
+
 // Result is a plan plus the reasoning that produced it.
 type Result struct {
 	Plan   allocate.Plan
@@ -86,6 +99,15 @@ type Result struct {
 	// allocated to them: a pool that is merely restarting must not have its
 	// budget handed to its neighbours.
 	Unreachable []string
+
+	// Distribution is what each pool's workers were actually MEASURED at, as
+	// opposed to the single number the budget is divided by.
+	//
+	// Reporting only. It exists for the person deciding by hand — a pool whose
+	// median worker is 60MiB and whose p99 is 400MiB wants a different decision
+	// from one that sits flat at 90MiB, and the sizing number cannot tell them
+	// apart because it is not trying to.
+	Distribution []PoolDistribution
 
 	// Ambiguous names pool names that appear more than once in this round,
 	// because two masters each have one. Nothing keyed on the name alone can
@@ -158,6 +180,7 @@ func Build(in Input) (Result, error) {
 	result.Plan = allocation
 	result.Views = in.Views
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
+	result.Distribution = distributionOf(in.Views, in.State)
 	for name := range ambiguous {
 		result.Ambiguous = append(result.Ambiguous, name)
 	}
@@ -184,6 +207,38 @@ func ambiguousNames(views []observe.PoolView) map[string]bool {
 	}
 
 	return dup
+}
+
+// distributionOf collects what each pool's workers have measured, for the
+// pools that have measured anything.
+func distributionOf(views []observe.PoolView, st *state.State) []PoolDistribution {
+	if st == nil {
+		return nil
+	}
+
+	var out []PoolDistribution
+	for _, v := range views {
+		ps := st.Lookup(v.Target.ConfigPath, v.Name)
+		if ps == nil || ps.RSSSamples == 0 {
+			continue
+		}
+		out = append(out, PoolDistribution{
+			Name: v.Name,
+			P50:  ps.Percentile(0.50),
+			P95:  ps.Percentile(0.95),
+			P99:  ps.Percentile(0.99),
+			// From the distribution, not from HighWaterBytes: that field is a
+			// sizing input and is only fed by scrapes the sizing path accepts,
+			// so a pool could report a dozen readings and a
+			// largest-worker-ever of zero. Two numbers describing the same
+			// thing and disagreeing is worse than either alone.
+			WorstSeen: ps.Percentile(1),
+			Samples:   ps.RSSSamples,
+		})
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Name < out[b].Name })
+
+	return out
 }
 
 // mastersOf maps each pool to the configuration it belongs to, so a lookup by

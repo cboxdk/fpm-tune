@@ -78,6 +78,26 @@ func (r Result) Render(w io.Writer) error {
 		budget.HumanBytes(r.Plan.TotalBytes-r.Reserve),
 		budget.HumanBytes(r.Plan.FreeBytes))
 
+	if len(r.Distribution) > 0 {
+		fmt.Fprintf(&b, "\nWorker memory, as measured:\n")
+
+		dt := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(dt, "  POOL\tMEDIAN\tP95\tP99\tWORST SEEN\tREADINGS")
+		for _, d := range r.Distribution {
+			_, _ = fmt.Fprintf(dt, "  %s\t%s\t%s\t%s\t%s\t%d\n",
+				d.Name, budget.HumanBytes(d.P50), budget.HumanBytes(d.P95),
+				budget.HumanBytes(d.P99), budget.HumanBytes(d.WorstSeen), d.Samples)
+		}
+		if err := dt.Flush(); err != nil {
+			return err
+		}
+
+		fmt.Fprintf(&b, "  Sizing uses neither of these directly — it follows the typical\n"+
+			"  peak, which rises fast and falls on a half-life. The spread is here for\n"+
+			"  the decision you are making by hand: a pool whose p99 is far above its\n"+
+			"  median has a tail, and a tail is what fills a host at the wrong moment.\n")
+	}
+
 	if len(r.Bootstrapped) > 0 {
 		fmt.Fprintf(&b, "\nEstimated, not yet measured: %s\n", strings.Join(r.Bootstrapped, ", "))
 		fmt.Fprintf(&b, "  These pools have not been watched long enough to size from their own\n"+

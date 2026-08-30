@@ -140,8 +140,8 @@ MUTATIONS = [
      "state/state.go", "		ps.inferCadence()\n", ""),
     ("state: the peak is filtered by maturity again",
      "state/state.go",
-     "		if w.RSSBytes <= 0 {\n			continue\n		}\n		if w.Requests >= opts.MinRequestsPerWorker {\n			mature++\n		}",
-     "		if w.RSSBytes <= 0 || w.Requests < opts.MinRequestsPerWorker {\n			continue\n		}\n		mature++"),
+     "		if w.Requests >= opts.MinRequestsPerWorker {\n			mature++\n		}\n		if w.RSSBytes > peak {\n			peak = w.RSSBytes\n		}",
+     "		if w.Requests < opts.MinRequestsPerWorker {\n			continue\n		}\n		mature++\n		if w.RSSBytes > peak {\n			peak = w.RSSBytes\n		}"),
     ("state: confidence accrues without work",
      "state/state.go",
      "	if worked && mature >= opts.MinMatureWorkers {", "	if true {"),
@@ -251,6 +251,12 @@ MUTATIONS = [
      "state/state.go",
      "	mode := os.FileMode(0o644)\n	if info, err := os.Stat(path); err == nil {\n		mode = info.Mode().Perm()\n	}",
      "	mode := os.FileMode(0o644)"),
+    ("state: the distribution never forgets a replaced application",
+     "state/state.go", "@@NOOP-DECAY@@", ""),
+    ("state: a cold reading feeds the high-water mark, which sizes",
+     "state/state.go",
+     "	ps.LastPeakBytes = peak\n	ps.LastPeakAt = at\n	if peak > ps.HighWaterBytes {\n		ps.HighWaterBytes = peak\n	}",
+     "	ps.LastPeakBytes = peak\n	ps.LastPeakAt = at"),
     ("state: a state file from the future is believed",
      "state/state.go", "		ps.forgetTheFuture(now)", "		_ = now"),
     ("cmd: a flag after a positional argument is discarded",
@@ -435,6 +441,20 @@ for label, path, old, new in MUTATIONS:
         open(path, "w").write(moved)
         failed = suite_fails(path)
         unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
+        continue
+    if old == "@@NOOP-DECAY@@":
+        src2 = open("state/percentile.go").read()
+        guard = ("	if ps.RSSSamples > decayAfter {\n"
+                 "		for i := range ps.RSSHistogram {\n"
+                 "			ps.RSSHistogram[i] /= 2\n		}\n"
+                 "		ps.RSSSamples = ps.total()\n	}\n")
+        assert guard in src2, "decay guard not found"
+        stash("state/percentile.go")
+        open("state/percentile.go", "w").write(src2.replace(guard, "", 1))
+        failed = suite_fails("state/percentile.go")
+        unstash("state/percentile.go")
         (caught if failed else survived).append(label)
         print(("caught       " if failed else "SURVIVED     ") + label)
         continue
