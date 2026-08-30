@@ -243,6 +243,11 @@ MUTATIONS = [
      "budget/budget.go",
      "				if rerr != nil {\n					// The limit exists and cannot be read, which is the case\n					// that must not pass for \"unlimited\".\n					return 0, false, fmt.Errorf(\"cannot read the memory limit at %s: %w\",\n						filepath.Join(base, path, file), rerr)\n				}\n",
      "				_ = rerr\n"),
+    ("serve: the recommendation is written where php-fpm loads it",
+     "serve/serve.go", "@@RECOMMEND@@", ""),
+    ("serve: an unchanged recommendation is rewritten every round",
+     "serve/recommend.go",
+     "		if settingsOf(string(existing)) == settings {\n			return\n		}\n", ""),
     ("serve: -no-learn records anyway",
      "serve/serve.go",
      "	if !l.cfg.NoLearn {\n		plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)\n	}",
@@ -441,6 +446,19 @@ for label, path, old, new in MUTATIONS:
         open(path, "w").write(moved)
         failed = suite_fails(path)
         unstash(path)
+        (caught if failed else survived).append(label)
+        print(("caught       " if failed else "SURVIVED     ") + label)
+        continue
+    if old == "@@RECOMMEND@@":
+        src2 = open("serve/recommend.go").read()
+        guard = ("	if l.recommendationWouldBeLoaded() {\n")
+        assert guard in src2, "recommend guard not found"
+        i = src2.index(guard)
+        j = src2.index("\n	}\n", i) + 4
+        stash("serve/recommend.go")
+        open("serve/recommend.go", "w").write(src2[:i] + src2[j:])
+        failed = suite_fails("serve/recommend.go")
+        unstash("serve/recommend.go")
         (caught if failed else survived).append(label)
         print(("caught       " if failed else "SURVIVED     ") + label)
         continue

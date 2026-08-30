@@ -34,6 +34,13 @@ type Config struct {
 	// Interval is how often the pools are sampled.
 	Interval time.Duration
 
+	// RecommendPath is where the plan is written as configuration, for a run
+	// that changes nothing and is meant to be read by a person.
+	//
+	// Empty disables it. Nothing php-fpm reads should ever be named here, and
+	// the file says so at the top in case it is.
+	RecommendPath string
+
 	// NoLearn stops the loop recording what it observes.
 	//
 	// The flag was registered for `serve` and read by nothing: a daemon started
@@ -323,6 +330,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
+	l.writeRecommendation(result, now)
 
 	// Logged on the TRANSITION, not every round. A full host stays full, and
 	// repeating the same warning every fifteen seconds is how an operator learns

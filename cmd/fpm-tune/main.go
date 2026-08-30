@@ -657,6 +657,11 @@ func runServe(args []string) error {
 		doApply     = fs.Bool("apply", false,
 			"act on the plan. Without it the loop observes, learns and publishes metrics "+
 				"without touching any configuration, which is a reasonable way to run permanently")
+		recommend = fs.String("recommend", "",
+			"write the plan to this path as PHP-FPM configuration, for copying by hand. "+
+				"Nothing reads it — this is for running permanently WITHOUT -apply and "+
+				"deciding yourself. Rewritten only when the recommendation changes, so "+
+				"its modification time is when that last happened")
 		dropInDir = fs.String("drop-in-dir", "", "where the pool settings are written; also selects which master to manage on a host running several (default: the directory the master includes)")
 		backupDir = fs.String("backup-dir", apply.DefaultBackupDir, "what is needed to undo a change and to repair a host: the previous "+
 			"configuration while a change is in flight, the record of what is in flight, "+
@@ -713,11 +718,12 @@ func runServe(args []string) error {
 	}
 
 	loop, err := serve.New(serve.Config{
-		Interval:  *interval,
-		StatePath: *c.statePath,
-		SaveEvery: *saveEvery,
-		Apply:     *doApply,
-		NoLearn:   *c.noLearn,
+		Interval:      *interval,
+		StatePath:     *c.statePath,
+		SaveEvery:     *saveEvery,
+		Apply:         *doApply,
+		NoLearn:       *c.noLearn,
+		RecommendPath: *recommend,
 
 		MetricsAddr:    *metricsAddr,
 		DropInDir:      *dropInDir,

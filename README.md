@@ -24,6 +24,40 @@ fpm-tune serve    # keep measuring; add --apply to act on what it finds
 self-repair below is part of applying, so a watch-only daemon will not fix a host
 either.
 
+## Running it as an adviser
+
+Watching without acting is a first-class way to use this, and not only a step on
+the way to `--apply`. A daemon with no `--apply` changes nothing and never will;
+`--recommend` gives it somewhere to put its conclusion.
+
+```bash
+fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf
+```
+
+The file is PHP-FPM configuration you can read, diff and paste. Nothing loads
+it — a path inside a directory your master includes is refused, because what it
+writes carries this tool's own marker and php-fpm would pick it up. It is
+rewritten only when the recommended SETTINGS change, so its modification time
+answers "when did the advice last move" rather than "is the daemon up".
+
+Each pool comes with the evidence for its number:
+
+```ini
+; shop: peak 34 workers busy; raised to 42, measured 96.0MiB/worker
+;   measured per worker: median 88.0MiB, p95 137.0MiB, p99 194.0MiB, worst 512.0MiB (4096 readings)
+
+[shop]
+pm.max_children = 42
+```
+
+The spread is there because one number cannot answer the question you are
+actually asking. Sizing follows the typical peak — it rises fast and falls on a
+half-life, which is what makes it safe to divide a budget by — but a pool whose
+p99 is twice its median has a tail, and a tail is what fills a host at the wrong
+moment. A pool that sits flat wants a different decision from one that spikes,
+and only the distribution tells them apart. The same three are on `/metrics` as
+`estimate="p50"`, `"p95"` and `"p99"`, and `plan` prints them too.
+
 A unit to start from:
 
 ```ini
