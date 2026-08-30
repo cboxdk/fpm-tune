@@ -208,3 +208,32 @@ func TestAPoolIsNotTwoPoolsBecauseTwoProcessesServeIt(t *testing.T) {
 			"different sites with different applications", len(different))
 	}
 }
+
+// TestTheViewKeepsTheNameDiscoveryRead.
+//
+// A tenant who can edit their own pool file can set pm.status_listen and point
+// it at a socket they control. A response claiming to be another pool would
+// then be learned under THAT pool's name — one site's memory measured as
+// another's — and rendered into the drop-in as `[victim]`.
+//
+// The library refuses a mismatched name before it reaches here. This is the
+// same rule at the layer that would have to act on it: the name comes from the
+// root-owned configuration discovery read, and the response supplies numbers.
+func TestTheViewKeepsTheNameDiscoveryRead(t *testing.T) {
+	view := viewFromOutcome(
+		phpfpm.PoolOutcome{
+			Name: "attacker",
+			Result: &phpfpm.Result{Pools: map[string]phpfpm.Pool{
+				// A single entry under a name the tenant chose.
+				"victim": {Name: "victim", MaxActiveProcesses: 99},
+			}},
+		},
+		phpfpm.Target{Name: "attacker", ConfigPath: "/etc/php-fpm.conf"},
+	)
+
+	if view.Name != "attacker" {
+		t.Errorf("the view is labelled %q, which is the name the RESPONSE claimed; that "+
+			"pool's baseline is about to be taught another site's memory, and the "+
+			"drop-in will name it", view.Name)
+	}
+}

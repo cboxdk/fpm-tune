@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cboxdk/fpm-tune/allocate"
+	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/state"
@@ -333,7 +334,16 @@ func poolFor(
 	// A pool whose configured ceiling could not be read is in the same position
 	// as one that could not be reached: we know nothing about it, and acting on
 	// nothing is how a failed `php-fpm -tt` turns into a resize.
-	if view.Err != nil || !view.MaxChildrenKnown {
+	//
+	// And one this tool cannot safely WRITE, for the same reason from the other
+	// end. A section name with a path separator or a control character in it is
+	// refused by the writer — rightly, since the name reaches a filename and a
+	// section header — but that refusal used to abort the whole change set, so
+	// one tenant naming their pool `evil/name` stopped every other site on the
+	// host being tuned. Reserved conservatively and left alone is the same
+	// answer this branch already gives to a pool it cannot read, and it is the
+	// right one: one pool's problem should cost one pool.
+	if view.Err != nil || !view.MaxChildrenKnown || apply.UnsafePoolName(view.Name) {
 		pool.Unknown = true
 
 		// And not reducible, whatever its confidence says. A trusted pool that

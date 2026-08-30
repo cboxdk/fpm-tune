@@ -263,8 +263,18 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 
 			return view
 		}
-		for name, only := range outcome.Result.Pools {
-			view.Name, pool = name, only
+		for _, only := range outcome.Result.Pools {
+			// The VALUE, not the name. view.Name stays what discovery read out
+			// of the root-owned configuration.
+			//
+			// Taking the name from the response is what makes a status page able
+			// to relabel itself: a tenant who can set pm.status_listen for their
+			// own pool can point it at a socket they control, and a response
+			// claiming to be another pool would have been learned under that
+			// pool's name and then rendered into the drop-in as `[victim]`. The
+			// library refuses a mismatched name before it gets here, and this is
+			// the same rule at the layer that would have to act on it.
+			pool = only
 		}
 	}
 

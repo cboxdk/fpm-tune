@@ -1256,6 +1256,11 @@ func DropInPath(dir string) string {
 // ErrUnsafePoolName reports a pool name that cannot be used as a filename.
 var ErrUnsafePoolName = errors.New("pool name is not usable as a filename")
 
+// UnsafePoolName reports whether a name cannot be written safely, so a planner
+// can mark that pool unwritable rather than have the write refuse for the whole
+// host.
+func UnsafePoolName(pool string) bool { return safePoolName(pool) != nil }
+
 // safePoolName rejects a name that would escape the drop-in directory.
 //
 // Pool names come from section headers in root-owned configuration, so this is

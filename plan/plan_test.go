@@ -879,3 +879,51 @@ func TestOneOldRecordIsNotReservedTwice(t *testing.T) {
 			"the other has just been given it too", reserved/mb)
 	}
 }
+
+// TestOneTenantsPoolNameDoesNotStopTheHostBeingTuned.
+//
+// A section name reaches a filename and a section header, so the writer refuses
+// one with a path separator or a control character in it — rightly. But that
+// refusal aborted the whole change set, so a tenant who can edit their own pool
+// file could name it `evil/name` and stop every other site on the host from
+// being tuned, indefinitely and with no obvious cause.
+//
+// One pool's problem should cost one pool. It is reserved conservatively and
+// left alone, which is the same answer this code already gives to a pool it
+// cannot read.
+func TestOneTenantsPoolNameDoesNotStopTheHostBeingTuned(t *testing.T) {
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 4 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		State:  state.New(),
+		Views: []observe.PoolView{
+			{
+				Name: "evil/name", ProcessManager: "dynamic",
+				CurrentMaxChildren: 4, MaxChildrenKnown: true, ObservedPeak: 2,
+				Workers: []state.WorkerSample{{RSSBytes: 40 * mb, Requests: 400}},
+			},
+			{
+				Name: "neighbour", ProcessManager: "dynamic",
+				CurrentMaxChildren: 4, MaxChildrenKnown: true, ObservedPeak: 20,
+				Workers: []state.WorkerSample{{RSSBytes: 40 * mb, Requests: 400}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("one badly named pool stopped the whole plan: %v", err)
+	}
+
+	byName := map[string]allocate.PoolPlan{}
+	for _, pp := range res.Plan.Pools {
+		byName[pp.Name] = pp
+	}
+
+	if !byName["evil/name"].Unknown {
+		t.Error("a pool whose name cannot be written was not marked unwritable, so the " +
+			"writer will refuse the whole change set when it reaches it")
+	}
+	if n := byName["neighbour"]; n.MaxChildren <= n.Current {
+		t.Errorf("the neighbour was not grown (%d from %d) even though it is queueing and "+
+			"the budget allows it; one tenant's pool name has stopped the host being tuned",
+			n.MaxChildren, n.Current)
+	}
+}
