@@ -517,7 +517,13 @@ func TestAnUnconfirmedReloadDoesNotAdvanceTheLastApplyTimestamp(t *testing.T) {
 
 	result := planFor(t, loop)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Long enough to reach the write and the signal on a loaded CI runner, and far
+	// short of the 30s settle above, so the settle window is still cut before the
+	// reload is confirmed — which is the state under test. 300ms was too tight: the
+	// discovery and validation ahead of the write can exceed it on a busy runner, so
+	// the round never reached the write and the test failed on nothing to do with
+	// what it checks.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	loop.applyPlan(ctx, result, time.Now())
 

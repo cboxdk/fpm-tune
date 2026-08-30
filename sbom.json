@@ -5,11 +5,11 @@
   "version": 1,
   "metadata": {
     "component": {
-      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.5?type=module",
+      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "type": "application",
       "name": "github.com/cboxdk/fpm-tune",
-      "version": "v0.1.0-beta.5",
-      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.5?type=module",
+      "version": "devel",
+      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/fpm-tune",
@@ -570,7 +570,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.5?type=module",
+      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/cboxdk/phpfpm@v1.1.0?type=module",
