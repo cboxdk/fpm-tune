@@ -115,6 +115,12 @@ jobs:
           go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
           make sbom-check
 
+      # And that everything in it is under a permissive license. Reads the
+      # SBOM's detected licenses, so a copyleft dependency added transitively
+      # fails here rather than in a lawyer's inbox after release.
+      - name: Check dependency licenses
+        run: make license-check
+
   # The unit tests stand php-fpm in with `true` and `false`, which tests the
   # decision logic and nothing about the part that can take a host down. This
   # job runs the real binary: a real master, a real `php-fpm -t`, a real

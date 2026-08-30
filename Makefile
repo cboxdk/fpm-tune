@@ -1,4 +1,4 @@
-.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check sbom sbom-check mutations
+.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check sbom sbom-check license-check mutations
 
 help:
 	@grep -E '^[a-z0-9-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -83,9 +83,12 @@ sbom-check: ## Fail if the committed SBOM is stale (CI)
 	@diff -u sbom.json /tmp/sbom-fresh.json || { echo "sbom.json is stale; run 'make sbom' and commit it"; exit 1; }
 	@echo "SBOM matches go.mod"
 
+license-check: ## Fail if any dependency is under a non-permissive, undocumented license
+	@sh testing/license-check.sh sbom.json
+
 # Deliberately NOT called "everything CI runs", which it said until this comment
 # was written and was not true: CI also drives e2e.sh and chaos.sh against a real
 # php-fpm, and those are where the faults that matter have been found. A gate
 # whose name overstates it sends people to CI to be surprised.
-check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs EXCEPT the real-php-fpm suites (see integration)
+check: fmt-check tidy-check vet lint test vulncheck license-check ## Everything CI runs EXCEPT the real-php-fpm suites (see integration)
 	@echo "✅ All checks passed"
