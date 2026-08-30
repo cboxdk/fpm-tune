@@ -5,11 +5,11 @@
   "version": 1,
   "metadata": {
     "component": {
-      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830101643-b5e85e44fd7d?type=module",
+      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830130621-b73c425eb589?type=module",
       "type": "application",
       "name": "github.com/cboxdk/fpm-tune",
-      "version": "v0.0.0-20260830101643-b5e85e44fd7d",
-      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830101643-b5e85e44fd7d?goarch=arm64&goos=darwin&type=module",
+      "version": "v0.0.0-20260830130621-b73c425eb589",
+      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830130621-b73c425eb589?goarch=arm64&goos=darwin&type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/fpm-tune",
@@ -87,18 +87,18 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/cboxdk/phpfpm@v0.11.0?type=module",
+      "bom-ref": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
       "type": "library",
       "name": "github.com/cboxdk/phpfpm",
-      "version": "v0.11.0",
+      "version": "v1.0.0",
       "scope": "required",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ab6230d0a19fc474f1139c0202cd71a1b63d3506184534c16409a68aed66c1f7"
+          "content": "5a2acfb6f553ce0ed11d14411eae3765a913f78e5744378045e1fc344d997c6a"
         }
       ],
-      "purl": "pkg:golang/github.com/cboxdk/phpfpm@v0.11.0?goarch=arm64&goos=darwin&type=module",
+      "purl": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?goarch=arm64&goos=darwin&type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/phpfpm",
@@ -570,10 +570,10 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830101643-b5e85e44fd7d?type=module",
+      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.0.0-20260830130621-b73c425eb589?type=module",
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
-        "pkg:golang/github.com/cboxdk/phpfpm@v0.11.0?type=module",
+        "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
         "pkg:golang/github.com/prometheus/client_golang@v1.24.1?type=module"
       ]
     },
@@ -584,7 +584,7 @@
       "ref": "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module"
     },
     {
-      "ref": "pkg:golang/github.com/cboxdk/phpfpm@v0.11.0?type=module",
+      "ref": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
