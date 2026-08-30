@@ -573,3 +573,43 @@ func gaugeValue(t *testing.T, l *Loop, name string) float64 {
 
 	return 0
 }
+
+// TestTheLoopDeduplicatesWhateverItsSourceReturns.
+//
+// The same lesson as the master filter, in the same place: a rule that lives
+// inside the production source is skipped by an injected one, and a test then
+// proves something the daemon does not do.
+//
+// A host can carry two masters for the same configuration — an old one holding
+// a wedged worker, or a daemonized reload mid-flight — and each reports the same
+// pools. Counted twice, the budget is divided among twice as many entries.
+func TestTheLoopDeduplicatesWhateverItsSourceReturns(t *testing.T) {
+	tr := poolTree(t, "8.5")
+
+	loop, err := New(Config{
+		StatePath:      filepath.Join(t.TempDir(), "state.json"),
+		MetricsAddr:    "",
+		MemoryOverride: 4096 * mb,
+		DropInDir:      tr.poolDir,
+		Discover: func(context.Context) ([]phpfpm.Target, error) {
+			return []phpfpm.Target{
+				{Name: "shop", ConfigPath: tr.configPath, PID: 100},
+				{Name: "shop", ConfigPath: tr.configPath, PID: 200},
+			}, nil
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { loop.Close() })
+
+	targets, err := loop.discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 {
+		t.Errorf("one pool served by two processes came back as %d targets; each takes a "+
+			"share of the budget, so the pool is planned at a fraction of what it should "+
+			"have", len(targets))
+	}
+}

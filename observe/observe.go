@@ -130,7 +130,7 @@ func Discover(ctx context.Context, log *slog.Logger) ([]phpfpm.Target, error) {
 	//
 	// Two masters with DIFFERENT configurations are a different matter entirely,
 	// and are refused elsewhere rather than merged here.
-	targets := dedupeTargets(targetsFrom(found))
+	targets := Dedupe(targetsFrom(found))
 
 	// Sorted so that repeated runs report pools in the same order; process-table
 	// order is not stable.
@@ -148,7 +148,7 @@ func targetsFrom(found []phpfpm.Discovered) []phpfpm.Target {
 	return out
 }
 
-// dedupeTargets keeps one target per (master, pool).
+// Dedupe keeps one target per (master, pool).
 //
 // A pool is not two pools because two processes are serving it. A host can
 // carry more than one master for the same configuration — an old one still
@@ -163,7 +163,7 @@ func targetsFrom(found []phpfpm.Discovered) []phpfpm.Target {
 //
 // Two masters with DIFFERENT configurations are a different matter entirely,
 // and are refused elsewhere rather than merged here.
-func dedupeTargets(targets []phpfpm.Target) []phpfpm.Target {
+func Dedupe(targets []phpfpm.Target) []phpfpm.Target {
 	seen := make(map[string]bool, len(targets))
 	out := make([]phpfpm.Target, 0, len(targets))
 	for _, t := range targets {

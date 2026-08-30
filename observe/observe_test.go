@@ -186,7 +186,7 @@ func TestAPoolIsNotTwoPoolsBecauseTwoProcessesServeIt(t *testing.T) {
 		{Name: "shop", ConfigPath: "/etc/./php-fpm.conf", PID: 300},
 	}
 
-	got := dedupeTargets(same)
+	got := Dedupe(same)
 	if len(got) != 2 {
 		names := make([]string, 0, len(got))
 		for _, g := range got {
@@ -199,7 +199,7 @@ func TestAPoolIsNotTwoPoolsBecauseTwoProcessesServeIt(t *testing.T) {
 
 	// Two masters with DIFFERENT configurations are different pools, and merging
 	// them would be the opposite mistake.
-	different := dedupeTargets([]phpfpm.Target{
+	different := Dedupe([]phpfpm.Target{
 		{Name: "www", ConfigPath: "/etc/php/8.2/php-fpm.conf"},
 		{Name: "www", ConfigPath: "/etc/php/8.3/php-fpm.conf"},
 	})

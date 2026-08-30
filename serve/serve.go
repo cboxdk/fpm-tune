@@ -628,14 +628,14 @@ func (l *Loop) discover(ctx context.Context) ([]phpfpm.Target, error) {
 		return nil, err
 	}
 
-	// Scoped AFTER the source, whichever source it was.
+	// Deduplicated and scoped AFTER the source, whichever source it was.
 	//
 	// The filter first sat inside the production branch, so an injected one
 	// skipped it — and a test then proved something the daemon does not do. That
 	// is the same shape as the fault this filter exists for: a rule that lives
 	// on one path and not the other. A seam has to supply the world, not decide
 	// what is done with it.
-	return ForMaster(targets, l.cfg.DropInDir, l.log), nil
+	return ForMaster(observe.Dedupe(targets), l.cfg.DropInDir, l.log), nil
 }
 
 func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.PoolView {
