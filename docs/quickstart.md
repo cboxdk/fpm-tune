@@ -9,7 +9,19 @@ description: From nothing to a tuned host in one read, without risking anything 
 The safe path is the same one this tool wants you to take: look first, advise
 for a while, then let it act.
 
-## 1. See what it thinks
+## 1. Get it
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | sh
+```
+
+One static binary, no runtime dependency beyond php-fpm. The installer verifies
+the release checksum and refuses to install on a mismatch; it never uses `sudo`.
+On macOS, `brew install cboxdk/tap/fpm-tune` does the same. For verifying the
+release signature, other platforms, or building from source, see
+[Installation](getting-started/installation.md).
+
+## 2. See what it thinks
 
 ```bash
 fpm-tune plan
@@ -33,7 +45,7 @@ On a first run every pool is `estimated`, not measured — the numbers are a
 profile's guess until the tool has watched real traffic. That is expected, and
 the plan says so.
 
-## 2. Let it advise, permanently
+## 3. Let it advise, permanently
 
 ```bash
 fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf
@@ -49,7 +61,7 @@ Leave it running for a day or two through a real traffic pattern. The estimates
 become measurements, and the recommendation settles onto numbers backed by what
 the workers actually did.
 
-## 3. Let it act
+## 4. Let it act
 
 When you trust the numbers:
 
