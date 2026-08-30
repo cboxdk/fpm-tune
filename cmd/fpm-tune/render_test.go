@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -263,5 +265,37 @@ func TestAFailedSaveAfterASuccessfulApplyIsAnError(t *testing.T) {
 
 	if err := reportUnsavedApply(nil, "/x"); err != nil {
 		t.Errorf("a successful save was reported as an error: %v", err)
+	}
+}
+
+// TestTheDaemonSaysWhatItIsDoing.
+//
+// A one-shot command hands back a table, and a warning there is an
+// interruption. A daemon prints nothing and runs for weeks: its log IS its
+// output, and one that mentions only problems cannot answer "what has this been
+// doing", which is the first question anyone asks of a process that has been
+// running for a month.
+//
+// Both used to log at Warn, and the symptom was fixed in the wrong place — the
+// line recording a pool being resized was RAISED to Warn so it would appear at
+// all, which makes a routine success look like a problem to anything reading
+// levels. The level says what kind of thing a message is; the default says how
+// much you want to hear.
+func TestTheDaemonSaysWhatItIsDoing(t *testing.T) {
+	if !newDaemonLogger(false).Enabled(context.Background(), slog.LevelInfo) {
+		t.Error("a daemon at its default level says nothing about what it does; the only " +
+			"record of a pool being resized is invisible")
+	}
+	if newLogger(false).Enabled(context.Background(), slog.LevelInfo) {
+		t.Error("a one-shot command narrates its way to a result it is about to print")
+	}
+
+	// And -verbose reaches Debug for both, which is the flag's whole job.
+	for name, l := range map[string]*slog.Logger{
+		"daemon": newDaemonLogger(true), "one-shot": newLogger(true),
+	} {
+		if !l.Enabled(context.Background(), slog.LevelDebug) {
+			t.Errorf("-verbose does not reach Debug for the %s logger", name)
+		}
 	}
 }

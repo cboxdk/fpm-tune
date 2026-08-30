@@ -587,8 +587,29 @@ func renderApplied(res apply.Result, dryRun bool, err error) {
 	}
 }
 
+// newLogger is for the one-shot commands, which print their result to stdout
+// and should not narrate the way there.
 func newLogger(verbose bool) *slog.Logger {
-	level := slog.LevelWarn
+	return loggerAt(slog.LevelWarn, verbose)
+}
+
+// newDaemonLogger is for `serve`, which prints nothing and runs for weeks.
+//
+// Info, not Warn. A one-shot command hands back a table and a warning is an
+// interruption; a daemon's log IS its output, and one that mentions only
+// problems cannot answer "what has this been doing" — which is the first
+// question anyone asks of a process that has been running for a month.
+//
+// This used to be Warn for both, and the symptom was fixed in the wrong place:
+// the line recording a pool being resized was raised to Warn so it would show
+// at all, which makes a routine success look like a problem in anything reading
+// levels. The level of a message should say what KIND of thing it is, and the
+// default should say how much you want to hear.
+func newDaemonLogger(verbose bool) *slog.Logger {
+	return loggerAt(slog.LevelInfo, verbose)
+}
+
+func loggerAt(level slog.Level, verbose bool) *slog.Logger {
 	if verbose {
 		level = slog.LevelDebug
 	}
@@ -698,7 +719,7 @@ func runServe(args []string) error {
 			"Drop -no-learn to act, or drop -apply to watch")
 	}
 
-	log := newLogger(*c.verbose)
+	log := newDaemonLogger(*c.verbose)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

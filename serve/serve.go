@@ -349,7 +349,7 @@ func (l *Loop) round(ctx context.Context) {
 			// default level, and the pair became a warning that never cleared —
 			// which reads at 3am as "still exhausted" for a problem solved hours
 			// ago, and is worse than logging neither.
-			l.log.Warn("No longer at capacity: there is budget to give a pool that needs it")
+			l.log.Info("No longer at capacity: there is budget to give a pool that needs it")
 		}
 	}
 
