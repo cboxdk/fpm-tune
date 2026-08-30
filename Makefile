@@ -82,7 +82,7 @@ mutations: ## Remove each safety guard in turn; the suite must fail every time
 #   - the MAIN module's own pseudo-version (v0.0.0-<time>-<hash>), which changes on
 #     every commit, so the committed SBOM referenced the PREVIOUS commit and the
 #     check failed on the next push. Normalised to "devel".
-SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
+SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("v[0-9][^\"?]*[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
 SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | 	jq '$(SBOM_CLEAN)'
 
 sbom: ## Regenerate the CycloneDX SBOM (needs cyclonedx-gomod and jq)

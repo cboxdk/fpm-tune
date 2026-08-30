@@ -5,11 +5,11 @@
   "version": 1,
   "metadata": {
     "component": {
-      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.1.0.devel?type=module",
+      "bom-ref": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "type": "application",
       "name": "github.com/cboxdk/fpm-tune",
-      "version": "v0.1.0-beta.1.0.devel",
-      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.1.0.devel?type=module",
+      "version": "devel",
+      "purl": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/fpm-tune",
@@ -174,10 +174,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
+      "bom-ref": "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
       "type": "library",
       "name": "github.com/lufia/plan9stats",
-      "version": "v0.0.0-devel",
+      "version": "devel",
       "scope": "required",
       "hashes": [
         {
@@ -185,7 +185,7 @@
           "content": "e84fb86b418ee736449d9f35a48af4c8bbed51693689ff7cdaa037177403e87e"
         }
       ],
-      "purl": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
+      "purl": "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/lufia/plan9stats",
@@ -203,10 +203,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
+      "bom-ref": "pkg:golang/github.com/munnerz/goautoneg@devel?type=module",
       "type": "library",
       "name": "github.com/munnerz/goautoneg",
-      "version": "v0.0.0-devel",
+      "version": "devel",
       "scope": "required",
       "hashes": [
         {
@@ -214,7 +214,7 @@
           "content": "0b7c3d3ea208d35fceab57359d4026f3c30e1dc402f65e6622548c02964cac70"
         }
       ],
-      "purl": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
+      "purl": "pkg:golang/github.com/munnerz/goautoneg@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/munnerz/goautoneg",
@@ -232,10 +232,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+      "bom-ref": "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
       "type": "library",
       "name": "github.com/power-devops/perfstat",
-      "version": "v0.0.0-devel",
+      "version": "devel",
       "scope": "required",
       "hashes": [
         {
@@ -243,7 +243,7 @@
           "content": "9dcabf98fc1017826380396b5449f70b5d55a061d937b9bcaa287080c12dcd8c"
         }
       ],
-      "purl": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+      "purl": "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/power-devops/perfstat",
@@ -570,7 +570,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@v0.1.0-beta.1.0.devel?type=module",
+      "ref": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
@@ -588,8 +588,8 @@
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
-        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
-        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
+        "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
         "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
         "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?type=module",
         "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?type=module",
@@ -608,13 +608,13 @@
       ]
     },
     {
-      "ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module"
+      "ref": "pkg:golang/github.com/lufia/plan9stats@devel?type=module"
     },
     {
-      "ref": "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module"
+      "ref": "pkg:golang/github.com/munnerz/goautoneg@devel?type=module"
     },
     {
-      "ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+      "ref": "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
       "dependsOn": [
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
       ]
@@ -624,7 +624,7 @@
       "dependsOn": [
         "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module",
         "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module",
-        "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/munnerz/goautoneg@devel?type=module",
         "pkg:golang/github.com/prometheus/client_model@v0.6.2?type=module",
         "pkg:golang/github.com/prometheus/common@v0.70.1?type=module",
         "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
@@ -643,7 +643,7 @@
       "dependsOn": [
         "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module",
         "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module",
-        "pkg:golang/github.com/munnerz/goautoneg@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/munnerz/goautoneg@devel?type=module",
         "pkg:golang/github.com/prometheus/client_golang@v1.24.1?type=module",
         "pkg:golang/github.com/prometheus/client_model@v0.6.2?type=module",
         "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
@@ -661,8 +661,8 @@
       "ref": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
       "dependsOn": [
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
-        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
-        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
+        "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
         "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?type=module",
         "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?type=module",
         "pkg:golang/github.com/tklauser/numcpus@v0.6.1?type=module",
