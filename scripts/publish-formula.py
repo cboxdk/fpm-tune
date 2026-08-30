@@ -88,6 +88,14 @@ def render(formula: str, version: str, digests: dict[str, str]) -> str:
     out = out.replace("#{version}", version)
     if "#{version}" in out:
         sys.exit("a version interpolation did not resolve; refusing to publish")
+
+    # The tag is the source of truth for the version, not the template's stanza:
+    # rewrite it so cutting a release never depends on remembering to bump a second
+    # file. The template still carries a version so it reads as a real formula and
+    # so #{version} above has a value when someone renders it by hand.
+    out = re.sub(r'^(\s*)version "[^"]+"', rf'\1version "{version}"', out, count=1, flags=re.M)
+    if f'version "{version}"' not in out:
+        sys.exit("the version stanza did not resolve; refusing to publish")
     return out
 
 
@@ -100,12 +108,6 @@ def main() -> int:
     version = args.tag.lstrip("v")
     source = Path(__file__).resolve().parent.parent / "packaging" / "fpm-tune.rb"
     formula = source.read_text(encoding="utf-8")
-
-    if f'version "{version}"' not in formula:
-        sys.exit(
-            f"packaging/fpm-tune.rb says a different version than {version}; "
-            "bump it before publishing so the tap cannot serve a stale formula"
-        )
 
     rendered = render(formula, version, checksums(args.tag))
 
