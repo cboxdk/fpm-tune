@@ -6,7 +6,7 @@ toolchain go1.26.6
 
 require (
 	github.com/cboxdk/fcgx v1.2.0
-	github.com/cboxdk/phpfpm v1.1.0
+	github.com/cboxdk/phpfpm v1.1.1
 	github.com/prometheus/client_golang v1.24.1
 )
 

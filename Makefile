@@ -79,10 +79,14 @@ mutations: ## Remove each safety guard in turn; the suite must fail every time
 #   - goos/goarch stamped into every purl, which differ between a developer's Mac
 #     and a Linux CI runner, so the SBOM committed from one never matched the
 #     other;
-#   - the MAIN module's own pseudo-version (v0.0.0-<time>-<hash>), which changes on
-#     every commit, so the committed SBOM referenced the PREVIOUS commit and the
-#     check failed on the next push. Normalised to "devel".
-SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("v[0-9][^\"?]*[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
+#   - the MAIN module's own version, forced to "devel" — both the pseudo-version
+#     (v0.0.0-<time>-<hash>) that changes on every commit AND the clean tag it
+#     resolves to when HEAD happens to sit on one. Normalising only the former meant
+#     an SBOM regenerated while on a release tag baked that tag in, and the next
+#     commit (past the tag, so "devel" on CI) failed the check. Forcing the main
+#     component to "devel" and rewriting its own purls makes it independent of where
+#     HEAD is; dependency versions (phpfpm, fcgx, …) are left exact.
+SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | (.metadata.component.version = "devel") | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("v[0-9][^\"?]*[0-9]{14}-[0-9a-f]{7,}"; "devel") | gsub("cboxdk/fpm-tune@[^\"?]*"; "cboxdk/fpm-tune@devel")) else . end)
 SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | 	jq '$(SBOM_CLEAN)'
 
 sbom: ## Regenerate the CycloneDX SBOM (needs cyclonedx-gomod and jq)

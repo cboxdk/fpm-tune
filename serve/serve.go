@@ -146,6 +146,11 @@ type Loop struct {
 	// largest CurrentBytes seen is accumulated here to stand in — and it survives
 	// a scrape where the reading briefly dips, which a raw current never would.
 	cgroupPeak int64
+
+	// lastRec is the pm.max_children last LOGGED for each pool, so the
+	// recommendation is reported the first time it is seen and whenever it moves —
+	// not every round, which trains an operator to stop reading the log.
+	lastRec map[string]int
 }
 
 // New prepares the loop, loading any existing baselines.
@@ -376,6 +381,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
+	l.logPlan(result)
 	l.writeRecommendation(result, now)
 
 	// Logged on the TRANSITION, not every round. A full host stays full, and
@@ -404,6 +410,40 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.save(now, false)
+}
+
+// logPlan reports each pool's recommendation the first time it is seen and whenever
+// the recommended pm.max_children changes — the "now N, would set M" a watching
+// operator actually wants from the log, without the per-round repetition (and the
+// per-scrape peak wobble) that trains people to stop reading it.
+//
+// It runs in every mode, including --apply: the recommendation is what the plan
+// concluded, which is worth seeing even on the rounds hysteresis holds the reload
+// back, and it reads the same whether or not the tool is the one acting on it.
+func (l *Loop) logPlan(result plan.Result) {
+	if l.lastRec == nil {
+		l.lastRec = make(map[string]int, len(result.Plan.Pools))
+	}
+
+	for _, pp := range result.Plan.Pools {
+		// A pool whose current configuration could not be read has no meaningful
+		// "now", and its plan is not something to act on — skip it rather than log a
+		// recommendation against a number that is not there.
+		if pp.Unknown {
+			continue
+		}
+		if prev, seen := l.lastRec[pp.Name]; seen && prev == pp.MaxChildren {
+			continue
+		}
+		l.lastRec[pp.Name] = pp.MaxChildren
+
+		l.log.Info("Pool recommendation",
+			"pool", pp.Name,
+			"now", pp.Current,
+			"recommend", pp.MaxChildren,
+			"why", pp.Reason,
+		)
+	}
 }
 
 func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time) {

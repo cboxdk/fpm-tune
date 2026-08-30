@@ -122,30 +122,27 @@ darwin, where the sizing logic runs but the host-reading does not).
 
 ## As a systemd service
 
-```ini
-[Unit]
-Description=fpm-tune
-# Wants, not Requires: a supervisor that dies with the thing it supervises
-# cannot repair it.
-Wants=php-fpm.service
-After=php-fpm.service
+You do not have to write a unit — one command installs and starts it:
 
-[Service]
-ExecStart=/usr/local/bin/fpm-tune serve --apply --metrics 127.0.0.1:9110
-Restart=on-failure
-RestartSec=5
-
-# systemd owns /var/lib/fpm-tune with sensible permissions, rather than the
-# tool creating it under whatever umask it inherited.
-StateDirectory=fpm-tune
-StateDirectoryMode=0700
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo fpm-tune install-service          # advisory: watch and recommend, change nothing
+sudo fpm-tune install-service --apply  # act on the plan
 ```
 
-Bind it with `Wants=`, not `Requires=` — a supervisor that dies with the thing it
-supervises cannot repair it.
+It writes `/etc/fpm-tune/config` and a unit that reads it, then enables and starts
+the service. `--print` shows both without touching anything. The **mode lives in
+the config, not the unit**, so switching later is a command, not a unit edit:
+
+```bash
+sudo fpm-tune mode apply       # let it act
+sudo fpm-tune mode advisory    # back to watch-only
+```
+
+See [Running as a daemon](../operating/running-as-a-daemon.md) for the recommended
+adoption path (advisory first, then `apply`). The unit it writes binds php-fpm with
+`Wants=`, not `Requires=` — a supervisor that dies with the thing it supervises
+cannot repair it — and lets systemd own `/var/lib/fpm-tune` with sensible
+permissions. To see or adapt it, `fpm-tune install-service --print`.
 
 ## Checking it runs
 

@@ -22,6 +22,32 @@ With `--apply`, the same loop also writes the plan when a change clears the
 [hysteresis thresholds](../how-it-decides/hysteresis.md), reloads the master, and
 repairs the host if its own file is ever what stops php-fpm from starting.
 
+## In the background, under systemd
+
+You do not have to write a unit. One command installs and starts it:
+
+```bash
+sudo fpm-tune install-service          # advisory (watch and recommend)
+sudo fpm-tune install-service --apply  # act on the plan
+```
+
+It writes `/etc/fpm-tune/config` and a unit that reads it, then enables and starts
+the service. `--print` shows both without installing anything.
+
+The **mode lives in the config, not the unit**, so switching between watching and
+acting is a command — no unit edit, no `daemon-reload`:
+
+```bash
+sudo fpm-tune mode apply       # let it act on what it finds
+sudo fpm-tune mode advisory    # back to watch-only
+fpm-tune mode                  # print the current mode
+```
+
+Each rewrites the one line in `/etc/fpm-tune/config` and restarts the service. The
+sensible path is `install-service` (advisory), leave it a day or two to build a
+baseline, read the recommendation, then `mode apply`. Follow it with
+`journalctl -u fpm-tune -f`.
+
 ## What a round does
 
 Each interval, in order:
@@ -54,3 +80,17 @@ resized a pool, when a host is no longer at capacity, when a recommendation
 changed. A daemon that logged only problems could not answer "what has this been
 doing" — the first question anyone asks of a process that has been up for a
 month. Pass `--verbose` for the per-scrape detail.
+
+The line worth watching is the recommendation itself:
+
+```
+level=INFO msg="Pool recommendation" pool=www now=20 recommend=24 why="peak 18 workers busy; raised to 24, measured 52.0MiB/worker"
+```
+
+It is logged the first time a pool is seen and **only when the recommended
+`pm.max_children` changes** — not every round, and not on the per-scrape wobble of
+the peak. So in watch mode the log reads as a running account of what it would set
+and why, rather than a wall of identical lines. In `--apply` mode you see this when
+the plan concludes it, and the separate "resized" line when a change actually
+clears the [hysteresis thresholds](../how-it-decides/hysteresis.md) and reaches the
+master.

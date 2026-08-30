@@ -62,6 +62,10 @@ func run(args []string) error {
 		return runEnableStatus(args[1:])
 	case "serve":
 		return runServe(args[1:])
+	case "install-service":
+		return runInstallService(args[1:])
+	case "mode":
+		return runMode(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 
@@ -89,6 +93,9 @@ func usage() {
                     master does not come back.
   fpm-tune serve    keep measuring, with metrics on /metrics. Add -apply to act
                     on what it finds.
+  fpm-tune install-service
+                    run it in the background under systemd (advisory by default).
+  fpm-tune mode     switch the running service between advisory and apply.
   fpm-tune version
 
 `, version)
@@ -934,6 +941,7 @@ func runServe(args []string) error {
 		minInterval = fs.Duration("min-interval", 0, "shortest time between reloads; 0 means the 5m default, so pass a small value like 1s to force one sooner")
 		minChange   = fs.Float64("min-change", 0, "smallest relative change worth a reload; 0 means the 0.15 default, so pass a tiny value like 0.001 to apply any change")
 		saveEvery   = fs.Duration("save-every", 5*time.Minute, "how often learned baselines reach disk")
+		configPath  = fs.String("config", "", "load settings from this file (as `fpm-tune install-service` writes); explicit flags override it")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "fpm-tune serve — keep measuring PHP-FPM, and act on it "+
@@ -948,6 +956,14 @@ func runServe(args []string) error {
 	}
 	if err := noPositionalArgs(fs); err != nil {
 		return err
+	}
+
+	// Folded in after parsing, so an explicit flag on the command line wins over
+	// the file. serve is what the installed unit runs, with only --config set.
+	if *configPath != "" {
+		if err := applyConfig(fs, *configPath); err != nil {
+			return err
+		}
 	}
 
 	// Contradictory, and silently resolving it either way is worse than saying
