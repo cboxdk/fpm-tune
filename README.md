@@ -250,6 +250,26 @@ make integration   # both suites against a real php-fpm on this machine
 make mutations     # every guard removed in turn; the suite must fail each time
 ```
 
+`testing/loadgen` is the fourth thing, and it is not wired into any of them. It
+puts real, sustained concurrency on a pool over persistent FastCGI connections,
+which is what a soak on a VM needs and what a shell loop cannot provide — six
+"concurrent" `cgi-fcgi` processes serialise on process creation and produce a
+measured concurrency of two, so the saturation path never runs and the tool
+looks like it is cutting a busy pool when it is reading an idle one.
+
+It stays out of the suites on purpose: an assertion that depends on load
+arriving in time is an assertion that fails on a loaded CI runner for no reason.
+Reach for it by hand when a change touches saturation, growth, or the difference
+between a quiet pool and a cheap one.
+
+```bash
+go run ./testing/loadgen --socket 127.0.0.1:9000 --concurrency 12 --duration 5m \
+  --script /var/www/work.php --query 'mb=8&hold=0.2'
+```
+
+The script it requests has to allocate and hold, or the pool is busy without its
+workers costing anything and the measurement under test never happens.
+
 ## Related
 
 - [phpfpm](https://github.com/cboxdk/phpfpm) — the shared library underneath
