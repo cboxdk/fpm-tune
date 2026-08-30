@@ -103,7 +103,10 @@ budget by that per-worker cost, exactly as it already does for a worker's own
 memory.
 
 That per-worker figure is deliberately **amortised**: it is the high-water of a
-scrape's total child memory divided by the workers in that scrape. A pool where
+scrape's total child memory divided by the pool's worker count — specifically the
+larger of the workers alive in that scrape and the pool's concurrency peak, so a
+scrape that happens to catch a quiet ondemand pool with only its two busy workers
+alive does not record a whole worker's child as the per-worker cost. A pool where
 two of eight workers were each running a 600&nbsp;MiB ffmpeg records
 150&nbsp;MiB per worker, not 600 — so multiplying it back by the worker count
 reserves the 1.2&nbsp;GiB that was really there, not the 4.8&nbsp;GiB that never

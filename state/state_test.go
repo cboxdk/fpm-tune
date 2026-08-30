@@ -1554,3 +1554,56 @@ func TestSaveKeepsThePermissionsTheFileAlreadyHad(t *testing.T) {
 			info.Mode().Perm())
 	}
 }
+
+// TestChildPerWorkerAmortisesOverThePeak is the fix for the review's P1: the
+// per-worker child cost is measured as a scrape's total child memory over the
+// pool's CONCURRENCY PEAK, not the few workers that happened to be alive when a
+// scrape landed. Without it, a scrape catching a low-worker ondemand pool with
+// both its workers transcoding would pin a whole worker's child as the PER-worker
+// cost and, sized back up, reserve many times the child memory that ever existed.
+func TestChildPerWorkerAmortisesOverThePeak(t *testing.T) {
+	st := New()
+	base := time.Now()
+	st.Learn(Observation{
+		Pool: "app", At: base, ActiveNow: 4, Accepted: base.Unix() * 100,
+		Workers: []WorkerSample{{RSSBytes: 90 * mb, Requests: 500}, {RSSBytes: 90 * mb, Requests: 500}},
+	}, Options{})
+	// The pool has run 40 workers at its busiest.
+	st.Pools["app"].PeakWorkers = 40
+
+	// A scrape catches only two live workers, both mid-transcode (600MiB child).
+	st.Learn(Observation{
+		Pool: "app", At: base.Add(2 * time.Minute), ActiveNow: 2, Accepted: base.Unix()*100 + 1000,
+		Workers: []WorkerSample{
+			{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500},
+			{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500},
+		},
+	}, Options{})
+
+	// 1200MiB of children over the 40-worker peak = 30MiB per worker.
+	if got := st.Pools["app"].ChildPerWorkerHighWaterBytes; got != 30*mb {
+		t.Errorf("child per worker = %d bytes, want 30MiB (1200MiB over the 40-worker peak); a "+
+			"low-worker scrape pinned a whole worker's child as the per-worker cost", got)
+	}
+}
+
+// TestChildPerWorkerKeepsAGenuineSingleWorkerPool: the amortisation must not hide
+// a real one-worker pool's child — there the peak IS one, so the full child is
+// its per-worker cost.
+func TestChildPerWorkerKeepsAGenuineSingleWorkerPool(t *testing.T) {
+	st := New()
+	base := time.Now()
+	st.Learn(Observation{
+		Pool: "solo", At: base, ActiveNow: 1, Accepted: base.Unix() * 100,
+		Workers: []WorkerSample{{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500}},
+	}, Options{})
+	st.Pools["solo"].PeakWorkers = 1
+	st.Learn(Observation{
+		Pool: "solo", At: base.Add(2 * time.Minute), ActiveNow: 1, Accepted: base.Unix()*100 + 500,
+		Workers: []WorkerSample{{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500}},
+	}, Options{})
+
+	if got := st.Pools["solo"].ChildPerWorkerHighWaterBytes; got != 600*mb {
+		t.Errorf("child per worker = %d bytes, want the full 600MiB for a genuine one-worker pool", got)
+	}
+}

@@ -288,7 +288,11 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 
 	{
 		view.ProcessManager = pool.ProcessManager
-		view.ObservedPeak = int(pool.MaxActiveProcesses)
+		// Through the same clamp as the configured ceiling: ObservedPeak is a
+		// scraped number that becomes a pool's Floor/Ceiling for an Unknown pool,
+		// so a garbage value must not slip past the bound the configured ceiling
+		// already respects.
+		view.ObservedPeak = boundedCeiling(int(pool.MaxActiveProcesses))
 		view.ActiveNow = int(pool.ActiveProcesses)
 		view.Accepted = pool.AcceptedConnections
 		view.QueueDepth = pool.ListenQueue

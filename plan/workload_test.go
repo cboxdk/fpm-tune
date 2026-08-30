@@ -207,3 +207,68 @@ func mustBuild(t *testing.T, in Input) Result {
 
 	return res
 }
+
+// TestGrowthWithChildrenStillFitsBudget covers the case the review found the
+// safety test was missing: a subprocess-heavy pool that WANTS TO GROW (hit its
+// ceiling, requests queuing). The folded child cost must ride the growth — the
+// committed memory including children must still fit the budget, at every budget
+// size — not just the floor-scaling path a fresh, idle plan exercises.
+func TestGrowthWithChildrenStillFitsBudget(t *testing.T) {
+	// A subprocess-heavy pool with a measured child, under load and queuing.
+	st := state.New()
+	base := time.Now()
+	for i := 0; i < 8; i++ {
+		workers := make([]state.WorkerSample, 8)
+		for w := range workers {
+			workers[w] = state.WorkerSample{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500}
+		}
+		st.Learn(state.Observation{
+			Pool: "transcode", At: base.Add(time.Duration(i) * 2 * time.Minute), ActiveNow: 8,
+			Accepted: base.Unix()*100 + int64(i*1000), Workers: workers,
+		}, state.Options{})
+	}
+
+	views := []observe.PoolView{
+		{Name: "web", ProcessManager: "dynamic", CurrentMaxChildren: 20, MaxChildrenKnown: true,
+			ObservedPeak: 20, QueueDepth: 50, MaxChildrenReached: 5},
+		{Name: "transcode", Workload: "subprocess-heavy", ProcessManager: "dynamic",
+			CurrentMaxChildren: 20, MaxChildrenKnown: true, ObservedPeak: 20, QueueDepth: 50, MaxChildrenReached: 5},
+	}
+
+	sawChild := false
+	for _, total := range []int64{2 * gb, 4 * gb, 8 * gb, 16 * gb, 32 * gb} {
+		res := mustBuild(t, Input{
+			Limits:   budget.Limits{MemoryBytes: total, CPUs: 16, Source: budget.SourceMemInfo},
+			Workload: WorkloadWeb, State: st, Views: views,
+		})
+
+		// The invariant: committed worker+child memory never exceeds the budget.
+		allocatable := total - res.Reserve
+		if res.Plan.AllocatedBytes > allocatable {
+			t.Errorf("at %s: committed %s, over the %s allocatable",
+				budget.HumanBytes(total), budget.HumanBytes(res.Plan.AllocatedBytes), budget.HumanBytes(allocatable))
+		}
+		// Recompute independently — the plan's own accounting must agree.
+		var recomputed int64
+		for _, pp := range res.Plan.Pools {
+			recomputed += int64(pp.MaxChildren) * pp.WorkerBytes
+			if pp.Name == "transcode" {
+				if pp.ChildBytes <= 0 {
+					t.Errorf("at %s: the subprocess-heavy pool committed no child memory", budget.HumanBytes(total))
+				} else {
+					sawChild = true
+				}
+				if pp.WorkerBytes <= pp.ChildBytes {
+					t.Errorf("at %s: transcode WorkerBytes %s not greater than its child %s — own cost lost",
+						budget.HumanBytes(total), budget.HumanBytes(pp.WorkerBytes), budget.HumanBytes(pp.ChildBytes))
+				}
+			}
+		}
+		if recomputed != res.Plan.AllocatedBytes {
+			t.Errorf("at %s: AllocatedBytes %d != recomputed %d", budget.HumanBytes(total), res.Plan.AllocatedBytes, recomputed)
+		}
+	}
+	if !sawChild {
+		t.Fatal("the subprocess-heavy pool never carried a child cost across any budget")
+	}
+}

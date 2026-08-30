@@ -74,8 +74,16 @@ type Pool struct {
 	//
 	// This is the number the whole allocation turns on, and getting it from
 	// measurement rather than from a table is the reason this package exists.
-	// See Measured.
+	// See Measured. It already INCLUDES ChildBytes when the pool spawns children:
+	// the allocator sizes on the full per-worker cost, own plus child.
 	WorkerBytes int64
+
+	// ChildBytes is how much of WorkerBytes is the memory a worker's spawned
+	// children cost, as opposed to the worker's own resident set. It is carried
+	// for REPORTING only — so output can show the own and child parts separately
+	// — and is never read by the sizing math, which uses the folded WorkerBytes.
+	// Zero for a pool that spawns nothing.
+	ChildBytes int64
 
 	// Measured distinguishes a WorkerBytes that was observed from one that came
 	// from a workload profile. It says where the NUMBER came from and nothing
@@ -206,7 +214,12 @@ type PoolPlan struct {
 
 	// WorkerBytes is what one worker of this pool was costed at, carried through
 	// so a caller applying part of a plan can work out what that part commits.
+	// Includes ChildBytes when the pool spawns children.
 	WorkerBytes int64
+
+	// ChildBytes is the part of WorkerBytes that is spawned-child memory, carried
+	// through for reporting so the own and child parts can be shown separately.
+	ChildBytes int64
 
 	// Want is what the pool would have been given with unlimited budget. When it
 	// exceeds MaxChildren, the pool is being held back.
@@ -382,6 +395,7 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			Current:     p.CurrentMaxChildren,
 			Bytes:       int64(granted[i]) * p.WorkerBytes,
 			WorkerBytes: p.WorkerBytes,
+			ChildBytes:  p.ChildBytes,
 			Want:        wants[i],
 			DemandUnmet: granted[i] < wants[i],
 			Measured:    p.Measured,
@@ -940,38 +954,48 @@ func reason(p Pool, granted, want, floor int, exhausted bool) string {
 		source = "measured"
 	}
 
+	// The per-worker cost, with the own and child parts kept separate: the
+	// "measured/estimated" label describes the OWN memory, and the folded child
+	// is shown as its own term so a pool is never reported as "measured 602MiB"
+	// when 512MiB of that is a workload guess.
+	cost := fmt.Sprintf("%s %s/worker", source, humanBytes(p.WorkerBytes-p.ChildBytes))
+	if p.ChildBytes > 0 {
+		cost = fmt.Sprintf("%s %s/worker + %s children", source,
+			humanBytes(p.WorkerBytes-p.ChildBytes), humanBytes(p.ChildBytes))
+	}
+
 	switch {
 	case p.Unknown:
 		return "current configuration could not be read; left alone"
 	case exhausted && granted < floor:
 		return fmt.Sprintf("host oversubscribed; cut to %d, below the %d reserved for it, "+
-			"%s %s/worker", granted, floor, source, humanBytes(p.WorkerBytes))
+			"%s", granted, floor, cost)
 	case exhausted:
-		return fmt.Sprintf("host oversubscribed; held at %d, %s %s/worker",
-			granted, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("host oversubscribed; held at %d, %s",
+			granted, cost)
 	case granted < want:
-		return fmt.Sprintf("wants %d, budget allows %d; %s %s/worker",
-			want, granted, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("wants %d, budget allows %d; %s",
+			want, granted, cost)
 	case p.HitMaxChildren:
-		return fmt.Sprintf("hit its ceiling; grown to %d, %s %s/worker",
-			granted, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("hit its ceiling; grown to %d, %s",
+			granted, cost)
 	case granted > p.CurrentMaxChildren:
-		return fmt.Sprintf("peak %d workers busy; raised to %d, %s %s/worker",
-			p.ObservedPeak, granted, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("peak %d workers busy; raised to %d, %s",
+			p.ObservedPeak, granted, cost)
 	case granted < p.CurrentMaxChildren:
-		return fmt.Sprintf("peak %d workers busy; %d is enough, %s %s/worker",
-			p.ObservedPeak, granted, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("peak %d workers busy; %d is enough, %s",
+			p.ObservedPeak, granted, cost)
 	case !p.Reducible && granted == p.CurrentMaxChildren && p.ObservedPeak*2 < granted:
 		// The commonest "why is this pool not moving" question, and nothing
 		// answered it. A pool with plenty of headroom that is not being cut is
 		// being held by the confidence gate, and from outside that is
 		// indistinguishable from the tool ignoring it.
 		return fmt.Sprintf("peak %d workers busy, but not yet watched under load; held at "+
-			"its configured %d, %s %s/worker",
-			p.ObservedPeak, granted, source, humanBytes(p.WorkerBytes))
+			"its configured %d, %s",
+			p.ObservedPeak, granted, cost)
 	default:
-		return fmt.Sprintf("unchanged at %d; %s %s/worker",
-			granted, source, humanBytes(p.WorkerBytes))
+		return fmt.Sprintf("unchanged at %d; %s",
+			granted, cost)
 	}
 }
 

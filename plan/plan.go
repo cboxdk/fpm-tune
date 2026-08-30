@@ -224,6 +224,7 @@ func Build(in Input) (Result, error) {
 		if child := childCostPerWorker(workload, measuredChildPerWorker(in.State, view)); child > 0 && pool.WorkerBytes > 0 {
 			childPerWorker[view.Name] = child
 			pool.WorkerBytes += child
+			pool.ChildBytes = child
 		}
 
 		pools = append(pools, pool)
@@ -366,9 +367,21 @@ func worstCase(p allocate.Plan, st *state.State, masters map[string]string) int6
 		// worst-case figure attributed to the wrong master is worse than one
 		// that is missing, because the number is only ever read when something
 		// has already gone wrong.
+		//
+		// The worst a single worker was ever seen at is its whole subtree —
+		// itself plus every child it spawned — not its own RSS alone. Using the
+		// subtree high-water keeps this coherent with the folded per-worker cost:
+		// both count children, so the worst case is not silently smaller than the
+		// number the plan was built from.
 		if master, ok := masters[pp.Name]; ok {
-			if ps := st.LookupScoped(master, pp.Name); ps != nil && ps.HighWaterBytes > cost {
-				cost = ps.HighWaterBytes
+			if ps := st.LookupScoped(master, pp.Name); ps != nil {
+				worst := ps.HighWaterBytes
+				if ps.SubtreeHighWaterBytes > worst {
+					worst = ps.SubtreeHighWaterBytes
+				}
+				if worst > cost {
+					cost = worst
+				}
 			}
 		}
 		total += int64(pp.MaxChildren) * cost

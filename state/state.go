@@ -944,10 +944,24 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// The per-worker child high-water only climbs. It is what sizing adds to a
 	// worker's own cost, so a one-off transcode reserves for that pool until the
 	// baseline is deliberately cleared — the conservative direction for a number
-	// whose job is to keep a host off the OOM killer. Divided by the workers in
-	// the scrape, so it is a per-worker cost that already reflects concurrency.
-	if childReadings > 0 {
-		if perWorker := childSum / childReadings; perWorker > ps.ChildPerWorkerHighWaterBytes {
+	// whose job is to keep a host off the OOM killer.
+	//
+	// The denominator is the LARGER of the workers in this scrape and the pool's
+	// concurrency peak, not just the workers alive right now. That matters
+	// because this per-worker figure is multiplied back by the workers the plan
+	// gives the pool: a scrape that happens to catch a two-worker ondemand pool
+	// with both workers transcoding would otherwise record a whole worker's child
+	// as the PER-worker cost and, sized up to forty workers, reserve twenty times
+	// the child memory that ever existed — throttling the pool to a fraction of
+	// what it needs, for ever, since this never decays. Dividing by the peak
+	// worker count instead spreads the observed child memory over the scale it
+	// will actually run at.
+	denom := childReadings
+	if int64(ps.PeakWorkers) > denom {
+		denom = int64(ps.PeakWorkers)
+	}
+	if denom > 0 {
+		if perWorker := childSum / denom; perWorker > ps.ChildPerWorkerHighWaterBytes {
 			ps.ChildPerWorkerHighWaterBytes = perWorker
 		}
 	}
