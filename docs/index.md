@@ -63,6 +63,8 @@ conclusion to a file you can read — before ever letting it touch a host.
   mode, the metrics to alert on, and what to do when php-fpm will not start.
 - **[Safety](safety/_index.md)** — how it fails safe, and what it trusts on a
   shared host.
+- **[Maintaining](maintaining/_index.md)** — for working on fpm-tune itself: how a
+  release is cut, signed, and published to the Homebrew tap.
 
 ## The pieces underneath
 

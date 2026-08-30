@@ -32,8 +32,11 @@ brew install cboxdk/tap/fpm-tune
 
 Or download a static binary for your platform from the
 [releases](https://github.com/cboxdk/fpm-tune/releases) and verify it against the
-attached `SHA256SUMS`. Linux (x86_64/aarch64) and macOS (x86_64/arm64); the Linux
-builds are fully static, so one binary runs on Alpine and Debian alike.
+attached `SHA256SUMS` — which every release signs with a keyless Sigstore signature,
+so you can check who produced it, not just that it arrived intact. See
+[Verifying a release](docs/getting-started/installation.md#verifying-a-release).
+Linux (x86_64/aarch64) and macOS (x86_64/arm64); the Linux builds are fully static,
+so one binary runs on Alpine and Debian alike.
 
 **It is beta. Run it advisory-first** — without `--apply` — on a real host and
 read what it recommends before you let it write anything.
