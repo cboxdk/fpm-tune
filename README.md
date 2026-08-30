@@ -11,6 +11,13 @@ workers really cost, divides the budget accordingly, and writes it back.
 Runs standalone. It does its own discovery, its own measurement, its own budget
 detection, and serves its own metrics — no other process required.
 
+Full documentation is in [`docs/`](docs/index.md): the
+[budget detection](docs/how-it-decides/the-budget.md), the
+[learner](docs/how-it-decides/measuring-workers.md), the
+[allocator](docs/how-it-decides/dividing-the-budget.md), the
+[safety model](docs/safety/how-it-fails-safe.md), and
+[operating it](docs/operating/_index.md). This README is the short version.
+
 ## What it does
 
 ```bash

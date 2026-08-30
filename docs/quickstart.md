@@ -1,0 +1,81 @@
+---
+title: Quickstart
+weight: 1
+description: From nothing to a tuned host in one read, without risking anything on the way.
+---
+
+# Quickstart
+
+The safe path is the same one this tool wants you to take: look first, advise
+for a while, then let it act.
+
+## 1. See what it thinks
+
+```bash
+fpm-tune plan
+```
+
+`plan` writes no configuration and reloads nothing. On a host with a running
+php-fpm master it discovers the pools, reads the budget from the master's cgroup,
+and prints what it would set and why:
+
+```
+host memory 4.0GiB, 12 CPU(s) (via php-fpm's cgroup)
+  reserved for the system: 512.0MiB (25% of 4.0GiB)
+  available to workers:    3.5GiB
+
+POOL   NOW  PLAN  MEMORY    WHY
+shop   12   14    1.3GiB    peak 11 workers busy; raised to 14, measured 96.0MiB/worker
+blog   12   8     384.0MiB  peak 6 workers busy; 8 is enough, measured 48.0MiB/worker
+```
+
+On a first run every pool is `estimated`, not measured — the numbers are a
+profile's guess until the tool has watched real traffic. That is expected, and
+the plan says so.
+
+## 2. Let it advise, permanently
+
+```bash
+fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf
+```
+
+`serve` without `--apply` changes nothing and never will. It measures, publishes
+metrics on `:9110`, and — with `--recommend` — writes its conclusion as
+PHP-FPM configuration you can read, diff, and paste by hand. The file is
+rewritten only when the recommended settings change, so its modification time
+tells you when the advice last moved. See [Advisory mode](operating/advisory-mode.md).
+
+Leave it running for a day or two through a real traffic pattern. The estimates
+become measurements, and the recommendation settles onto numbers backed by what
+the workers actually did.
+
+## 3. Let it act
+
+When you trust the numbers:
+
+```bash
+fpm-tune apply
+```
+
+This writes one file — `zz-fpm-tune.conf`, in the directory your master already
+includes — validates it against a sandboxed copy of the configuration, and
+reloads the master with SIGUSR2. If php-fpm would reject the file, it never
+reaches the live directory. If the master does not survive the reload, the
+change is rolled back. Deleting the file returns everything to what you
+configured.
+
+To run it continuously instead of once:
+
+```bash
+fpm-tune serve --apply
+```
+
+Now it closes the loop: measure, decide, apply when a change is worth a reload,
+and repair the host if its own file ever stops php-fpm from starting.
+
+## What to read next
+
+- [First run](getting-started/first-run.md) — the same path, with the safety
+  guarantees spelled out.
+- [How it decides](how-it-decides/_index.md) — before you trust `--apply`, this
+  is the part worth understanding.
