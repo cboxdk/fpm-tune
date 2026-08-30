@@ -853,3 +853,83 @@ func TestAnUnreadableExistingFileIsNotTreatedAsNoFile(t *testing.T) {
 		t.Errorf("the error does not name the file it could not read:\n%v", err)
 	}
 }
+
+// TestADryRunReportsAPendingRepairWithoutPerformingOne.
+//
+// PendingRepair exists because a dry run must not repair. Reconcile removes
+// files, rewrites from backups and signals the master — every one of which is a
+// change to a production host — so `--dry-run` calling it was the opposite of
+// what the flag promises. But an operator running a dry run on a host with an
+// unfinished change still needs to be told, or the output describes a plan for
+// a host that is not in the state it says.
+//
+// It had no test, which for a function whose whole purpose is to look without
+// touching is the wrong way round.
+func TestADryRunReportsAPendingRepairWithoutPerformingOne(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	configPath := masterConfigAt(t, dir)
+
+	// Nothing in flight.
+	if _, found, err := PendingRepair(backupDir, dir); err != nil || found {
+		t.Fatalf("a clean host reports a pending repair: found=%v err=%v", found, err)
+	}
+
+	// A run that died mid-change.
+	master := Master{Binary: trueBin(t), ConfigPath: configPath, DropInDir: dir}
+	crashAfterWriting(t, master, backupDir, allocate.PoolPlan{Name: "www", MaxChildren: 40})
+
+	before, err := os.ReadFile(DropInPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path, found, err := PendingRepair(backupDir, dir)
+	if err != nil {
+		t.Fatalf("PendingRepair: %v", err)
+	}
+	if !found {
+		t.Fatal("an unfinished change was not reported, so a dry run describes a plan " +
+			"for a host that is not in the state it says it is")
+	}
+	if path != DropInPath(dir) {
+		t.Errorf("path = %q, want the drop-in; an operator has to know which file", path)
+	}
+
+	// And nothing was touched: that is the whole point.
+	after, err := os.ReadFile(DropInPath(dir))
+	if err != nil {
+		t.Fatalf("looking removed the file: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Error("looking for a pending repair changed the pool directory")
+	}
+	if _, still, _ := readTransaction(backupDir, dir); !still {
+		t.Error("looking for a pending repair consumed the record, so the run that " +
+			"actually repairs will find nothing to do")
+	}
+}
+
+// TestABackupIsOnlyClaimedByTheDirectoryItCameFrom: saved copies are named with
+// a hash of their pool directory, and the sweep that removes orphans has to
+// refuse one belonging to another master — deleting it would take that master's
+// only route back.
+func TestABackupIsOnlyClaimedByTheDirectoryItCameFrom(t *testing.T) {
+	mine := "/etc/php/8.3/fpm/pool.d"
+	theirs := "/etc/php/8.2/fpm/pool.d"
+
+	saved := backupName(mine, DropInPath(mine))
+
+	got, ok := backupTarget(mine, saved)
+	if !ok || got != DropInPath(mine) {
+		t.Errorf("a backup was not recognised by the directory that made it: %q ok=%v",
+			got, ok)
+	}
+	if _, ok := backupTarget(theirs, saved); ok {
+		t.Error("another master's saved copy was claimed as this one's; removing it as " +
+			"an orphan takes away that master's only route back")
+	}
+	if _, ok := backupTarget(mine, "no-prefix.bak"); ok {
+		t.Error("a file that is not one of ours was claimed")
+	}
+}
