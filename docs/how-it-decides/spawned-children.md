@@ -96,36 +96,61 @@ anyway, because being wrong about "web" the unsafe way is an OOM.
 
 ## How it changes the plan
 
-The child memory is held back from the budget as a **reserve**, on top of the
-reserve already kept for the operating system, before the workers are sized
-against what is left. The reserve is the largest of what the workload declares,
-what the subtree measured, and — where there is one — what the cgroup actually
-peaked at beyond its workers.
+The child memory is folded into **each worker's cost**, not held back as a
+separate pool of memory. A worker that also runs a 150&nbsp;MiB child costs
+150&nbsp;MiB more, and the allocator sizes `pm.max_children` by dividing the
+budget by that per-worker cost, exactly as it already does for a worker's own
+memory.
 
-Because it is a reserve, it can only ever **reduce** how many workers a pool is
-given, never increase it. Accounting for children makes this tool run fewer
-workers on a tight host; it can never make a host more overcommitted than it was
-before. That is the property that makes it safe to leave on.
+That per-worker figure is deliberately **amortised**: it is the high-water of a
+scrape's total child memory divided by the workers in that scrape. A pool where
+two of eight workers were each running a 600&nbsp;MiB ffmpeg records
+150&nbsp;MiB per worker, not 600 — so multiplying it back by the worker count
+reserves the 1.2&nbsp;GiB that was really there, not the 4.8&nbsp;GiB that never
+was. For a `subprocess-heavy` pool, where every worker has a child, the amortised
+figure is the full child size. The larger of the workload's guess and this
+measurement wins.
+
+Making it a per-worker cost rather than a host-wide reserve is what makes it
+safe. The allocator already guarantees it never commits more than the budget, so
+folding children into the per-worker cost means that guarantee now covers
+children too — whatever the allocator does with the budget. A `subprocess-heavy`
+pool simply gets **fewer workers**; it never causes the plan to fail. (An earlier
+design held the child memory back as a single host-wide reserve; a review found
+that one over-declared pool could then zero the budget for every pool on the
+host, and that redistribution could hand a pool more workers than its reserve
+covered. The per-worker model has neither problem.)
 
 ## What you will see
 
 In `--recommend` output, a pool that spawns children carries the split:
 
 ```ini
-; reserved for spawned children: 2.0GiB (the cgroup used this much beyond its workers at its peak)
+; reserved for spawned children: 1.8GiB (folded into each worker's cost, sized to the workers planned)
 ;
 ; transcode: measured 90MiB
 ;   measured per worker: median 60.0MiB, p95 90.0MiB, p99 95.0MiB, worst 95.0MiB (240 readings)
-;   spawned children add up to 600.0MiB at their worst (worker 90.0MiB, worker+children 690.0MiB)
+;   plus ~150.0MiB of children per worker (folded into the sizing; worst single worker+children seen 690.0MiB)
 ```
 
 On `/metrics`:
 
-- `fpm_tune_pool_subtree_rss_bytes{pool}` — worker plus children
-- `fpm_tune_pool_child_rss_bytes{pool}` — the difference, what children cost
-- `fpm_tune_cgroup_memory_bytes{state="current|peak"}` — the cgroup's own usage
-- `fpm_tune_budget_bytes{state="reserved_children"}` — what was held back for them
+- `fpm_tune_pool_subtree_rss_bytes{pool}` — the worst single worker's whole footprint
+- `fpm_tune_pool_child_rss_bytes{pool}` — the child memory folded into each worker's cost
+- `fpm_tune_cgroup_memory_bytes{state="current|peak"}` — the cgroup's own usage, for cross-checking
+- `fpm_tune_budget_bytes{state="reserved_children"}` — what the plan committed to children in total
 
 A pool whose `child_rss_bytes` climbs while its `worker_rss_bytes` sits flat is a
 pool doing more subprocess work than its workers show — and the one to give a
 workload declaration if it does not have one.
+
+## What it does not catch
+
+The subtree walk is a point-in-time sample. A child that lived and died between
+two scrapes is missed, and a child whose worker was recycled (at
+`pm.max_requests`) has reparented away from any worker by the time the next
+scrape lands. Where the master runs under a cgroup, the cgroup's own high-water —
+reported above — catches those, and is worth watching against the budget. On a
+host with no cgroup, and no workload declaration, subtree measurement is
+best-effort: declare the workload on a pool you know shells out, and its floor
+holds regardless of what the sampling happens to catch.

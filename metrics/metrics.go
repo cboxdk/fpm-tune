@@ -67,7 +67,7 @@ func New() *Collectors {
 		subtreeRSS: gaugeVec(reg, "fpm_tune_pool_subtree_rss_bytes",
 			"The high-water mark of a worker AND everything it spawned — an ffmpeg, an imagemagick — which fpm_tune_pool_worker_rss_bytes does not include. Compare it to that metric's high_water: the gap is what children cost. A point-in-time sample misses a child that lived and died between scrapes; the cgroup high-water, where there is a cgroup, is what catches those.", "pool"),
 		childRSS: gaugeVec(reg, "fpm_tune_pool_child_rss_bytes",
-			"What a pool's spawned children cost at their worst: subtree high-water minus worker high-water. Zero for a pool whose workers never shell out — a plain web pool — and large for one doing media work. This is the memory an autotuner that only reads worker RSS is blind to.", "pool"),
+			"The child memory folded into each worker's cost: the high-water of a scrape's total spawned-child memory divided by its workers, so it already reflects how many workers ran a child at once. Zero for a plain web pool, large for one doing media work. Multiply by pm.max_children for what the pool commits to children.", "pool"),
 		confidence: gaugeVec(reg, "fpm_tune_pool_baseline_confidence",
 			// Corrected: it used to say a pool below 1 is "sized from an
 			// estimate", which stopped being true when the cost and the
@@ -223,7 +223,7 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 				// not publish a zero that reads as "children cost nothing".
 				if ps.SubtreeHighWaterBytes > 0 {
 					c.subtreeRSS.WithLabelValues(p.Name).Set(float64(ps.SubtreeHighWaterBytes))
-					c.childRSS.WithLabelValues(p.Name).Set(float64(ps.SubtreeHighWaterBytes - ps.HighWaterBytes))
+					c.childRSS.WithLabelValues(p.Name).Set(float64(ps.ChildPerWorkerHighWaterBytes))
 				}
 			}
 		}

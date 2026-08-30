@@ -709,3 +709,16 @@ func TestAPoolCutBelowItsFloorIsNotDescribedAsHeldAtIt(t *testing.T) {
 	}
 	t.Fatal("setup: no pool was cut, so the wording under test never ran")
 }
+
+// TestAllocatableClampsANegativeReserve: a negative reserve must never inflate
+// the budget above TotalBytes. Upstream arithmetic (a wrapped child cost, a bad
+// override) could in principle produce one, and if free came out larger than the
+// budget, the terminal allocated<=allocatable check would wave through an
+// over-commit. The clamp is what makes "never over budget" hold by construction.
+func TestAllocatableClampsANegativeReserve(t *testing.T) {
+	b := Budget{TotalBytes: 8 << 30, ReserveBytes: -(4 << 30), CPUs: 4}
+	if got := b.Allocatable(); got != b.TotalBytes {
+		t.Errorf("Allocatable() = %d with a negative reserve, want the full budget %d — a "+
+			"negative reserve inflated the budget above its total", got, b.TotalBytes)
+	}
+}

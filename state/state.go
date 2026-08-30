@@ -88,11 +88,23 @@ type PoolState struct {
 	HighWaterBytes int64 `json:"high_water_bytes"`
 
 	// SubtreeHighWaterBytes is the largest worker-plus-its-children ever seen —
-	// the same high-water as HighWaterBytes but over each worker's whole subtree,
-	// so the gap between the two is what the children (an ffmpeg, an imagemagick)
-	// cost at their worst. Reported, not yet used for sizing. Zero until a scrape
-	// carried subtree readings.
+	// the same high-water as HighWaterBytes but over each worker's whole subtree.
+	// Reporting only. Zero until a scrape carried subtree readings.
 	SubtreeHighWaterBytes int64 `json:"subtree_high_water_bytes"`
+
+	// ChildPerWorkerHighWaterBytes is the child memory to add to ONE worker's own
+	// cost when sizing: the high-water of (total child memory in a scrape ÷ the
+	// workers in that scrape). Dividing by the worker count is what makes it a
+	// PER-WORKER cost that already accounts for concurrency — a pool where two of
+	// eight workers were each running a 600MiB ffmpeg records 150MiB per worker,
+	// not 600, so multiplying it back by the worker count reserves the 1.2GiB that
+	// was really there and not 4.8GiB that never was.
+	//
+	// Kept as its own high-water, not derived from SubtreeHighWaterBytes minus
+	// HighWaterBytes: those are maxima from different moments, so a later childless
+	// request that raised the own-RSS high-water could make the children figure
+	// collapse to zero. Zero until a child was observed. It only climbs.
+	ChildPerWorkerHighWaterBytes int64 `json:"child_per_worker_high_water_bytes"`
 
 	// Samples counts every scrape; BusySamples counts only those that taught us
 	// something. The gap between them is how much of the watching was wasted on
@@ -728,18 +740,19 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// for being young. The reason for the filter is that a young worker has not
 	// loaded the application and reads small — and a small reading cannot move a
 	// maximum, so the filter was never doing that job here.
-	var peak, subtreePeak int64
+	var peak, subtreePeak, childSum, childReadings int64
 	mature := 0
 	for _, w := range obs.Workers {
 		if w.RSSBytes <= 0 {
 			continue
 		}
 
-		// The subtree peak travels beside the own-RSS peak, over the same
-		// readings, so the two high-waters are comparable and their difference is
-		// the worst the children ever cost. A worker with no subtree reading
-		// (an older scrape, or the process table was unreadable) falls back to its
-		// own RSS, so this can never come out below the own-RSS peak.
+		// The subtree peak — a worker's whole footprint — is for reporting. The
+		// child memory this worker carried in the SAME reading is accumulated
+		// across the scrape and divided by the worker count below, which is what
+		// turns per-worker child readings into a per-worker cost that accounts for
+		// how many workers actually had a child at once. A worker with no subtree
+		// reading falls back to its own RSS and contributes no child.
 		subtree := w.SubtreeRSSBytes
 		if subtree < w.RSSBytes {
 			subtree = w.RSSBytes
@@ -747,6 +760,10 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		if subtree > subtreePeak {
 			subtreePeak = subtree
 		}
+		if w.SubtreeRSSBytes > w.RSSBytes {
+			childSum += w.SubtreeRSSBytes - w.RSSBytes
+		}
+		childReadings++
 
 		// Every reading goes into the description of what was seen, including
 		// the young ones and the ones from a scrape the sizing path will discard.
@@ -915,14 +932,24 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if peak > ps.HighWaterBytes {
 		ps.HighWaterBytes = peak
 	}
-	// Never below the own-RSS high-water: the two are the same maximum over
-	// different scopes, and "children" is their difference — it must not read
-	// negative because an old scrape carried no subtree.
+	// Never below the own-RSS high-water: a worker's whole footprint is at least
+	// its own resident set, and an old scrape with no subtree reading must not
+	// leave this smaller than HighWaterBytes.
 	if subtreePeak > ps.SubtreeHighWaterBytes {
 		ps.SubtreeHighWaterBytes = subtreePeak
 	}
 	if ps.SubtreeHighWaterBytes < ps.HighWaterBytes {
 		ps.SubtreeHighWaterBytes = ps.HighWaterBytes
+	}
+	// The per-worker child high-water only climbs. It is what sizing adds to a
+	// worker's own cost, so a one-off transcode reserves for that pool until the
+	// baseline is deliberately cleared — the conservative direction for a number
+	// whose job is to keep a host off the OOM killer. Divided by the workers in
+	// the scrape, so it is a per-worker cost that already reflects concurrency.
+	if childReadings > 0 {
+		if perWorker := childSum / childReadings; perWorker > ps.ChildPerWorkerHighWaterBytes {
+			ps.ChildPerWorkerHighWaterBytes = perWorker
+		}
 	}
 
 	if ps.TypicalPeakBytes == 0 {

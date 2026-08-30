@@ -149,25 +149,23 @@ func TestRecommendationShowsChildrenWhenAPoolSpawnsThem(t *testing.T) {
 		Distribution: []plan.PoolDistribution{
 			{
 				Name: "media", P50: 60 * mb, P95: 90 * mb, P99: 95 * mb, WorstSeen: 95 * mb,
-				Samples: 100, WorkerHighWater: 90 * mb, SubtreeHighWater: 690 * mb, // 600MiB ffmpeg
+				Samples: 100, SubtreeHighWater: 690 * mb, ChildPerWorker: 150 * mb, // children folded in
 			},
 			{
 				Name: "web", P50: 55 * mb, P95: 60 * mb, P99: 62 * mb, WorstSeen: 62 * mb,
-				Samples: 100, WorkerHighWater: 60 * mb, SubtreeHighWater: 60 * mb, // nothing spawned
+				Samples: 100, SubtreeHighWater: 60 * mb, ChildPerWorker: 0, // nothing spawned
 			},
 		},
 	}
 
 	file, _ := renderRecommendation(result, time.Unix(1_700_000_000, 0))
 
-	if !strings.Contains(file, "spawned children add up to") {
+	if !strings.Contains(file, "children per worker") {
 		t.Errorf("the media pool's children are not shown; an operator sizing by hand "+
 			"cannot see the ffmpeg:\n%s", file)
 	}
-	// The web pool spawns nothing, so its section must carry no children line.
-	// Both pool sections mention "spawned children" only if wrongly rendered; the
-	// count of that phrase must be exactly one.
-	if n := strings.Count(file, "spawned children add up to"); n != 1 {
+	// The web pool spawns nothing, so only the media pool carries a children line.
+	if n := strings.Count(file, "children per worker"); n != 1 {
 		t.Errorf("children line rendered %d times, want exactly 1 (only the media pool):\n%s", n, file)
 	}
 }

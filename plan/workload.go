@@ -1,14 +1,26 @@
 package plan
 
 import (
-	"math"
 	"strings"
 
-	"github.com/cboxdk/fpm-tune/allocate"
-	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/state"
 )
+
+// measuredChildPerWorker is the per-worker child memory a pool has actually been
+// observed carrying, or zero if none has been. It reads the pool's own record,
+// keyed by the master it belongs to so a name shared by two masters cannot cross
+// the wires.
+func measuredChildPerWorker(st *state.State, view observe.PoolView) int64 {
+	if st == nil {
+		return 0
+	}
+	if ps := st.Lookup(view.Target.ConfigPath, view.Name); ps != nil {
+		return ps.ChildPerWorkerHighWaterBytes
+	}
+
+	return 0
+}
 
 // A workload is the shape of what a pool's workers do — specifically, whether
 // they spawn other processes, and how many at once.
@@ -17,14 +29,12 @@ import (
 // measured within a few scrapes, but whether a request shells out to an ffmpeg
 // is invisible until one happens to run while a scrape lands — and on a
 // subprocess-heavy host, under-provisioning until then is exactly the window an
-// OOM arrives in. Declaring the workload lets the plan reserve for children from
+// OOM arrives in. Declaring the workload lets the plan account for children from
 // the first run, before anything has been observed; measurement then refines it.
 //
-// The class encodes a concurrency assumption that measurement alone cannot
-// recover from per-worker RSS: whether every worker might be transcoding at once
-// (subprocess-heavy), or only a few now and then (bursty), or none (web). A
-// cgroup high-water would eventually reveal it, but only after the host has
-// already reached that peak once.
+// The class encodes a concurrency assumption that measurement is slow to
+// recover: whether every worker might be transcoding at once (subprocess-heavy),
+// or only a few now and then (bursty), or none (web).
 type Workload struct {
 	Name string
 
@@ -34,8 +44,10 @@ type Workload struct {
 	ChildBytes int64
 
 	// ConcurrentFraction is how many of a pool's workers are assumed to be
-	// running a child at once, as a fraction of its worker count: all for media,
-	// a quarter for bursty, none for simple.
+	// running a child at once, as a fraction: all for subprocess-heavy, a quarter
+	// for bursty, none for web. ChildBytes times this fraction is the per-worker
+	// child cost the plan adds before it has measured anything — amortised, so a
+	// bursty pool is not sized as if every worker had a child.
 	ConcurrentFraction float64
 }
 
@@ -76,10 +88,14 @@ var workloadsByName = map[string]Workload{
 	"children":         WorkloadSubprocessHeavy,
 }
 
+// KnownWorkloads is the canonical set, for help text and warnings.
+const KnownWorkloads = "web, bursty, subprocess-heavy"
+
 // WorkloadByName resolves a marker to its class, falling back to the supplied
 // default for an empty or unrecognised name. ok reports whether the name was
 // recognised, so a caller can warn about a typo rather than silently treating
-// "medai" as the default.
+// "medai" as the default — which, for a per-pool marker that reserves memory,
+// is the difference between a warning and a silent OOM.
 func WorkloadByName(name string, fallback Workload) (w Workload, ok bool) {
 	if name == "" {
 		return fallback, true
@@ -91,113 +107,27 @@ func WorkloadByName(name string, fallback Workload) (w Workload, ok bool) {
 	return fallback, false
 }
 
-// concurrentChildren is how many children a pool of workerCount workers is
-// assumed to run at once under this workload.
+// childCostPerWorker is the memory to add to one worker's own cost to account
+// for what it spawns.
 //
-// At least one whenever the workload spawns anything and the pool has workers,
-// so a media pool with three workers is not rounded down to reserving nothing —
-// the floor is what makes the declaration mean something on a small pool.
-func (w Workload) concurrentChildren(workerCount int) int {
-	if w.ChildBytes <= 0 || workerCount <= 0 {
-		return 0
-	}
-
-	n := int(math.Ceil(float64(workerCount) * w.ConcurrentFraction))
-	if n < 1 {
-		n = 1
-	}
-	if n > workerCount {
-		n = workerCount
-	}
-
-	return n
-}
-
-// childReserveFor is the memory to keep for the processes pool workers spawn,
-// held back from the budget before the workers themselves are sized.
+// It is a PER-WORKER cost, not a host-wide reserve, and that is the whole point
+// of the redesign: the allocator already sizes each pool by dividing the budget
+// by a bounded per-worker cost, so folding children into that cost means the
+// number of workers a pool is given scales with the true cost of a worker, the
+// bounds that stop a per-worker cost running away apply to children too, and
+// accounting for children can only ever mean "fewer workers", never "no plan at
+// all". A host-wide reserve had none of those properties.
 //
-// It is ADDITIVE to the system reserve, and so can only lower what workers are
-// given, never raise it: accounting for children makes this tool run fewer
-// workers, never overcommit a host it was not overcommitting before. That is the
-// property that makes it safe to turn on.
-//
-// The larger of two estimates wins, because each is blind to what the other
-// sees:
-//
-//   - The per-pool estimate takes each pool's per-worker child memory — the
-//     larger of the workload's up-front guess and the measured subtree — times a
-//     concurrency the workload class declares (all workers for subprocess-heavy,
-//     a few for bursty). It is all there is on a host with no cgroup, and it is
-//     what lets a subprocess-heavy pool reserve from its first run.
-//
-//   - The cgroup high-water is the ground truth where there is a cgroup: it
-//     counts a child that lived and died between two scrapes, and it is the
-//     number the OOM killer enforces against. But it is one figure for the whole
-//     master, and absent on a bare VM.
-func childReserveFor(views []observe.PoolView, st *state.State, pools []allocate.Pool, def Workload, usage budget.CgroupUsage, hasCgroup bool) (int64, string) {
-	ownBytesOf := map[string]int64{}
-	for _, p := range pools {
-		ownBytesOf[p.Name] = p.WorkerBytes
+// The larger of the declared floor and the measured cost wins. The floor is the
+// workload's per-worker child guess (its child size amortised over how many
+// workers run one at once); the measured cost is what the pool's workers were
+// actually observed carrying, already per-worker and already reflecting real
+// concurrency. Measurement takes over once it exceeds the guess.
+func childCostPerWorker(w Workload, measuredPerWorker int64) int64 {
+	bootstrap := int64(float64(w.ChildBytes) * w.ConcurrentFraction)
+	if measuredPerWorker > bootstrap {
+		return measuredPerWorker
 	}
 
-	var perPool, workerOwnTotal int64
-	for _, v := range views {
-		workers := v.CurrentMaxChildren
-		if workers <= 0 {
-			workers = v.ObservedPeak
-		}
-		if workers <= 0 {
-			// No countable workers means no countable children, and no basis for
-			// the cgroup subtraction either.
-			continue
-		}
-
-		workerOwnTotal += ownBytesOf[v.Name] * int64(workers)
-
-		w, _ := WorkloadByName(v.Workload, def)
-
-		var measuredChild int64
-		if st != nil {
-			if ps := st.Lookup(v.Target.ConfigPath, v.Name); ps != nil &&
-				ps.SubtreeHighWaterBytes > ps.HighWaterBytes {
-				measuredChild = ps.SubtreeHighWaterBytes - ps.HighWaterBytes
-			}
-		}
-
-		perWorker := w.ChildBytes
-		if measuredChild > perWorker {
-			perWorker = measuredChild
-		}
-		if perWorker <= 0 {
-			continue
-		}
-
-		// The class's concurrency, but never fewer than one child when there is
-		// any child memory at all — so a pool marked "web" that is nonetheless
-		// observed spawning something is still reserved for, the measurement
-		// beating the declaration.
-		n := w.concurrentChildren(workers)
-		if n < 1 {
-			n = 1
-		}
-		if n > workers {
-			n = workers
-		}
-
-		perPool += perWorker * int64(n)
-	}
-
-	var cgroupBased int64
-	if hasCgroup && usage.PeakBytes > workerOwnTotal {
-		cgroupBased = usage.PeakBytes - workerOwnTotal
-	}
-
-	if cgroupBased > perPool {
-		return cgroupBased, "the cgroup used this much beyond its workers at its peak"
-	}
-	if perPool > 0 {
-		return perPool, "declared and measured per-pool child memory"
-	}
-
-	return 0, ""
+	return bootstrap
 }

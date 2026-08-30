@@ -208,12 +208,13 @@ func Sample(ctx context.Context, targets []phpfpm.Target, log *slog.Logger) []Po
 			// site restarting for five seconds has its memory handed to its
 			// neighbours, who are then reloaded with larger ceilings, and the
 			// host is overcommitted the moment it comes back.
+			ceiling := boundedCeiling(target.MaxChildren)
 			views = append(views, PoolView{
 				Name:               outcome.Name,
 				Target:             target,
 				Workload:           target.Workload,
-				CurrentMaxChildren: target.MaxChildren,
-				MaxChildrenKnown:   target.MaxChildren > 0,
+				CurrentMaxChildren: ceiling,
+				MaxChildrenKnown:   ceiling > 0,
 				ProcessManager:     target.ProcessManager,
 				Err:                outcome.Err,
 			})
@@ -237,8 +238,8 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 	// ceiling — and a pool with no known ceiling has its memory reserved at the
 	// default floor while it actually runs forty workers. It is the file's own
 	// doctrine, applied to one of two failure paths.
-	if target.MaxChildren > 0 {
-		view.CurrentMaxChildren, view.MaxChildrenKnown = target.MaxChildren, true
+	if c := boundedCeiling(target.MaxChildren); c > 0 {
+		view.CurrentMaxChildren, view.MaxChildrenKnown = c, true
 	}
 	if target.ProcessManager != "" {
 		view.ProcessManager = target.ProcessManager
@@ -293,14 +294,14 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 		view.QueueDepth = pool.ListenQueue
 		view.MaxChildrenReached = pool.MaxChildrenReached
 		view.CurrentMaxChildren, view.MaxChildrenKnown = configuredMaxChildren(pool)
-		if !view.MaxChildrenKnown && target.MaxChildren > 0 {
+		if c := boundedCeiling(target.MaxChildren); !view.MaxChildrenKnown && c > 0 {
 			// Discovery parsed this out of the effective configuration and the
 			// scrape did not report it. Falling back was already done for a
 			// FAILED scrape and not for a successful one that simply lacked the
 			// key — so a pool actually configured for forty was accounted for at
 			// the default floor, its memory handed to a neighbour, and the
 			// neighbour written.
-			view.CurrentMaxChildren, view.MaxChildrenKnown = target.MaxChildren, true
+			view.CurrentMaxChildren, view.MaxChildrenKnown = c, true
 		}
 
 		view.Workers = make([]state.WorkerSample, 0, len(pool.Processes))
@@ -346,3 +347,16 @@ func configuredMaxChildren(pool phpfpm.Pool) (int, bool) {
 // this the number is not a configuration, and multiplying it by a per-worker
 // cost wraps int64.
 const maxPlausibleChildren = 100_000
+
+// boundedCeiling rejects an implausible pm.max_children. The scrape path clamps
+// in configuredMaxChildren; this is the same clamp for the fallback paths that
+// read target.MaxChildren directly — which discovery parsed with a discarded
+// error and no upper bound, so a garbage value there could otherwise become a
+// pool's ceiling and reach the sizing arithmetic.
+func boundedCeiling(n int) int {
+	if n <= 0 || n > maxPlausibleChildren {
+		return 0
+	}
+
+	return n
+}

@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ func TestWorkloadByNameResolvesAliases(t *testing.T) {
 		"subprocess":       "subprocess-heavy",
 		"media":            "subprocess-heavy",
 		"children":         "subprocess-heavy",
-		"  MEDIA  ":        "subprocess-heavy", // trimmed and folded
+		"  MEDIA  ":        "subprocess-heavy",
 	}
 	for name, want := range cases {
 		w, ok := WorkloadByName(name, WorkloadWeb)
@@ -31,216 +32,178 @@ func TestWorkloadByNameResolvesAliases(t *testing.T) {
 			t.Errorf("%q resolved to %q, want %q", name, w.Name, want)
 		}
 	}
-
 	if w, ok := WorkloadByName("medai", WorkloadBursty); ok || w.Name != "bursty" {
 		t.Errorf("a typo resolved to %q ok=%v, want the fallback and ok=false", w.Name, ok)
 	}
 }
 
-// TestSubprocessHeavyReservesFromTheFirstRun is the whole point of workloads: a
-// pool declared subprocess-heavy holds memory back for its children before a
-// single one has been observed, so it is not sized as if the ffmpeg were free on
-// the run where an OOM would otherwise arrive.
-func TestSubprocessHeavyReservesFromTheFirstRun(t *testing.T) {
-	res, err := Build(Input{
-		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 4, Source: budget.SourceMemInfo},
-		Workload: WorkloadSubprocessHeavy,
-		State:    state.New(),
-		Views: []observe.PoolView{{
-			Name: "media", ProcessManager: "dynamic",
-			CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8,
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
+// TestChildCostPerWorker: the per-worker child cost is the workload's amortised
+// guess until a larger cost is measured. Amortised means a bursty pool is NOT
+// charged a full child on every worker.
+func TestChildCostPerWorker(t *testing.T) {
+	cases := []struct {
+		w        Workload
+		measured int64
+		want     int64
+	}{
+		{WorkloadWeb, 0, 0},
+		{WorkloadBursty, 0, 64 * mb},                  // 256MiB × 0.25
+		{WorkloadSubprocessHeavy, 0, 512 * mb},        // 512MiB × 1.0
+		{WorkloadWeb, 300 * mb, 300 * mb},             // measured on a web pool wins
+		{WorkloadBursty, 500 * mb, 500 * mb},          // measured beats the 64MiB guess
+		{WorkloadSubprocessHeavy, 100 * mb, 512 * mb}, // guess beats a small measurement
 	}
-
-	// 512MiB per worker (the class's bootstrap guess) × 8 concurrent workers.
-	want := int64(512) * mb * 8
-	if res.ChildReserve != want {
-		t.Errorf("ChildReserve = %s, want %s reserved for children on the first run",
-			budget.HumanBytes(res.ChildReserve), budget.HumanBytes(want))
-	}
-}
-
-// TestWebPoolReservesNothingForChildren: a plain web pool spawns nothing, so it
-// must not have memory held back from its workers for children that never exist.
-func TestWebPoolReservesNothingForChildren(t *testing.T) {
-	res, err := Build(Input{
-		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 4, Source: budget.SourceMemInfo},
-		Workload: WorkloadWeb,
-		State:    state.New(),
-		Views: []observe.PoolView{{
-			Name: "app", ProcessManager: "dynamic",
-			CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8,
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ChildReserve != 0 {
-		t.Errorf("ChildReserve = %s for a web pool, want 0", budget.HumanBytes(res.ChildReserve))
-	}
-}
-
-// TestMeasurementOverridesAWebDeclaration: a pool an operator marked web, but
-// which is observed spawning a 600MiB child, is reserved for anyway — the
-// measurement beats the declaration, because being wrong about "web" the unsafe
-// way is an OOM.
-func TestMeasurementOverridesAWebDeclaration(t *testing.T) {
-	st := state.New()
-	base := time.Now()
-	for i := 0; i < 6; i++ {
-		obs := state.Observation{
-			Pool: "app", At: base.Add(time.Duration(i) * 2 * time.Minute), ActiveNow: 4,
-			Accepted: base.Unix() * 100,
-			Workers: []state.WorkerSample{
-				{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500},
-				{RSSBytes: 90 * mb, SubtreeRSSBytes: 690 * mb, Requests: 500},
-			},
+	for _, c := range cases {
+		if got := childCostPerWorker(c.w, c.measured); got != c.want {
+			t.Errorf("childCostPerWorker(%s, %s) = %s, want %s",
+				c.w.Name, budget.HumanBytes(c.measured), budget.HumanBytes(got), budget.HumanBytes(c.want))
 		}
-		st.Learn(obs, state.Options{})
-	}
-
-	res, err := Build(Input{
-		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 4, Source: budget.SourceMemInfo},
-		Workload: WorkloadWeb, // declared web…
-		State:    st,
-		Views: []observe.PoolView{{
-			Name: "app", ProcessManager: "dynamic",
-			CurrentMaxChildren: 4, MaxChildrenKnown: true, ObservedPeak: 4,
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// …but 600MiB of children were measured, so at least one is reserved for.
-	if res.ChildReserve < 600*mb {
-		t.Errorf("ChildReserve = %s, want at least the measured 600MiB — a wrong 'web' "+
-			"marker must not hide observed children", budget.HumanBytes(res.ChildReserve))
 	}
 }
 
-// TestChildReserveOnlyEverReducesWorkers is the safety property the whole design
-// rests on: reserving for children is additive, so a plan that accounts for them
-// can only allocate LESS to workers than one that does not — never more. If this
-// ever failed, turning the feature on could overcommit a host it was not
-// overcommitting before.
-func TestChildReserveOnlyEverReducesWorkers(t *testing.T) {
+// TestSubprocessHeavyGetsFewerWorkers: a subprocess-heavy pool costs more per
+// worker (own + child), so a budget-bound host gives it fewer workers than the
+// same pool declared web — the child memory shows up as fewer workers, never as
+// a refusal to plan.
+func TestSubprocessHeavyGetsFewerWorkers(t *testing.T) {
 	view := observe.PoolView{
 		Name: "media", ProcessManager: "dynamic",
-		CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8,
+		CurrentMaxChildren: 40, MaxChildrenKnown: true, ObservedPeak: 40,
 	}
-	limits := budget.Limits{MemoryBytes: 8 * gb, CPUs: 4, Source: budget.SourceMemInfo}
+	limits := budget.Limits{MemoryBytes: 8 * gb, CPUs: 8, Source: budget.SourceMemInfo}
 
-	web, err := Build(Input{Limits: limits, Workload: WorkloadWeb, State: state.New(), Views: []observe.PoolView{view}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	heavy, err := Build(Input{Limits: limits, Workload: WorkloadSubprocessHeavy, State: state.New(), Views: []observe.PoolView{view}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	web := mustBuild(t, Input{Limits: limits, Workload: WorkloadWeb, State: state.New(), Views: []observe.PoolView{view}})
+	heavy := mustBuild(t, Input{Limits: limits, Workload: WorkloadSubprocessHeavy, State: state.New(), Views: []observe.PoolView{view}})
 
-	// Never more workers than the un-reserved plan.
-	if heavy.Plan.AllocatedBytes > web.Plan.AllocatedBytes {
-		t.Errorf("reserving for children allocated MORE to workers (%s) than not reserving (%s)",
-			budget.HumanBytes(heavy.Plan.AllocatedBytes), budget.HumanBytes(web.Plan.AllocatedBytes))
+	if heavy.Plan.Pools[0].MaxChildren >= web.Plan.Pools[0].MaxChildren {
+		t.Errorf("subprocess-heavy got %d workers, not fewer than web's %d",
+			heavy.Plan.Pools[0].MaxChildren, web.Plan.Pools[0].MaxChildren)
 	}
-
-	// And the reserve is really taken out of the budget: this pool is small
-	// enough that both plans fit the same workers, so the child reserve comes out
-	// of free memory instead — exactly childReserve of it. If the reserve were
-	// not being subtracted from the budget at all, the two would have identical
-	// free memory, which is the mutation this catches.
 	if heavy.ChildReserve <= 0 {
-		t.Fatal("the subprocess-heavy plan reserved nothing for children")
-	}
-	if gap := web.Plan.FreeBytes - heavy.Plan.FreeBytes; gap != heavy.ChildReserve {
-		t.Errorf("free memory fell by %s between the plans, but the child reserve was %s — "+
-			"the reserve is not being held back from the budget",
-			budget.HumanBytes(gap), budget.HumanBytes(heavy.ChildReserve))
+		t.Error("no child memory was reported as committed for a subprocess-heavy pool")
 	}
 }
 
-// TestCgroupPeakDrivesTheChildReserve: where the cgroup peaked well above what
-// the workers hold, that ground truth — which catches children a per-worker
-// sample misses — sets the reserve, over the per-pool estimate.
-func TestCgroupPeakDrivesTheChildReserve(t *testing.T) {
+// TestPlanNeverCommitsMoreThanBudget is the safety property, restated for the
+// per-worker model: because the child cost is folded into each worker's cost,
+// the allocator's own "allocated <= allocatable" invariant now covers children
+// too — for EVERY workload, whatever redistribution the allocator did. This is
+// what the old host-wide reserve could not guarantee (a pool could be handed
+// more workers whose children were unreserved).
+func TestPlanNeverCommitsMoreThanBudget(t *testing.T) {
+	views := []observe.PoolView{
+		{Name: "web1", ProcessManager: "dynamic", CurrentMaxChildren: 30, MaxChildrenKnown: true, ObservedPeak: 30},
+		{Name: "media", Workload: "subprocess-heavy", ProcessManager: "dynamic", CurrentMaxChildren: 30, MaxChildrenKnown: true, ObservedPeak: 30},
+		{Name: "pdf", Workload: "bursty", ProcessManager: "dynamic", CurrentMaxChildren: 20, MaxChildrenKnown: true, ObservedPeak: 20},
+	}
+	for _, total := range []int64{2 * gb, 4 * gb, 8 * gb, 16 * gb} {
+		res := mustBuild(t, Input{
+			Limits:   budget.Limits{MemoryBytes: total, CPUs: 8, Source: budget.SourceMemInfo},
+			Workload: WorkloadWeb, State: state.New(), Views: views,
+		})
+		allocatable := total - res.Reserve
+		if res.Plan.AllocatedBytes > allocatable {
+			t.Errorf("at %s budget, committed %s to workers-plus-children, over the %s allocatable",
+				budget.HumanBytes(total), budget.HumanBytes(res.Plan.AllocatedBytes), budget.HumanBytes(allocatable))
+		}
+	}
+}
+
+// TestMeasuredChildDrivesSizing: a pool marked web but observed spawning a child
+// is sized for it — the measured per-worker child, already averaged over how
+// many workers ran one at once, folds into each worker's cost.
+func TestMeasuredChildDrivesSizing(t *testing.T) {
 	st := state.New()
 	base := time.Now()
 	for i := 0; i < 6; i++ {
-		st.Learn(busy("app", 90*mb, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+		// Eight workers, two of them each carrying a 600MiB child in this scrape:
+		// child total 1200MiB over 8 workers = 150MiB per worker.
+		workers := make([]state.WorkerSample, 8)
+		for w := range workers {
+			workers[w] = state.WorkerSample{RSSBytes: 90 * mb, SubtreeRSSBytes: 90 * mb, Requests: 500}
+		}
+		workers[0].SubtreeRSSBytes = 690 * mb
+		workers[1].SubtreeRSSBytes = 690 * mb
+		st.Learn(state.Observation{
+			Pool: "app", At: base.Add(time.Duration(i) * 2 * time.Minute), ActiveNow: 8,
+			Accepted: base.Unix() * 100, Workers: workers,
+		}, state.Options{})
 	}
 
-	res, err := Build(Input{
-		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 4, Source: budget.SourceCgroupProcess},
-		Workload: WorkloadWeb,
-		State:    st,
-		Views: []observe.PoolView{{
-			Name: "app", ProcessManager: "dynamic",
-			CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8,
-		}},
-		HasCgroupUsage: true,
-		// Workers hold ~90MiB × 8 = 720MiB; the cgroup peaked at 3GiB, so ~2.3GiB
-		// went to something other than the workers — children.
-		CgroupUsage: budget.CgroupUsage{CurrentBytes: 2 * gb, PeakBytes: 3 * gb},
+	if got := measuredChildPerWorker(st, observe.PoolView{Name: "app"}); got != 150*mb {
+		t.Fatalf("measured child per worker = %s, want 150MiB (1200MiB over 8 workers)", budget.HumanBytes(got))
+	}
+
+	web := mustBuild(t, Input{
+		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		Workload: WorkloadWeb, State: state.New(),
+		Views: []observe.PoolView{{Name: "app", CurrentMaxChildren: 30, MaxChildrenKnown: true, ObservedPeak: 8, ProcessManager: "dynamic"}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if res.ChildReserve < 2*gb {
-		t.Errorf("ChildReserve = %s, want ~2.3GiB from the cgroup high-water beyond the workers",
-			budget.HumanBytes(res.ChildReserve))
+	measured := mustBuild(t, Input{
+		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		Workload: WorkloadWeb, State: st,
+		Views: []observe.PoolView{{Name: "app", CurrentMaxChildren: 30, MaxChildrenKnown: true, ObservedPeak: 8, ProcessManager: "dynamic"}},
+	})
+	if measured.ChildReserve <= web.ChildReserve {
+		t.Errorf("a web pool observed spawning children committed no more to children (%s) than one that never did (%s)",
+			budget.HumanBytes(measured.ChildReserve), budget.HumanBytes(web.ChildReserve))
 	}
 }
 
-// TestPerPoolMarkerOverridesGlobal: on a mixed host, the global default applies
-// to pools that declare nothing, while a pool carrying its own marker is sized
-// by that instead — a web pool beside a subprocess-heavy one, under a global
-// default of web, reserves for children only on the pool that asked for it.
+// TestPerPoolMarkerOverridesGlobal: on a mixed host the global default applies to
+// unmarked pools, and a pool carrying its own marker is sized by that instead.
 func TestPerPoolMarkerOverridesGlobal(t *testing.T) {
-	res, err := Build(Input{
+	res := mustBuild(t, Input{
 		Limits:   budget.Limits{MemoryBytes: 16 * gb, CPUs: 8, Source: budget.SourceMemInfo},
-		Workload: WorkloadWeb, // global default: reserve nothing…
+		Workload: WorkloadWeb,
 		State:    state.New(),
 		Views: []observe.PoolView{
 			{Name: "site", ProcessManager: "dynamic", CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8},
-			// …but this pool declares itself subprocess-heavy.
-			{Name: "transcode", Workload: "subprocess-heavy", ProcessManager: "dynamic", CurrentMaxChildren: 4, MaxChildrenKnown: true, ObservedPeak: 4},
+			{Name: "transcode", Workload: "subprocess-heavy", ProcessManager: "dynamic", CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8},
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
+	// Only the transcode pool commits to children.
+	if res.ChildReserve <= 0 {
+		t.Error("the subprocess-heavy pool committed nothing to children")
 	}
-
-	// Only the transcode pool's declaration reserves: 512MiB × 4 workers.
-	want := int64(512) * mb * 4
-	if res.ChildReserve != want {
-		t.Errorf("ChildReserve = %s, want %s — only the pool that declared subprocess-heavy "+
-			"should reserve, not the web pool beside it", budget.HumanBytes(res.ChildReserve), budget.HumanBytes(want))
+	// The web pool's workers were not inflated: its own cost is unchanged.
+	for _, pp := range res.Plan.Pools {
+		if pp.Name == "site" && pp.WorkerBytes > 64*mb {
+			t.Errorf("the web pool's per-worker cost was inflated to %s; a child cost leaked onto it",
+				budget.HumanBytes(pp.WorkerBytes))
+		}
 	}
 }
 
-// TestUnmarkedPoolFollowsTheGlobalDefault: a pool with no marker of its own is
-// sized by whatever global default the operator chose — so `--workload
-// subprocess-heavy` on an all-media host works without annotating every pool.
-func TestUnmarkedPoolFollowsTheGlobalDefault(t *testing.T) {
-	res, err := Build(Input{
-		Limits:   budget.Limits{MemoryBytes: 16 * gb, CPUs: 8, Source: budget.SourceMemInfo},
-		Workload: WorkloadSubprocessHeavy, // global default applies to the unmarked pool
+// TestUnknownPerPoolMarkerWarns: a typo in a pool's own env[FPM_TUNE_WORKLOAD]
+// must not silently reserve nothing — it surfaces as a plan warning naming the
+// pool, so the operator sees the marker did not take.
+func TestUnknownPerPoolMarkerWarns(t *testing.T) {
+	res := mustBuild(t, Input{
+		Limits:   budget.Limits{MemoryBytes: 8 * gb, CPUs: 8, Source: budget.SourceMemInfo},
+		Workload: WorkloadWeb,
 		State:    state.New(),
 		Views: []observe.PoolView{
-			{Name: "site", ProcessManager: "dynamic", CurrentMaxChildren: 6, MaxChildrenKnown: true, ObservedPeak: 6},
+			{Name: "transcode", Workload: "subprocess_heavy", ProcessManager: "dynamic", CurrentMaxChildren: 8, MaxChildrenKnown: true, ObservedPeak: 8},
 		},
 	})
+	found := false
+	for _, w := range res.Plan.Warnings {
+		if strings.Contains(w, "transcode") && strings.Contains(w, "FPM_TUNE_WORKLOAD") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a typo'd per-pool marker produced no warning; it silently reserved nothing.\nwarnings: %v", res.Plan.Warnings)
+	}
+}
+
+func mustBuild(t *testing.T, in Input) Result {
+	t.Helper()
+	res, err := Build(in)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Build: %v", err)
 	}
-	if res.ChildReserve != int64(512)*mb*6 {
-		t.Errorf("ChildReserve = %s, want the global subprocess-heavy default to apply to an unmarked pool",
-			budget.HumanBytes(res.ChildReserve))
-	}
+
+	return res
 }

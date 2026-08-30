@@ -224,16 +224,14 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 
 			// The children line appears only for a pool that actually spawned
 			// something, so a plain web pool's recommendation is not cluttered
-			// with a zero. Where it does appear, it is the memory this pool costs
-			// beyond its workers — an ffmpeg, an imagemagick — which the per-worker
-			// numbers above do not include and which sizing, today, does not yet
-			// account for. Read it as a warning that the worker numbers understate
-			// this pool.
-			if child := d.ChildBytes(); child > 0 {
-				fmt.Fprintf(&b, ";   spawned children add up to %s at their worst "+
-					"(worker %s, worker+children %s) — NOT yet in the sizing below\n",
-					budget.HumanBytes(child),
-					budget.HumanBytes(d.WorkerHighWater),
+			// with a zero. Where it appears, it is the child memory folded into
+			// each worker's cost below — already averaged over how many workers
+			// ran a child at once — and the worst a single worker's whole
+			// footprint was seen at.
+			if d.ChildPerWorker > 0 {
+				fmt.Fprintf(&b, ";   plus ~%s of children per worker (folded into the "+
+					"sizing; worst single worker+children seen %s)\n",
+					budget.HumanBytes(d.ChildPerWorker),
 					budget.HumanBytes(d.SubtreeHighWater))
 			}
 		}

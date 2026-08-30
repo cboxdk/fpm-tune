@@ -141,6 +141,35 @@ Three things make the measurement honest:
   memory climbs and resets. The peak is the number that has to fit — and PHP-FPM
   resets its own high-water marks on reload, so the peak is remembered here.
 
+## Spawned children
+
+A worker that shells out to an `ffmpeg` or an `imagemagick` starts a separate
+process, with its own memory the worker's RSS does not include. The budget is
+charged for it anyway, so sizing on worker memory alone prices the child at zero
+and overcommits the host the moment the pool gets busy.
+
+fpm-tune measures it — each worker's whole process subtree, and, where the master
+runs under a cgroup, the cgroup's own high-water mark, which catches a child that
+lived and died between two scrapes. That memory is folded into **each worker's
+cost**, so the allocator's guarantee that it never commits more than the budget
+covers children too: a pool that shells out simply gets **fewer** workers, and can
+never make the plan fail.
+
+Measurement is blind on the first run, though, so a pool can declare what it does
+up front — globally, or per pool in its own config:
+
+```bash
+fpm-tune serve --apply --workload subprocess-heavy   # host default
+```
+```ini
+env[FPM_TUNE_WORKLOAD] = subprocess-heavy            # this pool only; wins over the default
+```
+
+The classes are `web` (spawns nothing — the default), `bursty` (a child now and
+then), and `subprocess-heavy` (a child on most requests). The declaration is only
+a floor; once real children are measured, the measurement takes over. See
+[docs: spawned children](docs/how-it-decides/spawned-children.md).
+
 ## The budget
 
 Read from the cgroup of the php-fpm master being managed, walking up and taking
@@ -192,6 +221,11 @@ fpm_tune_rollback_failed_total            # worse: a rejected file is still on d
 fpm_tune_repairs_total                    # it had to undo something a run left behind
 fpm_tune_pools_ambiguous                  # pools NOT published, because two masters
                                           # share their name — see --drop-in-dir
+fpm_tune_pool_child_rss_bytes{pool}       # what a pool's spawned children cost; climbing
+                                          # while worker_rss stays flat means give it a workload
+fpm_tune_cgroup_memory_bytes{state}       # the cgroup's own current/peak usage, children
+                                          # included — compare state="peak" against the budget
+fpm_tune_budget_bytes{state="reserved_children"}   # what was held back for children
 ```
 
 `apply_blocked` is the one people forget. A process that is watching and one

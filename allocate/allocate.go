@@ -38,7 +38,18 @@ type Budget struct {
 
 // Allocatable is the budget actually available to workers.
 func (b Budget) Allocatable() int64 {
-	free := b.TotalBytes - b.ReserveBytes
+	// A negative reserve would make `free` LARGER than the whole budget, and the
+	// terminal `allocated <= allocatable` invariant would then wave through an
+	// over-commit. A reserve is never legitimately negative — only arithmetic
+	// upstream could make it so — so it is clamped here, where the number is
+	// used, rather than trusted. This is what makes "never over budget" hold by
+	// construction instead of by luck of what reached this call.
+	reserve := b.ReserveBytes
+	if reserve < 0 {
+		reserve = 0
+	}
+
+	free := b.TotalBytes - reserve
 	if free < 0 {
 		return 0
 	}

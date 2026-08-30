@@ -83,7 +83,10 @@ func CgroupUsageOf(pid int) (CgroupUsage, bool) {
 		}
 
 		usage := CgroupUsage{CurrentBytes: current}
-		if peak, ok := readBytes(filepath.Join(dir, peakFile)); ok && peak > current {
+		// Reported whenever the file is readable, even if it equals current: a
+		// peak that happens to match the current usage is still a peak the kernel
+		// gave us, and PeakBytes == 0 is reserved for "the kernel offers none".
+		if peak, ok := readBytes(filepath.Join(dir, peakFile)); ok && peak >= current {
 			usage.PeakBytes = peak
 		}
 

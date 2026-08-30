@@ -9,6 +9,7 @@ package plan
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cboxdk/fpm-tune/allocate"
@@ -96,24 +97,13 @@ type PoolDistribution struct {
 	WorstSeen int64
 	Samples   int64
 
-	// WorkerHighWater and SubtreeHighWater are the largest worker ever seen on
-	// its own and with everything it spawned. The gap between them, ChildBytes,
-	// is what the pool's children (an ffmpeg, an imagemagick) cost at their
-	// worst — zero for a plain web pool, large for one doing media work.
-	// SubtreeHighWater is zero until a scrape carried subtree readings.
-	WorkerHighWater  int64
+	// SubtreeHighWater is the largest a single worker's whole footprint — itself
+	// plus everything it spawned — was ever seen. ChildPerWorker is the child
+	// memory sizing adds to each worker: the high-water of a scrape's total child
+	// memory divided by its workers, so it already reflects how many workers ran a
+	// child at once. Both are zero until a child was observed.
 	SubtreeHighWater int64
-}
-
-// ChildBytes is what this pool's spawned children cost at their worst: the gap
-// between the subtree high-water and the worker high-water. Zero when nothing
-// was spawned, or when subtree was never measured.
-func (d PoolDistribution) ChildBytes() int64 {
-	if d.SubtreeHighWater <= d.WorkerHighWater {
-		return 0
-	}
-
-	return d.SubtreeHighWater - d.WorkerHighWater
+	ChildPerWorker   int64
 }
 
 // Result is a plan plus the reasoning that produced it.
@@ -125,10 +115,12 @@ type Result struct {
 	Reserve       int64
 	ReserveReason string
 
-	// ChildReserve is what was held back, on top of the system reserve, for the
-	// processes pool workers spawn — an ffmpeg, an imagemagick — and why. Zero on
-	// a host whose pools spawn nothing. It is additive: it only ever reduces what
-	// workers are given, so it cannot make a host more overcommitted than it was.
+	// ChildReserve is the memory this plan committed to the processes pool
+	// workers spawn — the sum over pools of each pool's per-worker child cost
+	// times the workers it was given. It is not held back as a separate reserve;
+	// it is folded into each worker's cost, so the allocator's own budget
+	// invariant already covers it. Zero on a host whose pools spawn nothing.
+	// Reporting only.
 	ChildReserve       int64
 	ChildReserveReason string
 
@@ -201,6 +193,15 @@ func Build(in Input) (Result, error) {
 	// old record.
 	ambiguous := ambiguousNames(in.Views)
 
+	// The child cost is folded into each pool's per-worker cost, not held back as
+	// a host-wide reserve. That is what keeps it safe: the allocator sizes every
+	// pool by dividing the budget by a bounded per-worker cost, so a worker that
+	// also runs an ffmpeg simply costs more and the pool is given fewer of them —
+	// the cost scales with the workers actually planned, the allocator's own
+	// bounds cap it, and accounting for children can never turn into "no plan at
+	// all". A single number set aside up front had none of those properties.
+	childPerWorker := map[string]int64{}
+	var badMarkers []string
 	pools := make([]allocate.Pool, 0, len(in.Views))
 	for _, view := range in.Views {
 		if view.Err != nil {
@@ -211,27 +212,50 @@ func Build(in Input) (Result, error) {
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
+
+		workload, known := WorkloadByName(view.Workload, in.Workload)
+		if !known {
+			// A typo in a pool's own marker silently reserving nothing is the
+			// exact OOM this feature exists to prevent, so it is surfaced rather
+			// than swallowed — the flag path already warns, and the per-pool path
+			// is the recommended one.
+			badMarkers = append(badMarkers, fmt.Sprintf("%s (%q)", view.Name, view.Workload))
+		}
+		if child := childCostPerWorker(workload, measuredChildPerWorker(in.State, view)); child > 0 && pool.WorkerBytes > 0 {
+			childPerWorker[view.Name] = child
+			pool.WorkerBytes += child
+		}
+
 		pools = append(pools, pool)
 	}
 
 	sort.Strings(result.Bootstrapped)
 	sort.Strings(result.Unreachable)
 
-	// The child reserve is held back on TOP of the system reserve, before the
-	// workers are sized against what is left. It is additive by construction, so
-	// it can only ever produce fewer workers — never more — and cannot make a
-	// host more overcommitted than it already was.
-	childReserve, childReason := childReserveFor(in.Views, in.State, pools, in.Workload, in.CgroupUsage, in.HasCgroupUsage)
-	result.ChildReserve = childReserve
-	result.ChildReserveReason = childReason
-
 	allocation, err := allocate.Compute(allocate.Budget{
 		TotalBytes:   in.Limits.MemoryBytes,
-		ReserveBytes: reserve + childReserve,
+		ReserveBytes: reserve,
 		CPUs:         in.Limits.CPUs,
 	}, pools, in.AllocateOptions)
 	if err != nil {
 		return result, err
+	}
+
+	// What the plan actually committed to children: the per-worker child cost of
+	// each pool times the workers it was given. Reporting only.
+	for _, pp := range allocation.Pools {
+		if c := childPerWorker[pp.Name]; c > 0 {
+			result.ChildReserve += c * int64(pp.MaxChildren)
+		}
+	}
+	if result.ChildReserve > 0 {
+		result.ChildReserveReason = "folded into each worker's cost, sized to the workers planned"
+	}
+	if len(badMarkers) > 0 {
+		sort.Strings(badMarkers)
+		allocation.Warnings = append(allocation.Warnings, fmt.Sprintf(
+			"unknown env[FPM_TUNE_WORKLOAD] on %s — reserving nothing for their children; "+
+				"known values are %s", strings.Join(badMarkers, ", "), KnownWorkloads))
 	}
 
 	result.Plan = allocation
@@ -294,8 +318,8 @@ func distributionOf(views []observe.PoolView, st *state.State) []PoolDistributio
 			WorstSeen: ps.Percentile(1),
 			Samples:   ps.RSSSamples,
 
-			WorkerHighWater:  ps.HighWaterBytes,
 			SubtreeHighWater: ps.SubtreeHighWaterBytes,
+			ChildPerWorker:   ps.ChildPerWorkerHighWaterBytes,
 		})
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Name < out[b].Name })
