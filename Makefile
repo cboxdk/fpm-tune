@@ -1,4 +1,4 @@
-.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
+.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check sbom sbom-check mutations
 
 help:
 	@grep -E '^[a-z0-9-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -64,6 +64,24 @@ integration: e2e chaos ## Both suites against a real php-fpm
 
 mutations: ## Remove each safety guard in turn; the suite must fail every time
 	python3 testing/mutations.py
+
+# A CycloneDX bill of materials for the dependency tree, written to sbom.json.
+#
+# Deterministic on purpose: the serial number is omitted and the timestamp and
+# generator are stripped, so the file changes only when the DEPENDENCIES change,
+# never merely because it was regenerated. That is what lets sbom-check below
+# fail a build whose committed SBOM has drifted from go.mod.
+SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | 	jq 'del(.metadata.timestamp) | del(.metadata.tools)'
+
+sbom: ## Regenerate the CycloneDX SBOM (needs cyclonedx-gomod and jq)
+	@command -v cyclonedx-gomod >/dev/null || { echo "install: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest"; exit 1; }
+	$(SBOM_GEN) > sbom.json
+
+sbom-check: ## Fail if the committed SBOM is stale (CI)
+	@command -v cyclonedx-gomod >/dev/null || { echo "install: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest"; exit 1; }
+	$(SBOM_GEN) > /tmp/sbom-fresh.json
+	@diff -u sbom.json /tmp/sbom-fresh.json || { echo "sbom.json is stale; run 'make sbom' and commit it"; exit 1; }
+	@echo "SBOM matches go.mod"
 
 # Deliberately NOT called "everything CI runs", which it said until this comment
 # was written and was not true: CI also drives e2e.sh and chaos.sh against a real

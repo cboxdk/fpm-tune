@@ -93,6 +93,28 @@ jobs:
       - name: Run govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  sbom:
+    name: SBOM is current
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The committed sbom.json must match what go.mod produces, so a
+      # dependency added without regenerating it fails here rather than shipping
+      # a bill of materials that lies about what is inside.
+      - name: Check the SBOM is not stale
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          make sbom-check
+
   # The unit tests stand php-fpm in with `true` and `false`, which tests the
   # decision logic and nothing about the part that can take a host down. This
   # job runs the real binary: a real master, a real `php-fpm -t`, a real
