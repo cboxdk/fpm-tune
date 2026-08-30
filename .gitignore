@@ -7,6 +7,10 @@
 coverage.out
 coverage.html
 
+# Python bytecode (scripts/)
+__pycache__/
+*.pyc
+
 # Build output
 /build/
 /dist/
