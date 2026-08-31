@@ -109,6 +109,7 @@ type commonFlags struct {
 	memory      *string
 	reserve     *string
 	workload    *string
+	sizing      *string
 	timeout     *time.Duration
 	verbose     *bool
 	noLearn     *bool
@@ -140,6 +141,10 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 			"processes workers spawn: web (spawn nothing — the default), bursty (a child now and then), "+
 			"subprocess-heavy (a child on most requests, e.g. ffmpeg). A pool overrides this with "+
 			"env[FPM_TUNE_WORKLOAD] in its own config. Measurement refines it once a baseline exists."),
+		sizing: fs.String("sizing", "peak", "per-worker cost basis: `peak` (the default — follows the sawtooth top, "+
+			"reacts to a memory increase in one scrape, safe on deploys) or a percentile like `p95` "+
+			"(less conservative, fits more workers on a stable pool, but reacts to an increase only as "+
+			"the distribution shifts — so it can under-size through a deploy)"),
 		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
 		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
@@ -272,9 +277,14 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 
 	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 
+	sizing, err := parseSizing(*c.sizing)
+	if err != nil {
+		return plan.Result{}, nil, err
+	}
 	stateOpts := state.Options{
 		ConfidenceSamples: *c.confSamples,
 		ConfidenceSpan:    *c.confSpan,
+		Sizing:            sizing,
 	}
 	// One clock for the round. Learning and planning both move time-based state,
 	// and two calls to time.Now() a few hundred milliseconds apart is two
@@ -911,6 +921,28 @@ func parseReserve(raw string) (bytes int64, fraction float64, err error) {
 	return b, 0, nil
 }
 
+// defaultSizingMargin is the cushion added above a chosen percentile, so a pool
+// sized on p95 is not sized at exactly p95.
+const defaultSizingMargin = 0.10
+
+// parseSizing reads the --sizing value: "peak" (the peak-follower default) or a
+// percentile — "p95", "p99", or a bare number like 95 — which sizes on that
+// percentile of the worker RSS distribution plus a small margin.
+func parseSizing(raw string) (state.Sizing, error) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" || s == "peak" {
+		return state.Sizing{}, nil
+	}
+
+	pct, err := strconv.ParseFloat(strings.TrimPrefix(s, "p"), 64)
+	if err != nil || pct < 50 || pct > 100 {
+		return state.Sizing{}, fmt.Errorf("--sizing must be `peak` or a percentile between 50 and "+
+			"100 (e.g. p95), got %q", raw)
+	}
+
+	return state.Sizing{Percentile: pct / 100, Margin: defaultSizingMargin}, nil
+}
+
 func parseBytes(raw string) (int64, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -1031,6 +1063,11 @@ func runServe(args []string) error {
 		}
 	}
 
+	sizing, err := parseSizing(*c.sizing)
+	if err != nil {
+		return err
+	}
+
 	loop, err := serve.New(serve.Config{
 		Interval:      *interval,
 		StatePath:     *c.statePath,
@@ -1055,6 +1092,7 @@ func runServe(args []string) error {
 		StateOptions: state.Options{
 			ConfidenceSamples: *c.confSamples,
 			ConfidenceSpan:    *c.confSpan,
+			Sizing:            sizing,
 		},
 	}, log)
 	if err != nil {

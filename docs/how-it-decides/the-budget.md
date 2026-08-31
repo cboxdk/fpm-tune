@@ -82,9 +82,31 @@ host memory 7.5GiB, 4 CPU(s) (via /proc/meminfo)
 
 It sizes against what those services use **now**. A service still warming up —
 MySQL's InnoDB buffer pool filling toward its configured maximum — will use more
-later, so on a shared VM the honest hard guarantee is still a cgroup cap on php-fpm
-(`systemd MemoryMax=`) or an explicit `--reserve`. The good-neighbour reserve is the
-safe default; a cap is the promise.
+later, so on a shared VM the honest hard guarantee is still a cgroup cap on php-fpm.
+The good-neighbour reserve is the safe default; a cap is the promise.
+
+## Guaranteeing php-fpm a slice (the hard limit)
+
+If php-fpm and its neighbours genuinely compete for the memory — the shared VM
+where `plan` reports `CAPACITY EXHAUSTED` — the clean answer is to give php-fpm its
+own cgroup, so neither can starve the other and neither can OOM the host. On
+systemd, cap the php-fpm service:
+
+```bash
+sudo systemctl edit php8.4-fpm      # (or php-fpm, php8.3-fpm, …)
+```
+```ini
+[Service]
+MemoryMax=3G
+```
+```bash
+sudo systemctl restart php8.4-fpm
+```
+
+Now `fpm-tune plan` reads `via php-fpm's cgroup` and sizes to that 3GiB — a stable
+budget that does not move when MySQL does, and one MySQL cannot cross either. This
+is the recommended shape for any host where php-fpm is not the only tenant; the
+good-neighbour default is what runs until you set it.
 
 ## Overriding it
 

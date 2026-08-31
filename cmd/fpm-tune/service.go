@@ -312,6 +312,12 @@ metrics = %s
 # is the pulse in between. 0 disables it (metrics stay the continuous view).
 # heartbeat = 30m
 
+# Per-worker cost basis. "peak" (default) follows the sawtooth top and reacts to a
+# memory increase in one scrape — safe on deploys. A percentile like "p95" is less
+# conservative (fits more workers on a stable pool) but reacts to an increase only
+# as the distribution shifts. Per-host choice for a workload you understand.
+# sizing = peak
+
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
 # drop-in-dir =

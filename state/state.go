@@ -399,6 +399,10 @@ type Options struct {
 	// the peak is forgotten between busy periods and the pool is cut just before
 	// it needs the workers.
 	PeakWindow time.Duration
+
+	// Sizing selects the per-worker cost basis: the peak-follower by default, or a
+	// percentile of the worker RSS distribution when the operator asks for one.
+	Sizing Sizing
 }
 
 // Defaults fills in any unset option.
@@ -1135,6 +1139,40 @@ func (ps *PoolState) SizingBytes() int64 {
 	}
 
 	return size
+}
+
+// Sizing selects the per-worker cost basis. The zero value — Percentile 0 — is the
+// peak-follower (SizingBytes), the safe default. A positive Percentile sizes on that
+// percentile of the worker RSS distribution times (1+Margin) instead: less
+// conservative, and the operator's to choose per host.
+type Sizing struct {
+	Percentile float64
+	Margin     float64
+}
+
+// SizingBytesAt sizes on a percentile of the worker RSS distribution plus a margin,
+// rather than the peak-follower — the operator's less-conservative alternative, for
+// a host whose workload they know to be stable.
+//
+// The trade-off is real and the opposite of SizingBytes's: a percentile of a
+// decaying histogram reacts SLOWLY to a sudden increase — a deploy that raises every
+// worker's memory shows in the peak-follower in one scrape but shifts the percentile
+// only as the old readings decay — so this can under-size through a deploy in a way
+// the peak-follower does not. The margin is the cushion; the daemon re-evaluates
+// each round; and a genuinely stable pool is exactly where the peak-follower's
+// upward bias is wasted headroom.
+//
+// Falls back to the peak-follower until the distribution has a reading, so a cold
+// pool is never sized at zero.
+func (ps *PoolState) SizingBytesAt(percentile, margin float64) int64 {
+	if ps == nil {
+		return 0
+	}
+	if p := ps.Percentile(percentile); p > 0 {
+		return int64(float64(p) * (1 + margin))
+	}
+
+	return ps.SizingBytes()
 }
 
 // Confidence is how far a pool's baseline can be trusted, from 0 to 1.

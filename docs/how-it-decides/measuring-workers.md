@@ -104,3 +104,19 @@ what has been seen, kept deliberately apart from what the tool decides to
 reserve, and it forgets: an all-time histogram of a pool redeployed six months
 ago describes an application that no longer exists, so it fades as new readings
 arrive.
+
+## Choosing the sizing basis
+
+By default the sizing number is the peak-follower above: it follows the top of the
+sawtooth and reacts to a memory increase on the first scrape, which is what makes
+it safe through a deploy that raises what every worker costs.
+
+On a pool you know to be stable, that upward bias is wasted headroom. `--sizing
+p95` (or `p99`, or any percentile) sizes on that percentile of the distribution
+instead, plus a small margin — less conservative, fitting more workers where a few
+rare spikes were pulling the peak-follower up. The trade-off is the mirror of the
+default's: a percentile of the (decaying) histogram reacts *slowly* to a real
+increase, so on a deploy it can under-size until the distribution catches up. The
+margin is the cushion and the daemon re-evaluates each round — but `peak` is the
+safe default, and `p95` is a deliberate per-host choice for a workload you
+understand. In the service config it is the `sizing` key.

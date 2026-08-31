@@ -475,8 +475,19 @@ func poolFor(
 	// not been watched through a real traffic pattern is no basis for taking
 	// workers away, so until it has, the floor holds at what the pool is
 	// configured for and the first run can only ever help.
-	if ps != nil && ps.SizingBytes() > 0 {
-		measured := ps.SizingBytes()
+	// The peak-follower by default; a percentile of the distribution when the
+	// operator has chosen the less-conservative basis for this host.
+	var sized int64
+	if ps != nil {
+		if opts.Sizing.Percentile > 0 {
+			sized = ps.SizingBytesAt(opts.Sizing.Percentile, opts.Sizing.Margin)
+		} else {
+			sized = ps.SizingBytes()
+		}
+	}
+
+	if ps != nil && sized > 0 {
+		measured := sized
 
 		// An unproven measurement may RAISE the cost, never lower it below the
 		// profile's guess.
