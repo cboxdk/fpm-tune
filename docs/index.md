@@ -1,7 +1,7 @@
 ---
 title: fpm-tune
 weight: 0
-description: Right-sizes pm.max_children across every PHP-FPM pool on a host, from what the workers actually cost, so you stop guessing and stop OOMing.
+description: Sizes pm.max_children across every PHP-FPM pool on a host, from what the workers actually cost, so the right number isn't a guess you find out the hard way.
 ---
 
 # fpm-tune
@@ -127,7 +127,7 @@ rolls back if the master doesn't come back. The [safety model](safety/_index.md)
 worth two minutes before you trust `--apply`.
 
 **It's beta.** Run it advisory-first and read what it recommends before you let it
-write. It's not the first or only PHP-FPM tuner, and won't pretend to be.
+write.
 
 ## Start here
 
