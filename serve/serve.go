@@ -161,6 +161,11 @@ type Loop struct {
 	// so it is reported the first time it is seen, whenever it moves, and, as a sign
 	// of life, again after HeartbeatEvery even when it has not.
 	lastRec map[string]rec
+
+	// lastAdvice is the mode suggestion last logged per pool, so a standing "this
+	// pool might fit better as X" is said once, not re-logged every round or on the
+	// heartbeat — a nudge, not a nag. Keyed by pool, valued by the suggested mode.
+	lastAdvice map[string]string
 }
 
 // rec is a logged recommendation and when it was logged.
@@ -471,6 +476,39 @@ func (l *Loop) logPlan(result plan.Result, now time.Time) {
 			"recommend", pp.MaxChildren,
 			"why", pp.Reason,
 		)
+	}
+
+	l.logAdvice(result)
+}
+
+// logAdvice reports a mode suggestion once per pool, and again only if the
+// suggestion changes. fpm-tune never writes pm itself, so this is a hint the
+// operator can act on by hand — worth surfacing, not worth repeating.
+func (l *Loop) logAdvice(result plan.Result) {
+	if l.lastAdvice == nil {
+		l.lastAdvice = make(map[string]string, len(result.Advice))
+	}
+
+	current := make(map[string]bool, len(result.Advice))
+	for _, a := range result.Advice {
+		current[a.Pool] = true
+		if l.lastAdvice[a.Pool] == a.To {
+			continue
+		}
+		l.lastAdvice[a.Pool] = a.To
+		l.log.Info("Mode suggestion",
+			"pool", a.Pool,
+			"mode", a.From,
+			"consider", a.To,
+			"why", a.Why,
+		)
+	}
+	// Forget pools whose suggestion has cleared, so if it recurs it is logged
+	// again rather than silently suppressed by a stale entry.
+	for pool := range l.lastAdvice {
+		if !current[pool] {
+			delete(l.lastAdvice, pool)
+		}
 	}
 }
 

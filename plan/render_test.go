@@ -47,6 +47,48 @@ func TestAPoolThatWillNotBeWrittenDoesNotShowAPlan(t *testing.T) {
 	t.Fatalf("the pool is missing from the table entirely:\n%s", b.String())
 }
 
+// TestRenderShowsModeAndAdvice: the plan table carries each pool's pm mode (so
+// the number reads in context), and a mode suggestion prints as its own advisory
+// line — clearly marked as something fpm-tune will NOT do on its own.
+func TestRenderShowsModeAndAdvice(t *testing.T) {
+	var b strings.Builder
+	err := Result{
+		Budget: budget.Limits{MemoryBytes: 4 * gb, Source: budget.SourceMemInfo},
+		Plan: allocate.Plan{
+			TotalBytes: 4 * gb,
+			Pools: []allocate.PoolPlan{
+				{Name: "shop", MaxChildren: 30, Current: 30, Bytes: 3 * gb},
+			},
+		},
+		Views: []observe.PoolView{
+			{Name: "shop", ProcessManager: "static"},
+		},
+		Advice: []ModeAdvice{
+			{Pool: "shop", From: "static", To: "dynamic", Why: "static keeps all 30 workers resident; the busiest moment used 8."},
+		},
+	}.Render(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+
+	if !strings.Contains(out, "MODE") {
+		t.Errorf("plan table has no MODE column:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "shop") && !strings.Contains(line, "static") {
+			t.Errorf("the shop row does not show its mode:\n%s", line)
+		}
+	}
+	if !strings.Contains(out, "static → dynamic") {
+		t.Errorf("the mode suggestion is missing from the output:\n%s", out)
+	}
+	// The suggestion must read as advisory, never as something it applies.
+	if !strings.Contains(out, "won't change it") {
+		t.Errorf("the suggestion is not clearly marked advisory:\n%s", out)
+	}
+}
+
 // TestTheWorstCaseIsReportedButNotSizedTo.
 //
 // A pool with a rare 700MiB export endpoint and a 90MiB typical cost is sized at

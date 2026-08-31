@@ -40,8 +40,16 @@ func (r Result) Render(w io.Writer) error {
 		return err
 	}
 
+	// Mode per pool, so the number reads in context: pm.max_children means a
+	// different thing for a static pool (the running worker count) than for an
+	// ondemand one (a ceiling it spawns up to).
+	modeOf := make(map[string]string, len(r.Views))
+	for _, v := range r.Views {
+		modeOf[v.Name] = v.ProcessManager
+	}
+
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "POOL\tNOW\tPLAN\tMEMORY\tWHY")
+	_, _ = fmt.Fprintln(tw, "POOL\tMODE\tNOW\tPLAN\tMEMORY\tWHY")
 
 	// Sorted by name so two runs against the same host are diffable.
 	ordered := make([]int, len(r.Plan.Pools))
@@ -74,8 +82,13 @@ func (r Result) Render(w io.Writer) error {
 			size = "—"
 		}
 
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.Name, now, size, budget.HumanBytes(p.Bytes), p.Reason)
+		mode := modeOf[p.Name]
+		if mode == "" {
+			mode = "?"
+		}
+
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.Name, mode, now, size, budget.HumanBytes(p.Bytes), p.Reason)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -147,6 +160,16 @@ func (r Result) Render(w io.Writer) error {
 			"cost the cheapest of them. No configuration change will help; this host\n"+
 			"needs more memory, or fewer sites.\n",
 			budget.HumanBytes(r.Plan.FreeBytes), budget.HumanBytes(r.Plan.ShortfallBytes))
+	}
+
+	// Advisory, and last, because it changes nothing: a mode fits a workload or
+	// it doesn't, and fpm-tune only ever sizes within the mode you chose.
+	if len(r.Advice) > 0 {
+		fmt.Fprintf(&b, "\nWorth a look — the mode these pools run may not fit their workload\n"+
+			"(fpm-tune won't change it; that's your call):\n")
+		for _, a := range r.Advice {
+			fmt.Fprintf(&b, "  %s (%s → %s): %s\n", a.Pool, a.From, a.To, a.Why)
+		}
 	}
 
 	_, err := io.WriteString(w, b.String())

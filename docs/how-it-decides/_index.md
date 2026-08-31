@@ -28,6 +28,9 @@ Read it in order:
    first; and what it does when the floors themselves do not fit.
 5. **[Hysteresis](hysteresis.md)** — when a change is worth a reload and when it
    is not, and why growing and shrinking are not held to the same caution.
+6. **[Static, dynamic, ondemand](process-managers.md)** — what it does with each
+   `pm` mode, why it sizes within the mode rather than changing it, and the one
+   suggestion it will make when a mode doesn't fit the workload.
 
 The allocator ([dividing the budget](dividing-the-budget.md)) is pure
 computation with no I/O and no dependencies, which is what makes it exhaustively

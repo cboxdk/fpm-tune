@@ -17,9 +17,20 @@ each get 8 GB — they're all fighting over the *same* 8 GB. And their workers d
 cost the same: your shop's workers might sit at 180 MB while the marketing blog's
 sit at 40 MB. One static number can't be right for all of them.
 
-**That's the problem fpm-tune solves.** It watches what each pool's workers really
-cost, divides the one pile of RAM between them, and — if you let it — writes the
-`pm.max_children` back and reloads. It's beta; more on that below.
+And most of us never really tuned this. We copied a number, ran a calculator, or
+bumped it when the server felt slow — and that worked *surprisingly* well, because
+the easy fix was always to throw more RAM at the box and leave headroom. But headroom
+you pay for and don't use isn't free. You don't need to squeeze out every last
+megabyte; you do want to balance three things at once: **better use** of the machine
+you already pay for, **stability** you can predict, and **enough capacity** for when
+the apps actually need it. Lean too conservative and you rent RAM to sit idle while
+requests queue for a worker; too aggressive and you get swapping, latency spikes, or
+an OOM; too static and today's right answer is next week's wrong one.
+
+**That's what fpm-tune is for.** It watches what each pool's workers really cost,
+divides the one pile of RAM between them — keeping a deliberate safety margin — and,
+if you let it, writes the `pm.max_children` back and reloads. It's beta; more on that
+below.
 
 ## The one distinction to get
 
@@ -59,7 +70,9 @@ doesn't move with any of that.
 
 **Rely on PHP-FPM's `dynamic`/`ondemand`?** Please do — keep it on. But it still
 operates *underneath* `pm.max_children`. If that ceiling is wrong, FPM is very
-efficiently managing workers inside the wrong box.
+efficiently managing workers inside the wrong box. (fpm-tune sizes the box for all
+three modes, and won't touch which one you picked —
+[here's how it handles each](how-it-decides/process-managers.md).)
 
 **fpm-tune moves the box.** It watches what's actually happening and adjusts the
 limits around the real workload.

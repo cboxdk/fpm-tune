@@ -8,8 +8,15 @@ so ~80 workers.* Fine for one app. It falls apart when a box runs 10, 50 or 100
 pools, all fighting over the **same** 8 GB with workers that don't cost the same. One
 static number can't be right for all of them.
 
+Most of us just guess — copy a number, run a calculator, bump it when the box feels
+slow — and honestly that worked fine while the cheap fix was always *more RAM*. But
+headroom you pay for and don't use isn't free. The goal isn't to squeeze out every
+last megabyte; it's to balance three things at once: using the box you already pay
+for, staying stable, and keeping workers free for when traffic actually shows up.
+
 fpm-tune watches what each pool's workers really cost, divides the one pile of RAM
-between them, and — if you let it — writes the settings back and reloads php-fpm.
+between them — keeping a deliberate safety margin — and, if you let it, writes the
+settings back and reloads php-fpm.
 
 ## The one distinction to get
 

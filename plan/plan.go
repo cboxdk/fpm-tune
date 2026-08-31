@@ -178,6 +178,11 @@ type Result struct {
 	// current setting beside the proposed one. A plan that shows only the new
 	// number gives an operator nothing to judge it against.
 	Views []observe.PoolView
+
+	// Advice is mode suggestions: pools whose measured shape points toward a
+	// different pm mode than the one they run. Advisory only — fpm-tune sizes
+	// within the chosen mode and never writes pm itself. Usually empty.
+	Advice []ModeAdvice
 }
 
 // Build produces an allocation from what is known.
@@ -290,6 +295,7 @@ func Build(in Input) (Result, error) {
 	result.Views = in.Views
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
+	result.Advice = adviceFor(in.Views, in.State, allocation)
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage
 	for name := range ambiguous {
@@ -351,6 +357,58 @@ func distributionOf(views []observe.PoolView, st *state.State) []PoolDistributio
 		})
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Name < out[b].Name })
+
+	return out
+}
+
+// adviceFor collects the mode suggestions for a plan, joining what was observed
+// (mode, ceiling, peak concurrency, queue) with the resulting per-pool plan
+// (measured cost, whether demand went unmet). Ambiguous pools — two masters
+// sharing a name — are skipped, because nothing keyed on the name alone can
+// attribute their numbers.
+func adviceFor(views []observe.PoolView, st *state.State, p allocate.Plan) []ModeAdvice {
+	plans := make(map[string]allocate.PoolPlan, len(p.Pools))
+	for _, pp := range p.Pools {
+		plans[pp.Name] = pp
+	}
+	dup := ambiguousNames(views)
+
+	var out []ModeAdvice
+	for _, v := range views {
+		if dup[v.Name] || v.Err != nil {
+			continue
+		}
+		pp, ok := plans[v.Name]
+		if !ok || pp.Unknown {
+			continue
+		}
+
+		// The busiest concurrency we can stand behind: FPM's since-start peak
+		// resets on a master restart, so a remembered peak that survived one is
+		// the safer of the two.
+		peak := v.ObservedPeak
+		if st != nil {
+			if ps := st.Lookup(v.Target.ConfigPath, v.Name); ps != nil && ps.PeakWorkers > peak {
+				peak = ps.PeakWorkers
+			}
+		}
+
+		advice, ok := adviseMode(adviceInput{
+			Pool:        v.Name,
+			Mode:        v.ProcessManager,
+			Current:     v.CurrentMaxChildren,
+			Peak:        peak,
+			MaxKnown:    v.MaxChildrenKnown,
+			Measured:    pp.Measured,
+			Queue:       v.QueueDepth,
+			DemandUnmet: pp.DemandUnmet,
+			WorkerBytes: pp.WorkerBytes,
+		})
+		if ok {
+			out = append(out, advice)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Pool < out[b].Pool })
 
 	return out
 }
