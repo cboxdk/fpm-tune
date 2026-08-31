@@ -1,7 +1,7 @@
 ---
 title: How it decides
 weight: 20
-description: The budget, the learner, the allocator, and when it moves versus holds — the part worth reading before you trust it.
+description: The budget, the learner, the allocator, and when it moves versus holds, the part to read before you trust it.
 ---
 
 # How it decides
@@ -13,27 +13,27 @@ way that only shows up under load.
 
 Read it in order:
 
-1. **[The budget](the-budget.md)** — where the number it divides comes from, and
+1. **[The budget](the-budget.md)**: where the number it divides comes from, and
    why reading the machine's memory is the wrong answer on a VM.
-2. **[Measuring workers](measuring-workers.md)** — the learner: how it decides
+2. **[Measuring workers](measuring-workers.md)**: the learner: how it decides
    what one worker costs, why it separates "what it costs" from "may I shrink
    it", and why it will believe an expensive reading instantly but a cheap one
    only slowly.
-3. **[Spawned children](spawned-children.md)** — the memory a worker's own RSS
+3. **[Spawned children](spawned-children.md)**: the memory a worker's own RSS
    does not include: the ffmpeg it shelled out to. How that is measured, why the
    cgroup is the ground truth where there is one, and how a workload declaration
    keeps a media pool safe on the run before it has been measured.
-4. **[Dividing the budget](dividing-the-budget.md)** — the allocator: floors
+4. **[Dividing the budget](dividing-the-budget.md)**: the allocator: floors
    first, then demand to the pools a shortage is actually hurting, cheapest fix
    first; and what it does when the floors themselves do not fit.
-5. **[Hysteresis](hysteresis.md)** — when a change is worth a reload and when it
+5. **[Hysteresis](hysteresis.md)**: when a change is worth a reload and when it
    is not, and why growing and shrinking are not held to the same caution.
-6. **[Static, dynamic, ondemand](process-managers.md)** — what it does with each
+6. **[Static, dynamic, ondemand](process-managers.md)**: what it does with each
    `pm` mode, why it sizes within the mode rather than changing it, and the one
    suggestion it will make when a mode doesn't fit the workload.
 
 The allocator ([dividing the budget](dividing-the-budget.md)) is pure
 computation with no I/O and no dependencies, which is what makes it exhaustively
-testable — a randomised sweep over hundreds of thousands of generated plans
+testable. A randomised sweep over hundreds of thousands of generated plans
 checks the one invariant that matters: a plan never commits more memory than the
 budget.

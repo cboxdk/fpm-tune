@@ -1,7 +1,7 @@
 ---
 title: Installation
 weight: 1
-description: Install script, Homebrew, or from source — and how to verify what you got.
+description: Install script, Homebrew, or from source, and how to verify what you got.
 ---
 
 # Installation
@@ -18,11 +18,11 @@ curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | s
 It detects your platform, downloads the matching release, **verifies the SHA-256
 checksum and refuses to install on a mismatch**, and places the binary in the first
 writable directory on your `PATH`. When `cosign` is present it also verifies the
-release's Sigstore signature, and says plainly when it is not — see
+release's Sigstore signature, and says plainly when it is not. See
 [Verifying a release](#verifying-a-release).
 
 It never invokes `sudo`. If the target directory is not writable it prints the exact
-command to run instead — a tool that silently escalates is one you cannot reason about.
+command to run instead. A tool that silently escalates is one you cannot reason about.
 
 Overrides:
 
@@ -68,13 +68,13 @@ sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 Substitute the tag you actually downloaded for `v0.1.0-beta.3`. And **pin
-`--certificate-identity`**: without it, cosign accepts any valid Sigstore signature —
+`--certificate-identity`**: without it, cosign accepts any valid Sigstore signature,
 including one made by someone else entirely. The identity is what ties the signature
 to this repository's release workflow at that tag.
 
-Or, without leaving Python and without a binary from another project's releases —
-every fpm-tune release is signed into this bundle format from the first one, so this
-works for all of them:
+Or, without leaving Python and without a binary from another project's releases
+(every fpm-tune release is signed into this bundle format from the first one, so this
+works for all of them):
 
 ```bash
 pipx install sigstore     # or: pip install sigstore
@@ -109,7 +109,7 @@ darwin, where the sizing logic runs but the host-reading does not).
 
 ## Where it lives on a host
 
-- **The binary** goes wherever you keep operational tools — `/usr/local/bin` is
+- **The binary** goes wherever you keep operational tools. `/usr/local/bin` is
   conventional.
 - **`/var/lib/fpm-tune`** holds the learned baselines (`state.json`) and, while a
   change is in flight, the previous configuration, the recovery record, and a
@@ -122,7 +122,7 @@ darwin, where the sizing logic runs but the host-reading does not).
 
 ## As a systemd service
 
-You do not have to write a unit — one command installs and starts it:
+You do not have to write a unit. One command installs and starts it:
 
 ```bash
 sudo fpm-tune install-service          # advisory: watch and recommend, change nothing
@@ -140,8 +140,8 @@ sudo fpm-tune mode advisory    # back to watch-only
 
 See [Running as a daemon](../operating/running-as-a-daemon.md) for the recommended
 adoption path (advisory first, then `apply`). The unit it writes binds php-fpm with
-`Wants=`, not `Requires=` — a supervisor that dies with the thing it supervises
-cannot repair it — and lets systemd own `/var/lib/fpm-tune` with sensible
+`Wants=`, not `Requires=` (a supervisor that dies with the thing it supervises
+cannot repair it) and lets systemd own `/var/lib/fpm-tune` with sensible
 permissions. To see or adapt it, `fpm-tune install-service --print`.
 
 ## Checking it runs
@@ -152,7 +152,7 @@ fpm-tune plan       # reads the host, writes nothing
 ```
 
 If `plan` reports no pools found, either no php-fpm master is running or the tool
-cannot see it — discovery reads the process table, and inspecting another user's
+cannot see it. Discovery reads the process table, and inspecting another user's
 processes needs root. The error says which.
 
 ## Hand this to an agent
@@ -165,7 +165,7 @@ configuration, so a human reads the recommendation before anything is applied.
 # Task: install fpm-tune and show what it would recommend
 
 fpm-tune is a single static binary. It reads a host's memory budget and the real
-per-worker RSS of every php-fpm pool, and sizes `pm.max_children` to fit — reloading
+per-worker RSS of every php-fpm pool, and sizes `pm.max_children` to fit, reloading
 php-fpm, never restarting it. No runtime dependency beyond php-fpm itself.
 
 ## Install
@@ -177,7 +177,7 @@ curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | s
 The installer verifies the release checksum and refuses to install on a mismatch. On
 macOS, `brew install cboxdk/tap/fpm-tune` is equivalent.
 
-## Show the recommendation — read-only
+## Show the recommendation (read-only)
 
 ```bash
 fpm-tune version
@@ -186,12 +186,12 @@ fpm-tune plan
 
 `plan` reads the process table and each pool's status and prints what it would set,
 with the reasoning. **It writes nothing.** If it reports no pools, either no php-fpm
-master is running or discovery cannot see it without root — the error says which.
+master is running or discovery cannot see it without root. The error says which.
 
 ## Do not
 
 - **Do not pass `--apply`.** That writes a drop-in and reloads php-fpm. It is a
-  deliberate, human-reviewed step, not something to run unprompted — read what `plan`
+  deliberate, human-reviewed step, not something to run unprompted. Read what `plan`
   recommends first.
 - Do not delete `/var/lib/fpm-tune`; it holds the learned baselines and the record
   needed to undo a change.

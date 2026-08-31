@@ -18,12 +18,12 @@ fpm-tune plan
 `plan` reads the host and prints what it would do. It writes no PHP-FPM
 configuration and reloads nothing. It *does* record what it observed, to the
 state file, so that running it on a schedule builds a real baseline before apply
-is ever used — pass `--no-learn` to turn even that off.
+is ever used. Pass `--no-learn` to turn even that off.
 
 Two things in its output are worth knowing on a first run:
 
 - **Pools are `estimated`, not measured.** With no history, sizing starts from a
-  workload profile — the same guess a hand-written config makes. The plan labels
+  workload profile, the same guess a hand-written config makes. The plan labels
   these plainly. They become measurements once the tool has watched real traffic.
 - **The budget line names its source.** `via php-fpm's cgroup` is the number to
   trust; `via /proc/meminfo` on a bare VM means it is sizing against the whole
@@ -31,13 +31,13 @@ Two things in its output are worth knowing on a first run:
 
 ## `enable-status` turns on what it measures
 
-fpm-tune sizes each pool from its **live status page** — the `pm.status` php-fpm
+fpm-tune sizes each pool from its **live status page**, the `pm.status` php-fpm
 exposes over the pool's own socket. A stock php-fpm ships that page off: the
 default `www` pool has `pm.status_path` commented out. So on a fresh host `plan`
 finds a running master but nothing it can measure, and says exactly that:
 
 ```
-a php-fpm master is running, but pool www has no pm.status_path — …
+a php-fpm master is running, but pool www has no pm.status_path, …
   fpm-tune enable-status
 ```
 
@@ -47,7 +47,7 @@ Turn it on and the pool becomes visible:
 fpm-tune enable-status
 ```
 
-This writes a small drop-in enabling `pm.status_path` and reloads — through the
+This writes a small drop-in enabling `pm.status_path` and reloads, through the
 same chain `apply` uses: validated against a sandbox first, and rolled back if the
 master does not come back. It changes no `pm.max_children`; it only opens the page.
 `apply` and `serve --apply` do this for you as their first step, so you need
@@ -66,7 +66,7 @@ chain of guarantees underneath it:
 
 1. **Validated against a sandbox first.** The change is rendered and checked with
    `php-fpm -t` against a copy of the pool directory. A configuration php-fpm
-   would reject never reaches the directory it globs — not even for the length of
+   would reject never reaches the directory it globs, not even for the length of
    a fork.
 2. **One atomic write.** The whole change set reaches the host in a single
    rename, or not at all: a growth and the reduction that funds it are indivisible.
@@ -78,7 +78,7 @@ chain of guarantees underneath it:
 5. **Recoverable across a crash.** What is about to be written is recorded first,
    so an interrupted run is finished or undone on the next start.
 
-If a single `apply` is interrupted — a Ctrl-C, a timeout — after the signal but
+If a single `apply` is interrupted (a Ctrl-C, a timeout) after the signal but
 before the master is seen to survive, it says so and exits non-zero rather than
 claiming success. Run it again to confirm; the change is in place and recorded.
 
@@ -91,7 +91,7 @@ fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf   # advise, in a f
 ```
 
 The recommended way to adopt it is to run `serve` with `--recommend` and no
-`--apply` for a while — it changes nothing, and leaves its conclusion where you
+`--apply` for a while. It changes nothing, and leaves its conclusion where you
 can read it. See [Advisory mode](../operating/advisory-mode.md). When you trust
 what it recommends, add `--apply`.
 
@@ -100,7 +100,7 @@ what it recommends, add `--apply`.
 - **Safe to run once out of curiosity:** `plan`, `serve` (without `--apply`),
   `serve --recommend`. None of them touch the host.
 - **Acts on the host:** `apply` and `serve --apply`. On a stable host already at
-  the right size these are a no-op — nothing is written, nothing is reloaded — but
+  the right size these are a no-op (nothing is written, nothing is reloaded), but
   they *are* live.
 - **On a host running more than one php-fpm master**, name which one with
   `--drop-in-dir`; unscoped, the numbers are a mixture and `apply` refuses. See

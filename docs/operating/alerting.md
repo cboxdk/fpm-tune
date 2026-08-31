@@ -1,13 +1,13 @@
 ---
 title: Alerting
 weight: 3
-description: The metrics that tell you whether it is working, and the one distinction — watching versus acting — that is invisible without them.
+description: The metrics that tell you whether it is working, and the one distinction (watching versus acting) that is invisible without them.
 ---
 
 # Alerting
 
 The log reports a persistent condition once, on the transition, rather than every
-interval — which is right for reading and useless for alerting. These are the
+interval, which is right for reading and useless for alerting. These are the
 series to build on instead, served on `/metrics` (default `:9110`; `/healthz`
 answers 200 while the process is up).
 
@@ -28,13 +28,13 @@ fpm_tune_repairs_total                    # it had to undo something a run left 
 is acting look identical from outside, and that difference is the whole question
 when a host is not being tuned. Its `reason` label is the actionable part:
 
-- `no_master` — nothing to apply to.
-- `lock` — another fpm-tune holds the pool directory.
-- `unrepaired` — a previous run left something the tool could not resolve.
-- `budget_unconfirmed` — php-fpm's own memory limit could not be read, so the
+- `no_master`: nothing to apply to.
+- `lock`: another fpm-tune holds the pool directory.
+- `unrepaired`: a previous run left something the tool could not resolve.
+- `budget_unconfirmed`: php-fpm's own memory limit could not be read, so the
   tool refuses to write from the machine's. Pass `--memory`. See
   [The budget](../how-it-decides/the-budget.md).
-- `state_unsaved` — an apply succeeded but its record could not be written, so the
+- `state_unsaved`: an apply succeeded but its record could not be written, so the
   reload brake is not on disk.
 
 ## Is the host full
@@ -44,7 +44,7 @@ fpm_tune_pool_demand_unmet{pool}   # this pool wanted more workers than it got
 fpm_tune_capacity_exhausted        # ...and that is true of at least one pool
 ```
 
-Either one means no configuration change will help — the machine needs more RAM,
+Either one means no configuration change will help. The machine needs more RAM,
 or fewer sites. See
 [telling needs-more from machine-full](../how-it-decides/dividing-the-budget.md#telling-needs-more-from-machine-full).
 
@@ -70,7 +70,7 @@ fpm_tune_pools_ambiguous     # two masters share a pool name; those pools are NO
 ```
 
 `pools_ambiguous` above zero means the daemon is running unscoped on a
-multi-master host and two pools share a name — `www` is the default in every
+multi-master host and two pools share a name. `www` is the default in every
 distribution. Those pools are suppressed from the per-pool series rather than
 published under a colliding label; name a master with `--drop-in-dir`. See
 [The trust boundary](../safety/the-trust-boundary.md).

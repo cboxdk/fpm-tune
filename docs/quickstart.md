@@ -42,16 +42,16 @@ blog   12   8     384.0MiB  peak 6 workers busy; 8 is enough, measured 48.0MiB/w
 ```
 
 It keeps ~85% of the budget for workers and holds the rest back as headroom (that's
-the 15% — tunable with `--reserve`). On a shared box it also subtracts what MySQL and
+the 15%, tunable with `--reserve`). On a shared box it also subtracts what MySQL and
 friends are actually using; a `used by other services` line shows up then.
 
-On a first run every pool is `estimated`, not measured — the numbers are a
+On a first run every pool is `estimated`, not measured: the numbers are a
 profile's guess until the tool has watched real traffic. That is expected, and
 the plan says so.
 
 If instead `plan` says a pool **has no `pm.status_path`**, that is a stock
 php-fpm: it sizes each pool from its live status page, and that page ships off.
-Turn it on and the pool becomes visible — then run `plan` again:
+Turn it on and the pool becomes visible, then run `plan` again:
 
 ```bash
 fpm-tune enable-status      # validated drop-in + reload; rolled back if it fails
@@ -67,7 +67,7 @@ fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf
 ```
 
 `serve` without `--apply` changes nothing and never will. It measures, publishes
-metrics on `:9110`, and — with `--recommend` — writes its conclusion as
+metrics on `:9110`, and (with `--recommend`) writes its conclusion as
 PHP-FPM configuration you can read, diff, and paste by hand. The file is
 rewritten only when the recommended settings change, so its modification time
 tells you when the advice last moved. See [Advisory mode](operating/advisory-mode.md).
@@ -84,8 +84,8 @@ When you trust the numbers:
 fpm-tune apply
 ```
 
-This writes one file — `zz-fpm-tune.conf`, in the directory your master already
-includes — validates it against a sandboxed copy of the configuration, and
+This writes one file (`zz-fpm-tune.conf`, in the directory your master already
+includes), validates it against a sandboxed copy of the configuration, and
 reloads the master with SIGUSR2. If php-fpm would reject the file, it never
 reaches the live directory. If the master does not survive the reload, the
 change is rolled back. Deleting the file returns everything to what you
@@ -102,7 +102,7 @@ and repair the host if its own file ever stops php-fpm from starting.
 
 ## What to read next
 
-- [First run](getting-started/first-run.md) — the same path, with the safety
+- [First run](getting-started/first-run.md): the same path, with the safety
   guarantees spelled out.
-- [How it decides](how-it-decides/_index.md) — before you trust `--apply`, this
-  is the part worth understanding.
+- [How it decides](how-it-decides/_index.md): the part to read before you trust
+  `--apply`.

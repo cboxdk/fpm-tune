@@ -14,7 +14,7 @@ description: What fpm-tune needs to run, and where.
   scan have no equivalent.
 
 - **Permission to see and signal the master.** Discovery reads other processes'
-  details, and applying signals the master — so it wants to run as root or as the
+  details, and applying signals the master, so it wants to run as root or as the
   php-fpm user. Running as a user that cannot read the master's cgroup is
   detected and refused rather than sized against the whole machine; see
   [The budget](how-it-decides/the-budget.md).
@@ -24,7 +24,7 @@ description: What fpm-tune needs to run, and where.
   `pm.status_path` is sized from a profile guess rather than from measurement.
 
 - **A writable state directory**, `/var/lib/fpm-tune` by default, for the learned
-  baselines and — during a change — the backup and recovery record. It is created
+  baselines and (during a change) the backup and recovery record. It is created
   on first run; under systemd, `StateDirectory=fpm-tune` gives it sensible
   ownership.
 

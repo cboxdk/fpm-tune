@@ -1,7 +1,7 @@
 ---
 title: Recovering a host
 weight: 4
-description: What happens, and what to do, when php-fpm will not start — including when this tool's own file is the cause.
+description: What happens, and what to do, when php-fpm will not start, including when this tool's own file is the cause.
 ---
 
 # Recovering a host
@@ -15,7 +15,7 @@ The commonest cause is a site removed while the tool still overrides its pool. A
 pool defined only in the drop-in has no `listen` and no `user`, so php-fpm
 refuses the whole configuration and the master will not come back.
 
-A daemon running `serve --apply` detects this and takes its own file out — but it
+A daemon running `serve --apply` detects this and takes its own file out. But it
 cannot bring the service back on its own, because systemd exhausts its restart
 burst in seconds, long before any polling supervisor can land a fix. Once you
 have read the log line explaining what happened:
@@ -25,8 +25,8 @@ systemctl reset-failed php-fpm && systemctl start php-fpm
 ```
 
 The repair works even when nothing is running to discover, because on every
-successful apply the tool records where php-fpm lives — its binary, config, and
-pool directory — beside the backups. That note is how it finds the master to
+successful apply the tool records where php-fpm lives (its binary, config, and
+pool directory) beside the backups. That note is how it finds the master to
 repair when there is no live process to scan for. It is why
 `/var/lib/fpm-tune/backup` is [not scratch space](../getting-started/installation.md#where-it-lives-on-a-host):
 a rule that cleans it takes away the ability to undo a change *and* the ability
@@ -34,8 +34,8 @@ to fix that host.
 
 ## If a run was interrupted mid-change
 
-What is about to be written is recorded first, with a phase — written, or
-signalled — and a SHA-256 of the intended content. On the next start the tool
+What is about to be written is recorded first, with a phase (written, or
+signalled) and a SHA-256 of the intended content. On the next start the tool
 reads that record and finishes or undoes the change:
 
 - **Written but never signalled**: the file is in place for whenever php-fpm
@@ -49,7 +49,7 @@ reads that record and finishes or undoes the change:
   current file stands; if it does not, you are told the host is broken.
 
 A one-shot `apply` interrupted after the signal but before the master is seen to
-survive exits non-zero and says so — the change is in place and recorded; run
+survive exits non-zero and says so. The change is in place and recorded; run
 `apply` again to confirm it.
 
 ## If php-fpm is broken by something that is not this tool

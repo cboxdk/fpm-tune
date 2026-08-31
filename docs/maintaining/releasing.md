@@ -8,7 +8,7 @@ description: What a release does, what it signs, and the one secret it needs to 
 
 A release is one tag push. Nothing else needs bumping: the version is stamped into
 the binary from the tag, and the Homebrew formula's version is rewritten from the tag
-when it is published — so there is no second file to keep in sync and forget.
+when it is published, so there is no second file to keep in sync and forget.
 
 ```bash
 git tag -a v0.1.0-beta.3 -m "…" && git push origin v0.1.0-beta.3
@@ -21,13 +21,13 @@ it is not what `brew install` or the installer's `latest` resolves to.
 
 On a `v*` tag, [`release.yml`](https://github.com/cboxdk/fpm-tune/blob/main/.github/workflows/release.yml):
 
-1. Builds all four archives with `scripts/build-release.sh` — the same script `make
-   dist` runs, so a local build and this one produce byte-for-byte the same archives.
+1. Builds all four archives with `scripts/build-release.sh` (the same script `make
+   dist` runs), so a local build and this one produce byte-for-byte the same archives.
    The installer and the formula depend on the exact names and layout it emits. The
    Linux targets are fully static, so one binary runs on Alpine and Debian alike.
 2. Signs `SHA256SUMS` with a keyless [Sigstore](https://www.sigstore.dev/) signature.
    The signer is the workflow's own OIDC identity, so there is no private key to
-   store, rotate, or leak — one signature over the checksum file covers every archive.
+   store, rotate, or leak. One signature over the checksum file covers every archive.
 3. Publishes the archives, the checksum file, and the signature bundle as a GitHub
    release, with generated notes.
 
@@ -44,7 +44,7 @@ tap that cannot be written to costs nothing worse than Homebrew serving the prev
 version until the workflow is re-run, and re-running it is a single
 `workflow_dispatch`.
 
-It triggers on the release workflow *completing*, not on `release: published` —
+It triggers on the release workflow *completing*, not on `release: published`,
 because the release is created with `GITHUB_TOKEN`, and events raised by
 `GITHUB_TOKEN` do not trigger further workflows, so `release: published` would never
 fire for an automated release. (That trigger is kept anyway, for a release published
@@ -56,7 +56,7 @@ The tap is a different repository, so `GITHUB_TOKEN` cannot write to it.
 
 A **GitHub App** provides the credential, not a personal access token. An App's
 credentials do not expire, so nothing stops working on a date nobody wrote down, and
-it does not belong to a person — a PAT leaves with whoever created it. What reaches
+it does not belong to a person. A PAT leaves with whoever created it. What reaches
 the runner is an installation token scoped to `homebrew-tap` alone that expires an
 hour later.
 
@@ -69,10 +69,10 @@ gh secret set HOMEBREW_APP_PRIVATE_KEY --repo cboxdk/fpm-tune < cbox-tap-publish
 ```
 
 That is the only secret involved. The client id identifies the App rather than
-authenticating as it — any organisation member can read it back from
-`/orgs/cboxdk/installations` — so it lives in the workflow, where it also documents
+authenticating as it (any organisation member can read it back from
+`/orgs/cboxdk/installations`), so it lives in the workflow, where it also documents
 which App is doing the publishing. The private key goes in as the whole PEM, header
-and footer included — hence `<` a file rather than a paste. (The same App and secret
+and footer included, hence `<` a file rather than a paste. (The same App and secret
 serve every cboxdk repo that publishes to the tap; promote it to an org secret to
 share one copy.)
 
@@ -100,7 +100,7 @@ to find out.
 
 `workflow_dispatch` on `formula.yml` checks out the **tag** you give it and runs *that
 tag's* copy of `publish-formula.py`. That is correct for any recent tag, but re-running
-it against an old tag runs the publisher as it was then — before any later fix to it.
+it against an old tag runs the publisher as it was then, before any later fix to it.
 To republish an older release with the current publisher, run it from a current
 checkout instead:
 
