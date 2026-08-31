@@ -6,9 +6,9 @@ description: What it trusts, what one tenant on a shared host can and cannot mak
 
 # The trust boundary
 
-fpm-tune is often run on a host where several tenants own their own pool
-configuration — shared hosting. It is worth being precise about what it trusts,
-what a tenant can influence, and what stops one tenant from reaching another.
+fpm-tune often runs on a host where several tenants own their own pool
+configuration — shared hosting. So it's fair to ask exactly what it trusts, what a
+tenant can nudge, and what keeps one tenant off another.
 
 ## What it trusts
 
@@ -23,40 +23,35 @@ what a tenant can influence, and what stops one tenant from reaching another.
 
 ## What one tenant can do to another: nothing it should not
 
-Because the pools share a budget, it is fair to ask what a tenant with expensive
-workers takes from its neighbours. Measured, on a 4GiB host with five pools
-configured for twelve workers each:
+The pools share one budget, so here's the fair question: what does a tenant with
+expensive workers take from its neighbours? Not much — and it pays for it itself
+first.
 
-| the expensive pool's workers | it gets | a neighbour gets |
-|-----------------------------:|--------:|-----------------:|
-| 48 MiB (same as the rest)    |      12 |               12 |
-| 200 MiB                      |       9 |               10 |
-| 500 MiB                      |       5 |                6 |
-| 1 GiB                        |       3 |                3 |
+Say five pools each want a dozen workers, and one pool's workers start getting
+heavier. That heavy pool loses *its own* workers first; its neighbours barely move.
+Push it to an order of magnitude heavier than the rest and it's down to a handful,
+while everyone else is still close to their dozen. That's the whole trick: cost is
+what the budget's divided *by*, so getting expensive buys a pool *fewer* workers, not
+more. The squeeze it puts on its neighbours is the same squeeze it puts on itself —
+nobody can get greedy at someone else's expense.
 
-Growing more expensive costs a pool its own workers first, and does not buy them:
-cost is what the budget is divided *by*, so an expensive pool gets fewer workers,
-not more, and the pressure it puts on its neighbours is the same pressure it puts
-on itself. That is the property to want from a shared budget.
-
-Past the point where a single worker will not fit on the host at all, no
-arrangement is valid and the tool refuses rather than choosing a loser — naming
-the pool that made it impossible.
+And past the point where a single worker won't fit on the host at all? No arrangement
+is valid, so it refuses rather than pick a loser — and names the pool that made it
+impossible.
 
 ## What is refused rather than trusted
 
-- **A status page that relabels itself.** A tenant who sets `pm.status_listen` to
-  a socket they control cannot make their pool's memory be measured as another's:
-  the view keeps the name discovery read from the root-owned configuration, and
-  takes only numbers from the response.
-- **A pool name that would escape the file.** A section name with a path
-  separator or a control character in it cannot be written safely, so that one
-  pool is reserved conservatively and left alone — it does not abort the whole
-  change set and stop every other site being tuned.
-- **A truncated configuration parse.** If `php-fpm -tt` produces more output than
-  the tool will capture — a tenant with thousands of env lines in their own file —
-  the parse is refused rather than treated as complete, because a partial parse
-  would read every pool after the cut as removed and take their overrides out.
+- **A status page that relabels itself.** A tenant who points `pm.status_listen` at
+  a socket they control can't make their pool's memory count as another's. The pool
+  name comes from the root-owned config; only the numbers come from the response.
+- **A pool name that would escape the file.** A section name with a path separator
+  or a control character in it can't be written safely. So that one pool is sized
+  conservatively and left alone — it doesn't blow up the whole change set and stop
+  every other site from being tuned.
+- **A truncated config parse.** Say a tenant stuffs thousands of env lines into
+  their own file, and `php-fpm -tt` spills more output than the tool will capture.
+  It refuses that parse rather than trust it — because a half-read parse would treat
+  every pool after the cut as *deleted*, and quietly strip their overrides.
 
 ## Multi-master hosts
 
@@ -71,4 +66,4 @@ Unscoped:
   under a colliding label — with `fpm_tune_pools_ambiguous` counting them.
 
 The state file records which master each pool was learned from, so two scoped
-daemons sharing one file do not forget each other's pools.
+daemons sharing one file don't forget each other's pools.

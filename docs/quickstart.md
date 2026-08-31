@@ -32,14 +32,18 @@ php-fpm master it discovers the pools, reads the budget from the master's cgroup
 and prints what it would set and why:
 
 ```
-host memory 4.0GiB, 12 CPU(s) (via php-fpm's cgroup)
-  reserved for the system: 512.0MiB (25% of 4.0GiB)
-  available to workers:    3.5GiB
+container memory 4.0GiB, 12 CPU(s) (via cgroup v2)
+  headroom kept:           614.4MiB (15% of 4.0GiB)
+  available to workers:    3.4GiB
 
 POOL   NOW  PLAN  MEMORY    WHY
 shop   12   14    1.3GiB    peak 11 workers busy; raised to 14, measured 96.0MiB/worker
 blog   12   8     384.0MiB  peak 6 workers busy; 8 is enough, measured 48.0MiB/worker
 ```
+
+It keeps ~85% of the budget for workers and holds the rest back as headroom (that's
+the 15% — tunable with `--reserve`). On a shared box it also subtracts what MySQL and
+friends are actually using; a `used by other services` line shows up then.
 
 On a first run every pool is `estimated`, not measured — the numbers are a
 profile's guess until the tool has watched real traffic. That is expected, and
