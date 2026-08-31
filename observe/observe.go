@@ -312,6 +312,7 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 		for _, proc := range pool.Processes {
 			view.Workers = append(view.Workers, state.WorkerSample{
 				RSSBytes:        proc.CurrentRSS,
+				PSSBytes:        proc.CurrentPSS,
 				SubtreeRSSBytes: proc.SubtreeRSS,
 				Requests:        proc.Requests,
 			})

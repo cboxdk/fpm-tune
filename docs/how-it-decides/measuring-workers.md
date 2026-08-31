@@ -19,6 +19,30 @@ accumulates trustworthy measurements it switches to sizing each pool on its own
 observed worker memory. Baselines persist to `state.json`, so a restart does not
 begin from zero.
 
+## What "a worker costs" means: PSS, not RSS
+
+A php-fpm worker's resident set (RSS) overstates it on a busy host. Most of what a
+warm worker maps is *shared*: the opcache SHM segment (often hundreds of MB), the
+shared libraries, the copy-on-write pages it still shares with the master. RSS
+charges every one of those pages in full to every worker, so summing the RSS of
+twenty workers counts a 512 MB opcache twenty times and sizes the pool as if it
+needed gigabytes it does not.
+
+So the sizing reads **PSS** (proportional set size) instead, from
+`/proc/<pid>/smaps_rollup`: every shared page is divided by the number of processes
+mapping it, so summing PSS across a pool is what those workers actually cost the
+host. A warm Laravel worker might read 140 MB RSS but noticeably less PSS once its
+shared opcache is counted once rather than per worker. It's the same reason a
+container's RSS lies about its real footprint.
+
+Two honest caveats. The kernel has only offered `smaps_rollup` since 4.14, and
+reading another process's rollup needs the privilege the tool already has over the
+workers it manages; where either is missing, the per-worker number falls back to
+RSS, safe and just less precise. And the [spawned-children](spawned-children.md)
+delta stays on RSS on purpose, because a worker's ffmpeg is a separate process with
+its own private memory: subtracting a PSS worker from an RSS subtree would credit it
+the shared pages the worker no longer carries.
+
 ## Cost and permission are different questions
 
 There are two things you might mean by "trust a pool's measurements", and

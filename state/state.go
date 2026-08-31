@@ -30,6 +30,15 @@ const formatVersion = 1
 type WorkerSample struct {
 	RSSBytes int64
 
+	// PSSBytes is the worker's proportional set size: RSSBytes with every shared
+	// page (opcache, libraries, still-CoW parent pages) divided by its sharers
+	// rather than charged in full. It is what the sizing path prefers, because
+	// summing RSS across a pool multiplies the shared opcache segment by the worker
+	// count. Zero when the kernel could not report it (pre-4.14, or a permission
+	// short of PTRACE_MODE_READ), and sizing falls back to RSSBytes. RSSBytes stays
+	// the basis for the child delta below, which is a difference of two RSS reads.
+	PSSBytes int64
+
 	// SubtreeRSSBytes is the worker plus everything it spawned — the ffmpeg or
 	// imagemagick a request shelled out to, which RSSBytes does not include. It
 	// is always at least RSSBytes; the difference is what the children cost.
@@ -751,6 +760,17 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 			continue
 		}
 
+		// The number the pool is SIZED from: PSS when the kernel reported it, so a
+		// pool's shared opcache segment is counted once across its workers rather
+		// than once per worker, and RSS as the fallback where PSS is unavailable.
+		// The child delta below deliberately stays on RSS — it is a difference of
+		// two RSS reads (worker and subtree), and mixing a PSS worker into it would
+		// charge the shared pages the worker no longer carries to its children.
+		cost := w.PSSBytes
+		if cost <= 0 {
+			cost = w.RSSBytes
+		}
+
 		// The subtree peak — a worker's whole footprint — is for reporting. The
 		// child memory this worker carried in the SAME reading is accumulated
 		// across the scrape and divided by the worker count below, which is what
@@ -783,13 +803,13 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 		// application. What the REPORT calls "worst seen" comes from the
 		// distribution instead — the two questions are different and were being
 		// answered by one field.
-		ps.observeRSS(w.RSSBytes)
+		ps.observeRSS(cost)
 
 		if w.Requests >= opts.MinRequestsPerWorker {
 			mature++
 		}
-		if w.RSSBytes > peak {
-			peak = w.RSSBytes
+		if cost > peak {
+			peak = cost
 		}
 	}
 

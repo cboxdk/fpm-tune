@@ -63,7 +63,7 @@ func New() *Collectors {
 			// histogram_quantile and most dashboard tooling treat it specially,
 			// and "typical_peak" is not a quantile in any case — it is an
 			// asymmetric moving estimate.
-			"Per-worker memory. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen; \"p50\"/\"p95\"/\"p99\" are the measured spread, which is what to graph when a host misbehaves at its busiest minute rather than on average.", "pool", "estimate"),
+			"Per-worker memory, read as PSS where the kernel reports it (shared opcache and libraries divided among sharers rather than charged in full to each worker) and RSS otherwise, so it reads below what top shows. estimate=\"typical_peak\" is what sizing uses; \"high_water\" is the largest worker ever seen; \"p50\"/\"p95\"/\"p99\" are the measured spread, which is what to graph when a host misbehaves at its busiest minute rather than on average.", "pool", "estimate"),
 		subtreeRSS: gaugeVec(reg, "fpm_tune_pool_subtree_rss_bytes",
 			"The high-water mark of a worker AND everything it spawned — an ffmpeg, an imagemagick — which fpm_tune_pool_worker_rss_bytes does not include. Compare it to that metric's high_water: the gap is what children cost. A point-in-time sample misses a child that lived and died between scrapes; the cgroup high-water, where there is a cgroup, is what catches those.", "pool"),
 		childRSS: gaugeVec(reg, "fpm_tune_pool_child_rss_bytes",
