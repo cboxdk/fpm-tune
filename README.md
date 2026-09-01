@@ -96,9 +96,11 @@ change will help.
 
 It writes production config, so it earns trust one step at a time: `plan` and `serve`
 change nothing until you add `--apply`. When it does act, every change is validated
-against a throwaway copy, written atomically, reloaded *gracefully* (no dropped
-requests), and rolled back if the master doesn't come back. And if its own file ever
-stops php-fpm from starting, it takes that file back out. The full model is in
+against a throwaway copy, written atomically, reloaded *gracefully* (SIGUSR2, not a
+restart), and rolled back if the master doesn't come back. And if its own file ever
+stops php-fpm from starting, it takes that file back out. It reloads only when a
+change is worth it, because a reload is not perfectly free (php-fpm recreates a
+pool's socket, so a rare request can blip). The full model is in
 [Safety](docs/safety/_index.md).
 
 ## Docs

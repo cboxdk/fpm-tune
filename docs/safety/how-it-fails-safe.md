@@ -37,10 +37,20 @@ of either.
 
 ## A reload, never a restart
 
-The master is reloaded with SIGUSR2, which cycles its workers gracefully and
-carries its listening sockets across, so no request is dropped. A daemonized
-master comes back under a new pid (php-fpm's own default), which is followed
-rather than mistaken for a death.
+The master is reloaded with SIGUSR2, php-fpm's graceful reload: it re-reads the
+config and cycles workers without stopping the service, so an in-flight request is
+not killed and the pool is never fully down. A daemonized master comes back under a
+new pid (php-fpm's own default), which is followed rather than mistaken for a death.
+
+One honest caveat, and it is php-fpm's, not this tool's. On reload php-fpm recreates
+a pool's **listen socket**, so under concurrent load a request arriving in the
+sub-second window before the new socket is accepting can fail to connect and get a
+502. It is rare, and this tool keeps it rare on purpose: a resize only reloads when
+the change clears the [hysteresis](../how-it-decides/hysteresis.md) threshold, so a
+pool is not reloaded for every small drift. If even a resize-time blip is
+unacceptable, a TCP pool (`listen = 127.0.0.1:9000`) with `SO_REUSEPORT` hands the
+socket over without the recreate window, where a unix-socket pool cannot. Sizing is
+identical either way.
 
 ## Rolled back if the master does not survive
 

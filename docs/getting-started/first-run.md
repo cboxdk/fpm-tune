@@ -78,8 +78,12 @@ chain of guarantees underneath it:
    a fork.
 2. **One atomic write.** The whole change set reaches the host in a single
    rename, or not at all: a growth and the reduction that funds it are indivisible.
-3. **A reload, not a restart.** SIGUSR2 cycles the workers gracefully and carries
-   the listening sockets across, so no request is dropped.
+3. **A reload, not a restart.** SIGUSR2 is php-fpm's graceful reload: it cycles the
+   workers without stopping the service, so an in-flight request is not killed.
+   (php-fpm does recreate a pool's listen socket on reload, so under concurrent load
+   a rare request can 502 in the sub-second window before it is accepting again;
+   that is php-fpm's, and it is why a resize only reloads when the change is worth
+   it. See [how it fails safe](../safety/how-it-fails-safe.md).)
 4. **Rolled back if the master does not survive.** If php-fpm accepts the file at
    validation but fails to come back on the reload, the previous configuration is
    restored and you are told.
