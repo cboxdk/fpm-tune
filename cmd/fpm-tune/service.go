@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,15 +151,34 @@ func runInstallService(args []string) error {
 		return fmt.Errorf("cannot create %s: %w", filepath.Dir(defaultConfigPath), err)
 	}
 
-	// The config is preserved if it already exists, so re-running this never resets
-	// a mode the operator chose with `fpm-tune mode`. The unit is always rewritten:
-	// the binary may have moved.
-	wroteConfig := false
+	// Which flags the operator actually named, so a re-run updates just those.
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
+	// First install writes the whole config. A re-run PRESERVES it, updating only
+	// the keys named on the command line — the config is where `fpm-tune mode` and a
+	// hand-edited metrics address or heartbeat live, and rewriting it on every
+	// upgrade would silently undo them. This also fixes the old surprise where a
+	// re-run's -apply and -metrics were dropped on the floor with no sign.
+	wroteConfig, configChanged := false, false
 	if _, statErr := os.Stat(defaultConfigPath); os.IsNotExist(statErr) {
 		if err := os.WriteFile(defaultConfigPath, []byte(config), 0o644); err != nil {
 			return fmt.Errorf("cannot write %s: %w", defaultConfigPath, err)
 		}
 		wroteConfig = true
+	} else {
+		if explicit["apply"] {
+			if err := setConfigKey(defaultConfigPath, "mode", mode); err != nil {
+				return fmt.Errorf("cannot update the mode in %s: %w", defaultConfigPath, err)
+			}
+			configChanged = true
+		}
+		if explicit["metrics"] {
+			if err := setConfigKey(defaultConfigPath, "metrics", *metrics); err != nil {
+				return fmt.Errorf("cannot update the metrics address in %s: %w", defaultConfigPath, err)
+			}
+			configChanged = true
+		}
 	}
 
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
@@ -168,17 +188,39 @@ func runInstallService(args []string) error {
 	if err := systemctl("daemon-reload"); err != nil {
 		return fmt.Errorf("wrote the unit, but `systemctl daemon-reload` failed: %w", err)
 	}
-	if err := systemctl("enable", "--now", unitName); err != nil {
-		return fmt.Errorf("wrote the unit, but `systemctl enable --now %s` failed: %w", unitName, err)
+	if err := systemctl("enable", unitName); err != nil {
+		return fmt.Errorf("wrote the unit, but `systemctl enable %s` failed: %w", unitName, err)
+	}
+	// restart, not `enable --now`: a re-run is usually an upgrade or a settings
+	// change, and --now leaves a service already running on the OLD binary and the
+	// OLD config. restart starts it the first time too, so it is correct for both.
+	if err := systemctl("restart", unitName); err != nil {
+		return fmt.Errorf("wrote the unit, but `systemctl restart %s` failed: %w", unitName, err)
 	}
 
 	current := currentMode()
-	fmt.Printf("Installed and started fpm-tune (%s).\n", current)
+	metricsAddr := configMetrics()
+	verb := "Installed and started"
 	if !wroteConfig {
-		fmt.Printf("  kept the existing %s (mode = %s)\n", defaultConfigPath, current)
+		verb = "Updated and restarted"
 	}
-	fmt.Printf("  config:   %s\n  metrics:  %s\n\n", defaultConfigPath, *metrics)
-	fmt.Print("Switch mode any time (no unit edit needed):\n" +
+	fmt.Printf("%s fpm-tune (%s).\n", verb, current)
+	switch {
+	case wroteConfig:
+		fmt.Printf("  wrote %s\n", defaultConfigPath)
+	case configChanged:
+		fmt.Printf("  updated %s\n", defaultConfigPath)
+	default:
+		fmt.Printf("  kept %s unchanged (name -apply/-metrics to change it, or use `fpm-tune mode`)\n",
+			defaultConfigPath)
+	}
+	fmt.Printf("  config:   %s\n  metrics:  %s\n", defaultConfigPath, metricsAddr)
+	if host, _, splitErr := net.SplitHostPort(metricsAddr); splitErr == nil &&
+		host != "" && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+		fmt.Printf("  note: /metrics is bound to %s — reachable off-box and unauthenticated, "+
+			"so keep it behind your firewall.\n", metricsAddr)
+	}
+	fmt.Print("\nSwitch mode any time (no unit edit needed):\n" +
 		"  fpm-tune mode apply       # let it act on what it finds\n" +
 		"  fpm-tune mode advisory    # back to watch-only\n\n" +
 		"Follow it:  journalctl -u fpm-tune -f\n")
@@ -254,6 +296,14 @@ func currentMode() string {
 // setConfigMode rewrites (or adds) the `mode` line in the config, leaving the rest
 // of the file — an operator's edits and comments — untouched.
 func setConfigMode(path, mode string) error {
+	return setConfigKey(path, "mode", mode)
+}
+
+// setConfigKey replaces one active key's value in the config, in place, leaving
+// every other line — including keys the operator edited by hand and the commented
+// defaults — exactly as it found them. A commented-out key (# metrics = …) is not
+// matched: the value is prepended as a new active line instead.
+func setConfigKey(path, key, value string) error {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("cannot read %s: %w", path, err)
@@ -266,18 +316,32 @@ func setConfigMode(path, mode string) error {
 		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
 			continue
 		}
-		if key, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(key) == "mode" {
-			lines[i] = "mode = " + mode
+		if k, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == key {
+			lines[i] = key + " = " + value
 			replaced = true
 
 			break
 		}
 	}
 	if !replaced {
-		lines = append([]string{"mode = " + mode}, lines...)
+		lines = append([]string{key + " = " + value}, lines...)
 	}
 
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// configMetrics reports the metrics address the config actually carries, so
+// install-service can report what is in effect rather than what a flag said.
+func configMetrics() string {
+	kv, err := loadConfigFile(defaultConfigPath)
+	if err != nil {
+		return defaultMetricsAddr
+	}
+	if a, ok := kv["metrics"]; ok {
+		return a
+	}
+
+	return defaultMetricsAddr
 }
 
 // systemctl runs a systemctl subcommand, or reports plainly when it is not there.

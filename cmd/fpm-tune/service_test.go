@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -163,5 +164,38 @@ func TestSetConfigModeAddsModeWhenAbsent(t *testing.T) {
 	}
 	if kv["mode"] != "apply" {
 		t.Error("mode was not added to a config that lacked it")
+	}
+}
+
+// TestSetConfigKeyUpdatesInPlace: updating one key must leave every other line
+// alone — the mode an operator set with `fpm-tune mode`, a hand-edited heartbeat,
+// the commented-out defaults. This is what lets `install-service -metrics X` on a
+// re-run change the metrics address without clobbering the rest.
+func TestSetConfigKeyUpdatesInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	original := "mode = apply\nmetrics = 127.0.0.1:9110\n# sizing = p95\nheartbeat = 30m\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setConfigKey(path, "metrics", "0.0.0.0:9110"); err != nil {
+		t.Fatal(err)
+	}
+
+	kv, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv["metrics"] != "0.0.0.0:9110" {
+		t.Errorf("metrics = %q, want 0.0.0.0:9110", kv["metrics"])
+	}
+	if kv["mode"] != "apply" {
+		t.Errorf("mode was clobbered: %q, want apply", kv["mode"])
+	}
+	if kv["heartbeat"] != "30m" {
+		t.Errorf("a hand-edited key was lost: heartbeat = %q, want 30m", kv["heartbeat"])
+	}
+	if body, _ := os.ReadFile(path); !strings.Contains(string(body), "# sizing = p95") {
+		t.Error("the commented-out default was dropped")
 	}
 }

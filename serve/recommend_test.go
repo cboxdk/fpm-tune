@@ -169,3 +169,30 @@ func TestRecommendationShowsChildrenWhenAPoolSpawnsThem(t *testing.T) {
 		t.Errorf("children line rendered %d times, want exactly 1 (only the media pool):\n%s", n, file)
 	}
 }
+
+// TestSettingsOfIgnoresCommentary: the recommendation file is rewritten (and "The
+// recommendation changed" logged) only when the pm.* settings move — not when the
+// commentary around them moves, which it does every round (the reading count climbs,
+// a percentile shifts a bucket, the "measured Nmib" in a reason drifts). settingsOf
+// is what draws that line, so it must reduce a file to its settings alone.
+func TestSettingsOfIgnoresCommentary(t *testing.T) {
+	withReason := func(measured, readings string) string {
+		return "; header line that changes\n;\n" +
+			"; www-forge: raised to 6, measured " + measured + "/worker\n" +
+			";   measured per worker: median 32.0MiB (" + readings + " readings)\n" +
+			"[www-forge]\npm.max_children = 6\npm.start_servers = 2\n"
+	}
+
+	a := withReason("41.9MiB", "748")
+	b := withReason("42.3MiB", "812") // same pm.* values, only the commentary moved
+
+	if settingsOf(a) != settingsOf(b) {
+		t.Errorf("settingsOf differs when only the commentary changed:\n%q\nvs\n%q",
+			settingsOf(a), settingsOf(b))
+	}
+
+	c := "[www-forge]\npm.max_children = 7\npm.start_servers = 2\n" // a real change
+	if settingsOf(a) == settingsOf(c) {
+		t.Error("settingsOf did not notice pm.max_children moving from 6 to 7")
+	}
+}

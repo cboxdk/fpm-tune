@@ -130,18 +130,27 @@ func (l *Loop) recommendationWouldBeLoaded() bool {
 // Read back from the file rather than remembered in the process, so a restart
 // does not rewrite an unchanged recommendation and reset the one timestamp this
 // mode exists to provide.
+// settingsOf reduces a recommendation file to just its settings: the section
+// headers and pm.* lines, with every comment and blank line dropped. The
+// recommendation is those values, and comparing on them is what lets mtime keep
+// meaning "when the advice last moved."
+//
+// It used to skip only the LEADING comments and return the rest verbatim, which
+// swept up the per-pool reason comments that sit between sections — and those move
+// every round (the reading count climbs, a percentile shifts a bucket, the
+// "measured Nmib" drifts). So the file was rewritten, and "The recommendation
+// changed" logged, on a stable plan every scrape. Strip comments throughout.
 func settingsOf(file string) string {
-	lines := strings.Split(file, "\n")
-	for i, line := range lines {
+	var kept []string
+	for _, line := range strings.Split(file, "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" || strings.HasPrefix(t, ";") {
 			continue
 		}
-
-		return strings.Join(lines[i:], "\n")
+		kept = append(kept, t)
 	}
 
-	return ""
+	return strings.Join(kept, "\n")
 }
 
 // renderRecommendation is the pool configuration this plan describes, with the
