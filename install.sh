@@ -66,15 +66,21 @@ resolve_version() {
         return
     fi
     # The latest STABLE release first. While fpm-tune is in beta there is none, so
-    # this 404s and we fall back to the newest release of any kind — including the
-    # prerelease — which is what "latest" should mean before 1.0.
+    # this 404s and we fall back to the newest release of any kind, including the
+    # prerelease, which is what "latest" should mean before 1.0.
     tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1)"
     if [ -z "$tag" ]; then
-        tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" 2>/dev/null \
+        # Pick the highest VERSION among all releases, not the first the API lists:
+        # GitHub's /releases order is not reliably newest-first (a re-published older
+        # release sorts ahead of a newer tag — exactly how beta.9 got served over
+        # beta.14). Extract every tag, keep the v-prefixed ones, and version-sort.
+        tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100" 2>/dev/null \
             | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-            | head -n 1)"
+            | grep -E '^v[0-9]' \
+            | sort -V \
+            | tail -n 1)"
     fi
     [ -n "$tag" ] || die "could not determine the latest release; set FPM_TUNE_VERSION"
     printf '%s' "${tag#v}"
