@@ -8,8 +8,8 @@ func TestParseSizing(t *testing.T) {
 		pct     float64
 		wantErr bool
 	}{
-		{"peak", 0, false},
-		{"", 0, false},
+		{"peak", 0, false}, // the opt-in pure peak-follower
+		{"", 0.95, false},  // empty defaults to p95, the hybrid default
 		{"p95", 0.95, false},
 		{"p99", 0.99, false},
 		{"95", 0.95, false},

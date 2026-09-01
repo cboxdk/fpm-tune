@@ -141,10 +141,10 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 			"processes workers spawn: web (spawn nothing — the default), bursty (a child now and then), "+
 			"subprocess-heavy (a child on most requests, e.g. ffmpeg). A pool overrides this with "+
 			"env[FPM_TUNE_WORKLOAD] in its own config. Measurement refines it once a baseline exists."),
-		sizing: fs.String("sizing", "peak", "per-worker cost basis: `peak` (the default — follows the sawtooth top, "+
-			"reacts to a memory increase in one scrape, safe on deploys) or a percentile like `p95` "+
-			"(less conservative, fits more workers on a stable pool, but reacts to an increase only as "+
-			"the distribution shifts — so it can under-size through a deploy)"),
+		sizing: fs.String("sizing", "p95", "per-worker cost basis: `p95` (the default — sizes on the 95th "+
+			"percentile so a rare monster request doesn't inflate the pool, floored by the most recent "+
+			"peak so a deploy is still caught in one scrape; also p99, or a bare number) or `peak` (the "+
+			"pure peak-follower, most conservative, sizes forever on the worst worker ever seen)"),
 		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
 		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
@@ -925,12 +925,16 @@ func parseReserve(raw string) (bytes int64, fraction float64, err error) {
 // sized on p95 is not sized at exactly p95.
 const defaultSizingMargin = 0.10
 
-// parseSizing reads the --sizing value: "peak" (the peak-follower default) or a
-// percentile — "p95", "p99", or a bare number like 95 — which sizes on that
-// percentile of the worker RSS distribution plus a small margin.
+// parseSizing reads the --sizing value: the default "p95" (or "p99", or a bare
+// number like 95) sizes on that percentile of the worker distribution plus a small
+// margin, floored so it still reacts to a real increase in one scrape; "peak" is the
+// opt-in pure peak-follower, which sizes forever on the worst worker ever seen.
 func parseSizing(raw string) (state.Sizing, error) {
 	s := strings.ToLower(strings.TrimSpace(raw))
-	if s == "" || s == "peak" {
+	if s == "" {
+		s = "p95"
+	}
+	if s == "peak" {
 		return state.Sizing{}, nil
 	}
 

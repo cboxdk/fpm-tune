@@ -1161,26 +1161,33 @@ func (ps *PoolState) SizingBytes() int64 {
 	return size
 }
 
-// Sizing selects the per-worker cost basis. The zero value — Percentile 0 — is the
-// peak-follower (SizingBytes), the safe default. A positive Percentile sizes on that
-// percentile of the worker RSS distribution times (1+Margin) instead: less
-// conservative, and the operator's to choose per host.
+// Sizing selects the per-worker cost basis. The zero value (Percentile 0) is the
+// pure peak-follower, SizingBytes: the --sizing peak opt-in, most conservative,
+// sizes forever on the worst worker ever seen. A positive Percentile is the default
+// (p95): SizingBytesAt sizes on that percentile times (1+Margin), floored so it
+// still reacts to a real increase in one scrape but does not hold a rare spike.
 type Sizing struct {
 	Percentile float64
 	Margin     float64
 }
 
-// SizingBytesAt sizes on a percentile of the worker RSS distribution plus a margin,
-// rather than the peak-follower — the operator's less-conservative alternative, for
-// a host whose workload they know to be stable.
+// SizingBytesAt sizes on a percentile of the worker distribution plus a margin,
+// with a fast floor so it still reacts to a real increase in one scrape. This is
+// the default basis (p95); the pure peak-follower is the --sizing peak opt-in.
 //
-// The trade-off is real and the opposite of SizingBytes's: a percentile of a
-// decaying histogram reacts SLOWLY to a sudden increase — a deploy that raises every
-// worker's memory shows in the peak-follower in one scrape but shifts the percentile
-// only as the old readings decay — so this can under-size through a deploy in a way
-// the peak-follower does not. The margin is the cushion; the daemon re-evaluates
-// each round; and a genuinely stable pool is exactly where the peak-follower's
-// upward bias is wasted headroom.
+// The percentile is the steady basis, and it is what makes this better than the
+// peak-follower for the common case: a single worker spiking on a heavy export or
+// an image resize is the top 1% of the distribution, so it does not move p95 — the
+// pool is not sized forever on its worst minute the way SizingBytes is.
+//
+// But a percentile of a decaying histogram reacts only slowly to a GENUINE
+// increase: a deploy that makes every worker heavier shifts the distribution over
+// many scrapes, and under-sizing through that window is the failure that ends in an
+// OOM. So the result is floored by LastPeakBytes, the most recent round's peak. A
+// deploy lifts that in one scrape, exactly like the peak-follower — while a rare
+// spike is gone from it again the next scrape, rather than being held forever. The
+// two failure modes the operator was choosing between, deploy-lag and
+// monster-hold, are both covered; the margin is the cushion on top.
 //
 // Falls back to the peak-follower until the distribution has a reading, so a cold
 // pool is never sized at zero.
@@ -1188,11 +1195,20 @@ func (ps *PoolState) SizingBytesAt(percentile, margin float64) int64 {
 	if ps == nil {
 		return 0
 	}
+
+	size := ps.SizingBytes()
 	if p := ps.Percentile(percentile); p > 0 {
-		return int64(float64(p) * (1 + margin))
+		size = int64(float64(p) * (1 + margin))
 	}
 
-	return ps.SizingBytes()
+	// Fast up on a real increase, without the all-time hold: the most recent
+	// round's peak follows a deploy in one scrape and drops back the next scrape a
+	// spike is gone.
+	if ps.LastPeakBytes > size {
+		size = ps.LastPeakBytes
+	}
+
+	return size
 }
 
 // Confidence is how far a pool's baseline can be trusted, from 0 to 1.

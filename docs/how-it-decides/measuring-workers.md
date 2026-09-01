@@ -131,16 +131,22 @@ arrive.
 
 ## Choosing the sizing basis
 
-By default the sizing number is the peak-follower above: it follows the top of the
-sawtooth and reacts to a memory increase on the first scrape, which is what makes
-it safe through a deploy that raises what every worker costs.
+The default is **`p95`**: the pool is sized on the 95th percentile of what its
+workers cost, plus a small margin. A single monster request (a big export, an
+image resize) is the very top of the distribution, so it does not move p95, and the
+pool is not sized forever on its worst minute. That is the number most operators
+expect, and the one that stops a rare spike from inflating a whole pool.
 
-On a pool you know to be stable, that upward bias is wasted headroom. `--sizing
-p95` (or `p99`, or any percentile) sizes on that percentile of the distribution
-instead, plus a small margin (less conservative, fitting more workers where a few
-rare spikes were pulling the peak-follower up). The trade-off is the mirror of the
-default's: a percentile of the (decaying) histogram reacts *slowly* to a real
-increase, so on a deploy it can under-size until the distribution catches up. The
-margin is the cushion and the daemon re-evaluates each round. But `peak` is the
-safe default, and `p95` is a deliberate per-host choice for a workload you
-understand. In the service config it is the `sizing` key.
+On its own a percentile has a real weakness, and it is the reason a naive p95 is
+dangerous: a percentile of a decaying histogram reacts *slowly* to a genuine
+increase, so a deploy that makes every worker heavier would under-size the pool
+until the distribution catches up, and under-sizing is the failure that ends in an
+OOM. So the p95 number is **floored by the most recent scrape's peak**: a deploy
+lifts that in one scrape, exactly like the peak-follower, while a rare spike is gone
+from it again the next scrape. You get the deploy-safety without the monster-hold.
+
+`--sizing peak` is the opt-in for the pure peak-follower: the most conservative
+basis, it follows the top of the sawtooth and never lets go of the worst worker it
+has ever seen. Reach for it only where you want that maximum caution. `--sizing p99`
+(or any percentile) moves the steady basis up or down. In the service config it is
+the `sizing` key.
