@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,6 +68,11 @@ type Config struct {
 	// for the next round.
 	Discover func(context.Context) ([]phpfpm.Target, error)
 	Sample   func(context.Context, []phpfpm.Target) []observe.PoolView
+
+	// Unstatused reports the pools that exist but expose no status page, so the
+	// loop can warn that it is not sizing them (and, in apply mode, turn the page
+	// on). Nil in production, where it is phpfpm.UnstatusedPools; a test injects it.
+	Unstatused func(context.Context) ([]phpfpm.Unstatused, error)
 
 	// StatePath is where baselines are persisted.
 	StatePath string
@@ -166,7 +172,22 @@ type Loop struct {
 	// pool might fit better as X" is said once, not re-logged every round or on the
 	// heartbeat — a nudge, not a nag. Keyed by pool, valued by the suggested mode.
 	lastAdvice map[string]string
+
+	// lastUntracked is the set of pools last warned about for having no status page,
+	// so the warning fires when the set changes (a pool appears or is enabled) rather
+	// than every round.
+	lastUntracked map[string]bool
+
+	// statusRetries caps how many rounds in a row the loop will re-run the status
+	// enable for pools it cannot get a page onto, so a pool that keeps failing to
+	// validate does not re-trigger reconcile forever. Reset once none are untracked.
+	statusRetries int
 }
+
+// maxStatusRetries bounds the apply-mode auto-enable so a pool that can never be
+// given a status page (an unsafe name, a config php-fpm rejects) does not reconcile
+// on every round for the life of the process. The warning persists regardless.
+const maxStatusRetries = 5
 
 // rec is a logged recommendation and when it was logged.
 type rec struct {
@@ -322,6 +343,11 @@ func (l *Loop) round(ctx context.Context) {
 
 		return
 	}
+
+	// Pools the loop cannot see because they have no status page. Warn about them
+	// (in any mode) and, in apply mode, arrange to turn the page on — so a pool the
+	// startup reconcile missed, or one added since, does not stay silently unsized.
+	l.noteUntracked(roundCtx, targets)
 
 	scrapeCtx, cancelScrape := context.WithTimeout(roundCtx, l.cfg.ScrapeTimeout)
 	views := l.sample(scrapeCtx, targets)
@@ -510,6 +536,95 @@ func (l *Loop) logAdvice(result plan.Result) {
 			delete(l.lastAdvice, pool)
 		}
 	}
+}
+
+// noteUntracked warns about pools that exist but expose no status page, so the loop
+// cannot size them, and — in apply mode — resets the reconcile so the next round
+// turns the page on. Warns only when the set changes, so a standing gap is stated
+// once rather than every round. This is the guard against the loop silently sizing
+// whatever pools happen to have a page while the busy one is invisible.
+func (l *Loop) noteUntracked(ctx context.Context, targets []phpfpm.Target) {
+	names := l.untrackedNames(ctx, targets)
+
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	if !sameStringSet(set, l.lastUntracked) {
+		l.lastUntracked = set
+		if len(names) > 0 {
+			if l.cfg.Apply {
+				l.log.Warn("Pools have no status page, so they cannot be sized; turning it on "+
+					"this round", "pools", names)
+			} else {
+				l.log.Warn("Pools have no status page, so they are NOT being sized. Run "+
+					"`fpm-tune enable-status` to turn it on, or switch to apply mode which does "+
+					"it for you", "pools", names)
+			}
+		}
+	}
+
+	// Apply mode: re-run the reconcile that turns the page on, for a pool the startup
+	// pass missed or one added since. Capped, because a pool that can never be given a
+	// page (an unsafe name, a config php-fpm rejects) would otherwise reset the
+	// reconcile every round for the life of the process; the warning still stands.
+	switch {
+	case len(names) == 0:
+		l.statusRetries = 0
+	case l.cfg.Apply && l.statusRetries < maxStatusRetries:
+		l.statusRetries++
+		l.reconciled = false
+	}
+}
+
+// untrackedNames is the pools on this master that have no status page, by name.
+// Best effort: a parse that fails is the discovery path's to report, not this one's.
+func (l *Loop) untrackedNames(ctx context.Context, targets []phpfpm.Target) []string {
+	find := l.cfg.Unstatused
+	if find == nil {
+		find = func(c context.Context) ([]phpfpm.Unstatused, error) {
+			return phpfpm.UnstatusedPools(c, l.log)
+		}
+	}
+	unstatused, err := find(ctx)
+	if err != nil {
+		return nil
+	}
+
+	master := ""
+	if len(targets) > 0 {
+		master = targets[0].ConfigPath
+	}
+
+	seen := map[string]bool{}
+	var names []string
+	for _, u := range unstatused {
+		if master != "" && !sameMasterConfig(u.ConfigPath, master) {
+			continue
+		}
+		if seen[u.Name] {
+			continue
+		}
+		seen[u.Name] = true
+		names = append(names, u.Name)
+	}
+	sort.Strings(names)
+
+	return names
+}
+
+// sameStringSet reports whether two string sets hold the same members.
+func sameStringSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time) {

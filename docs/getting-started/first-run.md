@@ -50,8 +50,16 @@ fpm-tune enable-status
 This writes a small drop-in enabling `pm.status_path` and reloads, through the
 same chain `apply` uses: validated against a sandbox first, and rolled back if the
 master does not come back. It changes no `pm.max_children`; it only opens the page.
-`apply` and `serve --apply` do this for you as their first step, so you need
-`enable-status` yourself only when you want to `plan` before you ever apply.
+It enables the page on **every** pool that lacks one, not just the default, which
+matters on a box where each site has its own pool. `apply` and `serve --apply` do
+this for you as their first step, so you need `enable-status` yourself only when you
+want to `plan` before you ever apply.
+
+A pool that has no status page cannot be sized, so `serve` **warns** about it by
+name each time the set changes ("Pools have no status page, so they are NOT being
+sized"), and in `--apply` mode turns the page on itself. If you ever see a pool you
+expected tuned sitting untouched, that warning, or a run of `enable-status`, is
+where to look: the loop only sizes the pools it can actually measure.
 
 ## `apply` acts immediately
 
