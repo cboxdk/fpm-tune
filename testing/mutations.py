@@ -95,6 +95,11 @@ LAYERED = {
     # The master note is keyed by pool directory in the FILENAME as well as
     # re-checked inside. Either alone keeps a repair off another master.
     "apply: the master note is not keyed by pool directory",
+    # The CPU ceiling waits for confidence in plan, and the allocator caps
+    # want only, never below a floor — and an untrusted pool's floor is its
+    # configured ceiling. Either alone keeps a cap off a pool that has not
+    # earned a cut.
+    "plan: the CPU ceiling ignores the confidence gate",
 }
 
 # (label, file, old, new)
@@ -432,17 +437,37 @@ MUTATIONS = [
      "plan/plan.go",
      "	if in.ReserveBytes == 0 && in.Limits.NeighborBytes > 0 {\n		reserve += in.Limits.NeighborBytes\n	}\n",
      ""),
-    # The CPU report stands on one guard: a worker's last request is counted
-    # once. Without it a quiet pool re-counts the same request every scrape and
-    # the distribution describes idleness, not requests.
+    # The CPU measurement stands on three guards. A worker's last request is
+    # counted once, or a quiet pool re-counts the same request every scrape and
+    # the distribution describes idleness. A running worker's counter is not
+    # remembered, or the request that spans a scrape is never counted. And the
+    # tool's own probes are not the site's traffic.
     ("state: the same request is counted on every scrape",
      "state/cpu.go",
      "		if prev, ok := ps.CPUSeen[w.PID]; ok && w.Requests == prev {",
      "		if false {"),
-    ("state: CPU is measured without being asked for",
-     "state/state.go",
-     "	if opts.MeasureCPU {\n		ps.observeCPU(obs.Workers)\n	}\n",
-     "	ps.observeCPU(obs.Workers)\n"),
+    ("state: a running worker's counter is remembered",
+     "state/cpu.go",
+     "			if prev, ok := ps.CPUSeen[w.PID]; ok {\n				seen[w.PID] = prev\n			}\n\n			continue\n",
+     "			seen[w.PID] = w.Requests\n\n			continue\n"),
+    ("state: our own probes are measured as the site",
+     "state/cpu.go",
+     "		if w.OwnRequest {",
+     "		if false {"),
+    # And the ceiling it feeds binds only where it may: on want, never as a cut
+    # of a pool that has not earned one, and never without --cpu.
+    ("allocate: the CPU ceiling cuts below the floor",
+     "allocate/allocate.go",
+     "		if p.CPUCeiling > 0 && !p.Unknown && wants[i] > p.CPUCeiling && floors[i] <= p.CPUCeiling {",
+     "		if p.CPUCeiling > 0 && !p.Unknown && wants[i] > p.CPUCeiling {\n			floors[i] = p.CPUCeiling"),
+    ("plan: the CPU ceiling ignores the confidence gate",
+     "plan/cpu.go",
+     "	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {",
+     "	if ps == nil || !ps.CPUShapeKnown(opts) {"),
+    ("plan: the CPU ceiling binds without --cpu",
+     "plan/plan.go",
+     "	if cpuCeiling {\n		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)\n	}\n",
+     "	pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)\n"),
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")

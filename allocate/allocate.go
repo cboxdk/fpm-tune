@@ -122,6 +122,13 @@ type Pool struct {
 	// Ceiling caps this pool regardless of available budget. Zero means no cap.
 	Ceiling int
 
+	// CPUCeiling is the most workers worth running for this pool: the number of
+	// busy workers that fill the host's CPU, from what its requests measured.
+	// Past it, another worker makes every request slower rather than serving
+	// more of them. Zero means no measured ceiling, or the operator has not
+	// allowed the measurement to bind — plan sets it only when both hold.
+	CPUCeiling int
+
 	// Unknown marks a pool whose current configuration could not be read, or
 	// which could not be scraped at all.
 	//
@@ -230,6 +237,11 @@ type PoolPlan struct {
 	// together with Plan.CapacityExhausted it is the difference between "we can
 	// fix this" and "the machine is full".
 	DemandUnmet bool
+
+	// CPUBound reports that the pool's CPUCeiling is what held its number
+	// down: memory would have allowed more. It is the answer to "which is the
+	// limiting factor" for a pool the measurement was allowed to cap.
+	CPUBound bool
 
 	// Measured records whether the sizing used observed worker memory or a
 	// bootstrap estimate, so a reader knows how much to trust the number.
@@ -353,12 +365,22 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	// What each pool would take if the budget were unlimited.
 	wants := make([]int, len(pools))
 	floors := make([]int, len(pools))
+	cpuBound := make([]bool, len(pools))
 	cpuCap := cpuCeiling(budget, opts)
 	for i, p := range pools {
 		floors[i] = poolFloor(p, opts)
 		wants[i] = poolWant(p, floors[i], opts)
 		if cpuCap > 0 && wants[i] > cpuCap {
 			wants[i] = cpuCap
+		}
+		// The measured ceiling, where the operator let it bind. A cap on WANT
+		// only: the floor is a reservation for workers already running, and
+		// plan hands this ceiling only to pools it has watched long enough to
+		// cut, whose floor is the default. Below the floor the cap would be a
+		// cut on a pool that has not earned one, so there it does nothing.
+		if p.CPUCeiling > 0 && !p.Unknown && wants[i] > p.CPUCeiling && floors[i] <= p.CPUCeiling {
+			wants[i] = p.CPUCeiling
+			cpuBound[i] = true
 		}
 		// The CPU ceiling is a bound on what to PROPOSE, and an unwritable pool
 		// is not being proposed anything. Its floor is a reservation for workers
@@ -398,9 +420,10 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			ChildBytes:  p.ChildBytes,
 			Want:        wants[i],
 			DemandUnmet: granted[i] < wants[i],
+			CPUBound:    cpuBound[i],
 			Measured:    p.Measured,
 			Unknown:     p.Unknown,
-			Reason:      reason(p, granted[i], wants[i], floors[i], reduced),
+			Reason:      reason(p, granted[i], wants[i], floors[i], reduced, cpuBound[i]),
 		}
 		if pp.DemandUnmet {
 			unmet = true
@@ -948,7 +971,7 @@ func largestGrantedAmong(granted []int, eligible func(int) bool) int {
 }
 
 // reason explains one pool's number, for the plan output.
-func reason(p Pool, granted, want, floor int, exhausted bool) string {
+func reason(p Pool, granted, want, floor int, exhausted, cpuBound bool) string {
 	source := "estimated"
 	if p.Measured {
 		source = "measured"
@@ -976,6 +999,12 @@ func reason(p Pool, granted, want, floor int, exhausted bool) string {
 	case granted < want:
 		return fmt.Sprintf("wants %d, budget allows %d; %s",
 			want, granted, cost)
+	case cpuBound:
+		// Said before the memory reasons, because for this pool memory was not
+		// the limit: the number is where its busy workers fill the CPU, and
+		// one more would slow every request rather than serve another.
+		return fmt.Sprintf("cpu-bound; %d busy workers fill the CPU, so held there rather than "+
+			"the %d memory allows, %s", granted, p.CPUCeiling, cost)
 	case p.HitMaxChildren:
 		return fmt.Sprintf("hit its ceiling; grown to %d, %s",
 			granted, cost)

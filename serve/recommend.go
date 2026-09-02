@@ -206,6 +206,10 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 	for _, d := range result.Distribution {
 		spread[d.Name] = d
 	}
+	cpu := map[string]plan.PoolCPU{}
+	for _, c := range result.CPU {
+		cpu[c.Name] = c
+	}
 
 	bootstrapped := map[string]bool{}
 	for _, name := range result.Bootstrapped {
@@ -243,6 +247,14 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 					budget.HumanBytes(d.ChildPerWorker),
 					budget.HumanBytes(d.SubtreeHighWater))
 			}
+		}
+		// Which of the two this pool runs out of first, once its requests have
+		// been read enough times to say. The dimension memory cannot see.
+		if c, ok := cpu[p.Name]; ok && c.Shape != "" {
+			fmt.Fprintf(&b, ";   cpu per request: median %.0f%%, p90 %.0f%% (%d readings); %dm per busy "+
+				"worker, ~%d fill %s; limit: %s\n",
+				c.P50*100, c.P90*100, c.Samples, c.MillicoresPerWorker, c.FillWorkers,
+				budget.HumanMillicores(result.HostCPU.Millicores), c.Limit)
 		}
 		if bootstrapped[p.Name] {
 			fmt.Fprintf(&b, ";   NOT YET MEASURED — this is a profile's guess, not this "+

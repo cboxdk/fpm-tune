@@ -107,6 +107,10 @@ type Config struct {
 	// reserves nothing (WorkloadWeb), the behaviour before workloads existed.
 	Workload plan.Workload
 
+	// CPUCeiling lets what a pool's requests measured cap the pool. Off, the
+	// measurement is taken and published but sizes nothing. See plan.Input.
+	CPUCeiling bool
+
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
@@ -414,6 +418,7 @@ func (l *Loop) round(ctx context.Context) {
 		ReserveFraction: l.cfg.ReserveFraction,
 		StateOptions:    l.cfg.StateOptions,
 		Workload:        l.cfg.Workload,
+		CPUCeiling:      l.cfg.CPUCeiling,
 		CgroupUsage:     usage,
 		HasCgroupUsage:  hasCgroup,
 	})

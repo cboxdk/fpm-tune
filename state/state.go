@@ -68,6 +68,11 @@ type WorkerSample struct {
 	// percentage means anything — see cpu.go.
 	LastRequestCPU    float64
 	LastRequestMicros int64
+
+	// OwnRequest marks a last request that was fpm-tune's own: the status
+	// call, or the opcache probe. They are traffic to php-fpm and not to the
+	// site, and are kept out of the CPU distribution.
+	OwnRequest bool
 }
 
 // Observation is one scrape of one pool.
@@ -217,8 +222,7 @@ type PoolState struct {
 	// CPUHistogram counts how CPU-bound this pool's requests have been, in 5%
 	// buckets of the share of wall time a request spent on CPU. CPUSamples is
 	// how many readings are in it, and CPUSeen is each live worker's request
-	// count as of the last reading, so one request is counted once. All three
-	// are absent unless CPU was being measured (Options.MeasureCPU). See cpu.go.
+	// count as of the last reading, so one request is counted once. See cpu.go.
 	CPUHistogram []uint32      `json:"cpu_histogram,omitempty"`
 	CPUSamples   int64         `json:"cpu_samples,omitempty"`
 	CPUSeen      map[int]int64 `json:"cpu_seen,omitempty"`
@@ -345,11 +349,9 @@ type Options struct {
 	// One mature worker is an anecdote.
 	MinMatureWorkers int
 
-	// MeasureCPU records how CPU-bound each pool's requests are, from php-fpm's
-	// own per-request CPU figure. Off by default, and opt-in on purpose: it is
-	// a report, it sizes nothing, and a state file should carry nothing an
-	// operator did not ask for. See cpu.go.
-	MeasureCPU bool
+	// MinCPUReadings is how many requests a pool's CPU histogram needs before
+	// its shape is called anything, or allowed to cap the pool. See cpu.go.
+	MinCPUReadings int
 
 	// AlphaUp is the weight given to an observation LARGER than the current
 	// estimate. Per sample, and deliberately high: a worker costing more than
@@ -483,6 +485,9 @@ func (o Options) Defaults() Options {
 	}
 	if o.PeakWindow <= 0 {
 		o.PeakWindow = 24 * time.Hour
+	}
+	if o.MinCPUReadings <= 0 {
+		o.MinCPUReadings = 20
 	}
 
 	return o
@@ -779,9 +784,7 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	// Before the memory path's early returns: how CPU-bound a request was is
 	// known the moment it finished, and does not wait for the worker that served
 	// it to have loaded the whole application.
-	if opts.MeasureCPU {
-		ps.observeCPU(obs.Workers)
-	}
+	ps.observeCPU(obs.Workers)
 
 	// The peak is taken over EVERY worker with a reading; maturity decides only
 	// whether the scrape counts at all.

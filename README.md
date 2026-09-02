@@ -92,6 +92,16 @@ an expensive pool gets *fewer* workers and a busy one can borrow headroom from a
 neighbour. When the budget's gone, it says so plainly instead of pretending a config
 change will help.
 
+## And the other dimension
+
+Memory is what OOMs a host, so memory is what fpm-tune sizes on. For a cpu-bound
+pool that is the wrong number. Take uncached WordPress: once its busy workers
+fill the cores, every extra worker only lengthens each request, and the queue
+stops draining. So every plan also measures what each pool's requests cost in
+CPU, from php-fpm's own per-request figure, and says which of the two the pool
+runs out of first. Pass `--cpu` to let that cap the pool. See
+[CPU per request](docs/how-it-decides/cpu.md).
+
 ## Safe to try
 
 It writes production config, so it earns trust one step at a time: `plan` and `serve`

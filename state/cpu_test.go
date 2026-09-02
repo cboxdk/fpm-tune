@@ -1,8 +1,6 @@
 package state
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 )
@@ -16,12 +14,11 @@ func idleWorker(pid int, requests int64, cpuPercent float64, micros int64) Worke
 	}
 }
 
-// TestCPUIsNotMeasuredUnlessAskedFor: the feature is opt-in, and opt-in means
-// the state file carries nothing about it unless the operator turned it on. A
-// histogram that appears on its own is a state file the operator did not ask
-// for, and the mark of a measurement nobody has checked yet leaking into the
-// baseline of everyone.
-func TestCPUIsNotMeasuredUnlessAskedFor(t *testing.T) {
+// TestCPUIsMeasuredWithoutBeingAskedFor: the number is in every status
+// response, so it is recorded on every scrape — a plan has to be able to say
+// which of memory and CPU a pool runs out of first without anyone having
+// turned a switch a week earlier.
+func TestCPUIsMeasuredWithoutBeingAskedFor(t *testing.T) {
 	s := New()
 	s.Learn(Observation{
 		Pool: "www", At: time.Now(),
@@ -29,19 +26,11 @@ func TestCPUIsNotMeasuredUnlessAskedFor(t *testing.T) {
 	}, Options{})
 
 	ps := s.Pools["www"]
-	if ps.CPUSamples != 0 || ps.CPUHistogram != nil || ps.CPUSeen != nil {
-		t.Errorf("CPU was recorded without MeasureCPU: samples=%d histogram=%v seen=%v",
-			ps.CPUSamples, ps.CPUHistogram, ps.CPUSeen)
+	if ps.CPUSamples != 2 {
+		t.Errorf("CPUSamples = %d, want 2: CPU is measured on every scrape", ps.CPUSamples)
 	}
-
-	body, err := json.Marshal(ps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"cpu_histogram", "cpu_samples", "cpu_seen"} {
-		if strings.Contains(string(body), key) {
-			t.Errorf("the state file carries %q although CPU was never measured:\n%s", key, body)
-		}
+	if ps.CPUShapeKnown(Options{}) {
+		t.Error("two readings are not a shape")
 	}
 }
 
@@ -54,14 +43,13 @@ func TestCPUIsNotMeasuredUnlessAskedFor(t *testing.T) {
 // pool is rather than what its requests look like.
 func TestTheSameRequestIsCountedOnce(t *testing.T) {
 	s := New()
-	opts := Options{MeasureCPU: true}
 	at := time.Now()
 
 	// Scrape one: two idle workers, each with a finished request.
 	s.Learn(Observation{Pool: "www", At: at, Workers: []WorkerSample{
 		idleWorker(1, 10, 80, 200_000),
 		idleWorker(2, 10, 20, 200_000),
-	}}, opts)
+	}}, Options{})
 	ps := s.Pools["www"]
 	if ps.CPUSamples != 2 {
 		t.Fatalf("CPUSamples = %d after the first scrape, want 2", ps.CPUSamples)
@@ -71,7 +59,7 @@ func TestTheSameRequestIsCountedOnce(t *testing.T) {
 	s.Learn(Observation{Pool: "www", At: at.Add(30 * time.Second), Workers: []WorkerSample{
 		idleWorker(1, 10, 80, 200_000),
 		idleWorker(2, 10, 20, 200_000),
-	}}, opts)
+	}}, Options{})
 	if ps.CPUSamples != 2 {
 		t.Errorf("CPUSamples = %d after an idle scrape, want 2: the same request was counted again", ps.CPUSamples)
 	}
@@ -80,7 +68,7 @@ func TestTheSameRequestIsCountedOnce(t *testing.T) {
 	s.Learn(Observation{Pool: "www", At: at.Add(60 * time.Second), Workers: []WorkerSample{
 		idleWorker(1, 11, 90, 200_000),
 		idleWorker(2, 10, 20, 200_000),
-	}}, opts)
+	}}, Options{})
 	if ps.CPUSamples != 3 {
 		t.Errorf("CPUSamples = %d after one new request, want 3", ps.CPUSamples)
 	}
@@ -90,15 +78,67 @@ func TestTheSameRequestIsCountedOnce(t *testing.T) {
 	// request.
 	s.Learn(Observation{Pool: "www", At: at.Add(90 * time.Second), Workers: []WorkerSample{
 		idleWorker(1, 1, 50, 200_000),
-	}}, opts)
+	}}, Options{})
 	if _, still := ps.CPUSeen[2]; still {
 		t.Error("a worker that exited is still in the dedupe map")
 	}
 	if ps.CPUSamples != 4 {
-		// pid 1 came back with a counter of 1 against a remembered 11: a
-		// recycled worker wearing an old number, whose one request is as new as
-		// any. Only an UNCHANGED counter means "the same request".
 		t.Errorf("CPUSamples = %d, want 4: a recycled pid's request is a new request", ps.CPUSamples)
+	}
+}
+
+// TestARequestStillRunningAtTheScrapeIsCountedWhenItFinishes.
+//
+// php-fpm counts a request the moment it STARTS, so a worker seen Running
+// with requests=12 shows requests=12 again once it is Idle. Remembering the
+// running worker's counter made that finished request read as "already
+// counted" — and a request that is still running when the scrape lands is
+// exactly the long, CPU-heavy one this measurement exists to see.
+func TestARequestStillRunningAtTheScrapeIsCountedWhenItFinishes(t *testing.T) {
+	ps := &PoolState{}
+
+	running := idleWorker(7, 12, 0, 0)
+	running.Idle = false
+	ps.observeCPU([]WorkerSample{running})
+	if _, remembered := ps.CPUSeen[7]; remembered {
+		t.Fatal("a running worker's counter was remembered; it names the request that is not finished")
+	}
+
+	ps.observeCPU([]WorkerSample{idleWorker(7, 12, 95, 20_000_000)})
+	if ps.CPUSamples != 1 {
+		t.Errorf("CPUSamples = %d, want 1: the request that spanned the scrape was never counted", ps.CPUSamples)
+	}
+
+	// And a worker that was counted, then seen running, then idle again with
+	// the SAME counter as before it ran, is the old request — the remembered
+	// value carries across the running scrape.
+	ps.observeCPU([]WorkerSample{func() WorkerSample { w := idleWorker(7, 13, 0, 0); w.Idle = false; return w }()})
+	if ps.CPUSeen[7] != 12 {
+		t.Errorf("CPUSeen[7] = %d across a running scrape, want the remembered 12", ps.CPUSeen[7])
+	}
+	ps.observeCPU([]WorkerSample{idleWorker(7, 13, 60, 200_000)})
+	if ps.CPUSamples != 2 {
+		t.Errorf("CPUSamples = %d, want 2", ps.CPUSamples)
+	}
+}
+
+// TestOurOwnRequestsAreNotTheSite: every scrape sends the status call and an
+// opcache probe through a worker. On a quiet pool they are the only requests
+// that move a counter, and a large opcache's probe computes for well over the
+// duration floor — so without the exclusion a staging pool reads as cpu-bound
+// from being watched. The counter is still remembered, so the same probe is
+// not re-examined next scrape.
+func TestOurOwnRequestsAreNotTheSite(t *testing.T) {
+	ps := &PoolState{}
+	probe := idleWorker(1, 5, 100, 300_000)
+	probe.OwnRequest = true
+
+	ps.observeCPU([]WorkerSample{probe, idleWorker(2, 5, 30, 300_000)})
+	if ps.CPUSamples != 1 {
+		t.Errorf("CPUSamples = %d, want 1: the tool's own request was measured as the site's", ps.CPUSamples)
+	}
+	if ps.CPUSeen[1] != 5 {
+		t.Errorf("CPUSeen[1] = %d, want 5: a rejected reading is still remembered", ps.CPUSeen[1])
 	}
 }
 
@@ -108,44 +148,40 @@ func TestTheSameRequestIsCountedOnce(t *testing.T) {
 // the request's shape.
 func TestShortRequestsAreNotBelieved(t *testing.T) {
 	ps := &PoolState{}
-	n := ps.observeCPU([]WorkerSample{
+	ps.observeCPU([]WorkerSample{
 		idleWorker(1, 5, 500, 2_000),  // 2ms: caught a tick
 		idleWorker(2, 5, 0, 2_000),    // 2ms: missed it
 		idleWorker(3, 5, 60, 49_999),  // just under the floor
 		idleWorker(4, 5, 60, 50_000),  // on it
 		idleWorker(5, 5, 60, 900_000), // well over
 	})
-	if n != 2 || ps.CPUSamples != 2 {
-		t.Errorf("recorded %d readings (samples=%d), want 2: only requests of 50ms or more", n, ps.CPUSamples)
+	if ps.CPUSamples != 2 {
+		t.Errorf("recorded %d readings, want 2: only requests of 50ms or more", ps.CPUSamples)
 	}
 }
 
-// TestOnlyIdleWorkersWithARequestCount: a running worker reports 0 because its
-// request is not finished, and a worker that has served nothing has no last
-// request. Neither is a measurement.
-func TestOnlyIdleWorkersWithARequestCount(t *testing.T) {
+// TestWorkersWithNothingToReportAreSkipped: a worker that has served nothing
+// has no last request, and one without a pid cannot be remembered.
+func TestWorkersWithNothingToReportAreSkipped(t *testing.T) {
 	ps := &PoolState{}
-	running := idleWorker(1, 5, 0, 200_000)
-	running.Idle = false
 	fresh := idleWorker(2, 0, 0, 0)
 	noPID := idleWorker(0, 5, 70, 200_000)
 
-	if n := ps.observeCPU([]WorkerSample{running, fresh, noPID}); n != 0 {
-		t.Errorf("recorded %d readings from workers that had none to give", n)
+	ps.observeCPU([]WorkerSample{fresh, noPID})
+	if ps.CPUSamples != 0 {
+		t.Errorf("recorded %d readings from workers that had none to give", ps.CPUSamples)
 	}
-	// Every worker WITH a pid is remembered, accepted or not, so a rejected
-	// reading is not re-examined next scrape; a worker without one cannot be.
-	if ps.CPUSeen[1] != 5 || ps.CPUSeen[2] != 0 || len(ps.CPUSeen) != 2 {
-		t.Errorf("CPUSeen = %v, want pids 1 and 2 remembered and no entry for pid 0", ps.CPUSeen)
+	if ps.CPUSeen != nil {
+		t.Errorf("CPUSeen = %v, want nil: nothing here is worth a map entry", ps.CPUSeen)
 	}
 }
 
-// TestCPUPercentilesDescribeWhatWasSeen: the report's numbers are the floor of
-// the bucket the fraction lands in, and a reading past 200% is a misread that
+// TestCPUShareDescribesWhatWasSeen: the report's numbers are the floor of the
+// bucket the fraction lands in, and a reading past the top is a misread that
 // lands in the last bucket rather than anywhere the arithmetic could believe.
-func TestCPUPercentilesDescribeWhatWasSeen(t *testing.T) {
+func TestCPUShareDescribesWhatWasSeen(t *testing.T) {
 	ps := &PoolState{}
-	if got := ps.CPUPercentile(0.5); got != 0 {
+	if got := ps.CPUShare(0.5); got != 0 {
 		t.Errorf("an empty distribution reports %v, want 0", got)
 	}
 
@@ -170,30 +206,30 @@ func TestCPUPercentilesDescribeWhatWasSeen(t *testing.T) {
 		{0.95, 0.70},
 		{1.00, 1.30},
 	} {
-		if got := ps.CPUPercentile(tc.p); got < tc.want-0.001 || got > tc.want+0.001 {
+		if got := ps.CPUShare(tc.p); got < tc.want-0.001 || got > tc.want+0.001 {
 			t.Errorf("p%.0f = %.2f, want %.2f", tc.p*100, got, tc.want)
 		}
 	}
 
 	// A misread.
 	ps.observeCPU([]WorkerSample{idleWorker(pid, 1, 9_000, 200_000)})
-	if got := ps.CPUPercentile(1); got > 2.0 {
+	if got := ps.CPUShare(1); got > 2.0 {
 		t.Errorf("a 9000%% reading came out as %.2f; it should be clamped into the last bucket", got)
 	}
 }
 
 // TestCPUHistogramDecays: an all-time record of a pool redeployed six months
 // ago describes an application that no longer exists. Halving keeps the shape
-// while letting the past fade, as the memory histogram does.
+// while letting the past fade, as the memory histogram does — the same code.
 func TestCPUHistogramDecays(t *testing.T) {
 	ps := &PoolState{}
-	for i := 0; i < cpuDecayAfter+1; i++ {
+	for i := 0; i < decayAfter+1; i++ {
 		ps.observeCPU([]WorkerSample{idleWorker(i+1, 1, 80, 200_000)})
 	}
-	if ps.CPUSamples > int64(cpuDecayAfter)/2+1 {
-		t.Errorf("CPUSamples = %d after %d readings; the histogram did not halve", ps.CPUSamples, cpuDecayAfter+1)
+	if ps.CPUSamples > int64(decayAfter)/2+1 {
+		t.Errorf("CPUSamples = %d after %d readings; the histogram did not halve", ps.CPUSamples, decayAfter+1)
 	}
-	if got := ps.CPUPercentile(0.5); got < 0.79 || got > 0.81 {
+	if got := ps.CPUShare(0.5); got < 0.79 || got > 0.81 {
 		t.Errorf("p50 = %.2f after decay, want 0.80: halving must keep the shape", got)
 	}
 }
@@ -204,7 +240,7 @@ func TestCPUSurvivesTheStateFile(t *testing.T) {
 	s := New()
 	s.Learn(Observation{Pool: "www", At: time.Now(), Workers: []WorkerSample{
 		idleWorker(1, 10, 80, 200_000),
-	}}, Options{MeasureCPU: true})
+	}}, Options{})
 
 	path := t.TempDir() + "/state.json"
 	if err := s.Save(path); err != nil {
@@ -221,8 +257,24 @@ func TestCPUSurvivesTheStateFile(t *testing.T) {
 
 	loaded.Learn(Observation{Pool: "www", At: time.Now(), Workers: []WorkerSample{
 		idleWorker(1, 10, 80, 200_000),
-	}}, Options{MeasureCPU: true})
+	}}, Options{})
 	if ps.CPUSamples != 1 {
 		t.Errorf("CPUSamples = %d after a restart saw the same request again, want 1", ps.CPUSamples)
+	}
+}
+
+// TestTheShapeNeedsTwentyReadings: the threshold is an Option like the memory
+// confidence it mirrors, and defaults to twenty.
+func TestTheShapeNeedsTwentyReadings(t *testing.T) {
+	ps := &PoolState{CPUSamples: 19}
+	if ps.CPUShapeKnown(Options{}) {
+		t.Error("19 readings called a shape")
+	}
+	ps.CPUSamples = 20
+	if !ps.CPUShapeKnown(Options{}) {
+		t.Error("20 readings did not")
+	}
+	if ps.CPUShapeKnown(Options{MinCPUReadings: 50}) {
+		t.Error("the option was not honoured")
 	}
 }

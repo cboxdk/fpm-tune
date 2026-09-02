@@ -479,6 +479,50 @@ func TestCPUsBoundWhatMemoryWouldAllow(t *testing.T) {
 	}
 }
 
+// TestAMeasuredCPUCeilingBindsOnWantOnly: with --cpu, plan hands a cpu-bound
+// pool the number of busy workers that fill the CPU, and the allocator holds
+// the pool there instead of where memory would put it — but only on WANT. The
+// floor is a reservation for workers already running; a pool whose floor is
+// above the ceiling has not earned a cut, and the ceiling does nothing to it.
+func TestAMeasuredCPUCeilingBindsOnWantOnly(t *testing.T) {
+	busy := Pool{
+		Name: "shop", ProcessManager: "dynamic", WorkerBytes: 64 << 20,
+		CurrentMaxChildren: 40, ObservedPeak: 30, Measured: true, Reducible: true,
+		CPUCeiling: 6,
+	}
+
+	plan := mustComputeWith(t, Budget{TotalBytes: 64 << 30, ReserveBytes: 4 << 30, CPUs: 4}, []Pool{busy})
+	p := plan.Pools[0]
+	if p.MaxChildren != 6 || !p.CPUBound {
+		t.Errorf("a trusted cpu-bound pool was given %d (CPUBound=%v); memory allowed more, the CPU fills at 6", p.MaxChildren, p.CPUBound)
+	}
+	if p.Want != 6 {
+		t.Errorf("Want = %d; the cap is on want, so the pool is not reported as held back by the budget", p.Want)
+	}
+	if !strings.Contains(p.Reason, "cpu-bound") {
+		t.Errorf("Reason = %q; it should say the CPU is what held the number", p.Reason)
+	}
+
+	// The same pool without permission to cut: its floor is its configured
+	// ceiling, and the CPU ceiling stays out of it.
+	held := busy
+	held.Reducible = false
+	held.Floor = 40
+	plan = mustComputeWith(t, Budget{TotalBytes: 64 << 30, ReserveBytes: 4 << 30, CPUs: 4}, []Pool{held})
+	if p := plan.Pools[0]; p.MaxChildren < 40 || p.CPUBound {
+		t.Errorf("a pool with a floor of 40 was cut to %d on a CPU ceiling of 6 (CPUBound=%v)", p.MaxChildren, p.CPUBound)
+	}
+
+	// And an unknown pool is never proposed anything, ceiling or not.
+	unknown := busy
+	unknown.Unknown = true
+	unknown.Floor = 40
+	plan = mustComputeWith(t, Budget{TotalBytes: 64 << 30, ReserveBytes: 4 << 30, CPUs: 4}, []Pool{unknown})
+	if p := plan.Pools[0]; p.CPUBound {
+		t.Errorf("an unknown pool was marked CPU-bound: %+v", p)
+	}
+}
+
 // TestUnknownCPUCountKeepsTheOldBehaviour: a host whose core count could not be
 // detected must still get a plan, bounded by memory alone.
 func TestUnknownCPUCountKeepsTheOldBehaviour(t *testing.T) {

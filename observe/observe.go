@@ -326,12 +326,31 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 				Idle:              strings.EqualFold(proc.State, "Idle"),
 				LastRequestCPU:    proc.LastRequestCPU,
 				LastRequestMicros: proc.RequestDuration,
+				OwnRequest:        ownRequest(proc.RequestURI, target.StatusPath),
 			})
 		}
 
 	}
 
 	return view
+}
+
+// opcacheProbePrefix is the script the phpfpm library runs through a worker
+// every scrape to read opcache status. The library keeps the constant private;
+// it is repeated here because a request the tool sent must not be measured as
+// one the site served, and the alternative is a measurement that calls a quiet
+// pool cpu-bound from being watched.
+const opcacheProbePrefix = "/cbox-phpfpm-opcache-"
+
+// ownRequest reports whether a worker's last request was one this tool sent:
+// the status call, or the opcache probe. The URI arrives with its query string
+// already stripped by the library.
+func ownRequest(uri, statusPath string) bool {
+	if statusPath != "" && strings.HasPrefix(uri, statusPath) {
+		return true
+	}
+
+	return strings.HasPrefix(uri, opcacheProbePrefix)
 }
 
 // SubtreeRSS sums php-fpm's own current memory across the views — each worker plus

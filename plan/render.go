@@ -120,22 +120,32 @@ func (r Result) Render(w io.Writer) error {
 	}
 
 	if len(r.CPU) > 0 {
-		fmt.Fprintf(&b, "\nCPU per request, as measured (--cpu):\n")
+		fmt.Fprintf(&b, "\nCPU per request, as measured:\n")
 
 		ct := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(ct, "  POOL\tTYPICAL\tP90\tREADINGS\tSHAPE")
+		_, _ = fmt.Fprintln(ct, "  POOL\tTYPICAL\tP90\tREADINGS\tPER WORKER\tLIMIT\tWHY")
 		for _, c := range r.CPU {
-			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\n",
-				c.Name, cpuPercent(c, c.P50), cpuPercent(c, c.P90), c.Samples, cpuShapeLine(c, r.Budget.CPUs))
+			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				c.Name, cpuPercent(c, c.P50), cpuPercent(c, c.P90), c.Samples,
+				cpuPerWorker(c), cpuLimit(c), cpuWhy(c, r.HostCPU.Millicores))
 		}
 		if err := ct.Flush(); err != nil {
 			return err
 		}
 
-		fmt.Fprintf(&b, "  Sizing does not use this. It is here for the decision you make by hand:\n"+
-			"  a cpu-bound pool gets SLOWER, not faster, past the point where its busy\n"+
-			"  workers fill the cores — requests take longer, workers stay busy longer,\n"+
-			"  and the queue stops draining. Memory alone cannot see that.\n")
+		if h := r.HostCPU; h.Known > 0 && h.Millicores > 0 {
+			fmt.Fprintf(&b, "  If every measured pool ran its ceiling busy at once: %s now, %s at this\n"+
+				"  plan, against %s.\n",
+				budget.HumanMillicores(h.NeededNow), budget.HumanMillicores(h.NeededAtPlan),
+				budget.HumanMillicores(h.Millicores))
+		}
+		if r.CPUCeiling {
+			fmt.Fprintf(&b, "  --cpu is on: a cpu-limited pool is held at the busy workers that fill the\n"+
+				"  CPU, and its row in the plan table says so.\n")
+		} else {
+			fmt.Fprintf(&b, "  Sizing uses memory. A cpu-limited pool gets slower, not faster, past the\n"+
+				"  workers that fill the CPU; pass --cpu to hold it there.\n")
+		}
 	}
 
 	if len(r.Bootstrapped) > 0 {
@@ -196,30 +206,55 @@ func (r Result) Render(w io.Writer) error {
 	return err
 }
 
-// cpuPercent prints a share as a whole percentage, or a dash for a pool with no
-// readings — "0%" would claim a measurement that was never taken.
+// cpuPercent prints a share as a whole percentage, or a dash until there are
+// enough readings to call the shape — a number beside "too few readings" would
+// assert and disclaim in one line. The first bucket is printed as "<5%": its
+// floor is 0, and "0%" claims a measurement of nothing.
 func cpuPercent(c PoolCPU, share float64) string {
-	if c.Samples == 0 {
+	if c.Shape == "" {
 		return "-"
+	}
+	if share == 0 {
+		return "<5%"
 	}
 
 	return fmt.Sprintf("%.0f%%", share*100)
 }
 
-// cpuShapeLine is the SHAPE column: the verdict, and for a pool that has one,
-// the arithmetic beside the ceiling the plan gives it — the two numbers whose
-// gap is the whole reason to look.
-func cpuShapeLine(c PoolCPU, cores int) string {
+func cpuPerWorker(c PoolCPU) string {
+	if c.MillicoresPerWorker == 0 {
+		return "-"
+	}
+
+	return fmt.Sprintf("%dm", c.MillicoresPerWorker)
+}
+
+func cpuLimit(c PoolCPU) string {
+	if c.Limit == "" {
+		return "-"
+	}
+
+	return c.Limit
+}
+
+// cpuWhy is the WHY column: the arithmetic beside the ceilings, so the gap
+// between what fills the CPU and what the pool is allowed is on one line.
+func cpuWhy(c PoolCPU, hostMillicores int) string {
 	if c.Shape == "" {
 		return "too few readings yet"
 	}
+	if c.FillWorkers == 0 {
+		return c.Shape
+	}
 
-	line := c.Shape
-	if c.SaturatingWorkers > 0 && cores > 0 {
-		line += fmt.Sprintf(": ~%d busy workers saturate %d core(s)", c.SaturatingWorkers, cores)
-		if c.Allowed > 0 {
-			line += fmt.Sprintf("; plan allows %d", c.Allowed)
-		}
+	line := fmt.Sprintf("%s; ~%d busy workers fill %s", c.Shape, c.FillWorkers, budget.HumanMillicores(hostMillicores))
+	switch {
+	case c.Capped:
+		line += fmt.Sprintf("; held there (now %d)", c.Current)
+	case c.Allowed > 0:
+		line += fmt.Sprintf("; plan allows %d (now %d)", c.Allowed, c.Current)
+	case c.Current > 0:
+		line += fmt.Sprintf("; now %d", c.Current)
 	}
 
 	return line
