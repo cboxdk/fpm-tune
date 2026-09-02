@@ -140,8 +140,8 @@ func TestTheCPUDimensionIsPublished(t *testing.T) {
 		`fpm_tune_pool_cpu_share{estimate="p50",pool="shop"}`: "0.7",
 		`fpm_tune_pool_cpu_share{estimate="p90",pool="shop"}`: "0.75",
 		`fpm_tune_pool_cpu_readings{pool="shop"}`:             "50",
-		`fpm_tune_pool_cpu_fill_workers{pool="shop"}`:                 "6",
-		`fpm_tune_pool_cpu_limited{pool="shop"}`:                      "1",
+		`fpm_tune_pool_cpu_fill_workers{pool="shop"}`:         "6",
+		`fpm_tune_pool_cpu_limited{pool="shop"}`:              "1",
 		`fpm_tune_pool_cpu_readings{pool="blog"}`:             "3",
 	} {
 		if !exposes(t, c, want+" "+value) {
