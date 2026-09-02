@@ -95,11 +95,6 @@ LAYERED = {
     # The master note is keyed by pool directory in the FILENAME as well as
     # re-checked inside. Either alone keeps a repair off another master.
     "apply: the master note is not keyed by pool directory",
-    # The CPU ceiling waits for confidence in plan, and the allocator caps
-    # want only, never below a floor — and an untrusted pool's floor is its
-    # configured ceiling. Either alone keeps a cap off a pool that has not
-    # earned a cut.
-    "plan: the CPU ceiling ignores the confidence gate",
 }
 
 # (label, file, old, new)
@@ -458,8 +453,12 @@ MUTATIONS = [
     # of a pool that has not earned one, and never without --cpu.
     ("allocate: the CPU ceiling cuts below the floor",
      "allocate/allocate.go",
-     "		if p.CPUCeiling > 0 && !p.Unknown && wants[i] > p.CPUCeiling && floors[i] <= p.CPUCeiling {",
-     "		if p.CPUCeiling > 0 && !p.Unknown && wants[i] > p.CPUCeiling {\n			floors[i] = p.CPUCeiling"),
+     "			if cap < floors[i] {\n				cap = floors[i]\n			}\n",
+     "			if cap < floors[i] {\n				floors[i] = cap\n			}\n"),
+    ("allocate: a pool the budget trimmed is reported as held at the CPU",
+     "allocate/allocate.go",
+     "		bound := cpuBound[i] && granted[i] >= wants[i]",
+     "		bound := cpuBound[i]"),
     ("plan: the CPU ceiling ignores the confidence gate",
      "plan/cpu.go",
      "	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {",

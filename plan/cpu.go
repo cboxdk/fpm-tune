@@ -1,10 +1,12 @@
 package plan
 
 import (
+	"fmt"
 	"math"
 	"sort"
 
 	"github.com/cboxdk/fpm-tune/allocate"
+	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/state"
 )
@@ -121,6 +123,43 @@ func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int) 
 	return fill
 }
 
+// hostMillicores is the CPU to divide by. Limits built by hand, or by a source
+// that fills only the core count, carry no millicores; a core is a thousand of
+// them, and a report that divides by zero would call every pool memory-limited
+// and turn --cpu into a silent no-op.
+func hostMillicores(limits budget.Limits) int {
+	if limits.CPUMillicores > 0 {
+		return limits.CPUMillicores
+	}
+
+	return limits.CPUs * 1000
+}
+
+// Percent prints a share as a whole percentage, or a dash until there are
+// enough readings to call the shape — a number beside "too few readings" would
+// assert and disclaim in one line. The first bucket prints as "<5%": its floor
+// is 0, and "0%" claims a measurement of nothing.
+func (c PoolCPU) Percent(share float64) string {
+	if c.Shape == "" {
+		return "-"
+	}
+	if share == 0 {
+		return "<5%"
+	}
+
+	return fmt.Sprintf("%.0f%%", share*100)
+}
+
+// PerWorker prints the per-worker cost in millicores, or a dash when there is
+// none to give.
+func (c PoolCPU) PerWorker() string {
+	if c.MillicoresPerWorker == 0 {
+		return "-"
+	}
+
+	return fmt.Sprintf("%dm", c.MillicoresPerWorker)
+}
+
 // cpuOf builds the CPU report: one row for every pool this round, whether or
 // not it has readings yet. A pool listed with "too few readings" tells the
 // operator the measurement is running, where an absent row would not — and a
@@ -162,6 +201,12 @@ func cpuOf(
 			row.Allowed = pp.MaxChildren
 			row.Capped = pp.CPUBound
 		}
+		// A pool the plan does not write keeps the ceiling it has, so that is
+		// the ceiling to compare against and to count in the host sums.
+		atPlan := row.Allowed
+		if atPlan == 0 {
+			atPlan = row.Current
+		}
 		if ps != nil {
 			row.P50 = ps.CPUShare(0.50)
 			row.P90 = ps.CPUShare(0.90)
@@ -171,12 +216,12 @@ func cpuOf(
 		}
 		if row.Shape != "" {
 			row.Limit = "memory"
-			if row.Capped || (row.FillWorkers > 0 && row.Allowed > row.FillWorkers) {
+			if row.Capped || (row.FillWorkers > 0 && atPlan > row.FillWorkers) {
 				row.Limit = "cpu"
 			}
 
 			host.Known++
-			host.NeededAtPlan += row.Allowed * row.MillicoresPerWorker
+			host.NeededAtPlan += atPlan * row.MillicoresPerWorker
 			host.NeededNow += row.Current * row.MillicoresPerWorker
 		}
 

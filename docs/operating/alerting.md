@@ -62,6 +62,20 @@ fpm_tune_budget_bytes{state}                    # total, reserved, allocated, fr
 The `p50`/`p95`/`p99` estimates are the measured spread, which is what to graph
 when a host misbehaves at its busiest minute rather than on average.
 
+## Which resource a pool runs out of first
+
+```
+fpm_tune_pool_request_cpu_share{pool,estimate}   # p50, p90: share of a request's wall time on CPU
+fpm_tune_pool_request_cpu_readings{pool}         # how many requests that is built on; under 20, no verdict
+fpm_tune_pool_cpu_fill_workers{pool}             # busy workers that fill the host's CPU
+fpm_tune_pool_cpu_limited{pool}                  # 1 when the pool hits the CPU before its memory ceiling
+```
+
+`cpu_limited` at 1 is a pool that queues under load however much RAM the host
+has: its ceiling is above the workers that fill the CPU. Compare
+`cpu_fill_workers` with `workers_recommended`; the gap is what `--cpu` would
+take away. See [CPU per request](../how-it-decides/cpu.md).
+
 ## Two you should not see above zero
 
 ```

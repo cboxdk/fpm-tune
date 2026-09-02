@@ -15,7 +15,7 @@ busy longer, so fewer workers are free, so the queue grows, and the queue does
 not drain. The memory budget saw none of it: it said there was room for eighty
 workers, and there was, and eight would have been faster. Uncached WordPress is
 the common case. People who tune it by hand land on one and a half to two
-workers per core, not the fifty per core the memory arithmetic allows.
+workers per core, not the fifty per core this tool's coarse sanity bound allows.
 
 So every plan answers one more question per pool: which runs out first, memory
 or CPU?
@@ -143,13 +143,16 @@ fpm-tune serve --cpu         # let it bind, in advisory or apply mode as usual
 
 Or `cpu = true` in the service config. The measurement, the report, the
 `/metrics` series (`fpm_tune_pool_request_cpu_share`,
-`fpm_tune_pool_cpu_fill_workers`, `fpm_tune_pool_cpu_limited`) and the line in
-the recommendation file are there either way.
+`fpm_tune_pool_request_cpu_readings`, `fpm_tune_pool_cpu_fill_workers`,
+`fpm_tune_pool_cpu_limited`; see [Alerting](../operating/alerting.md)) and the
+line in the recommendation file are there either way.
 
 ## Fractional CPU
 
-A container quota of half a core is half a core. The core count the plan's first
-line prints is rounded *up*, because half a core still runs one worker at a
-time and that is the right number for the allocator's coarse per-core bound.
-Everything on this page divides by the quota itself, in millicores, so a
-half-core container is told its CPU fills at one busy worker, not two.
+A container quota of half a core is half a core. The plan's first line says so
+(`500m CPU`), and everything on this page divides by the quota itself, in
+millicores, so a half-core container is told its CPU fills at one busy worker,
+not two. The allocator's coarse fifty-per-core bound still rounds the quota up
+to a whole core, because half a core still runs one worker at a time and a
+bound of zero would be no bound at all. Where the fill count comes out under
+the floor a pool may run, the cap holds the pool at that floor.

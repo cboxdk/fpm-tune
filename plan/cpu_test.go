@@ -214,6 +214,9 @@ func TestTheCPUCeilingBindsOnlyWhenAskedAndOnlyOnATrustedPool(t *testing.T) {
 		if !young.Pools["shop"].CPUShapeKnown(state.Options{}) {
 			t.Fatal("fixture: the young pool should have enough CPU readings")
 		}
+		if young.Pools["shop"].Trusted(state.Options{}) {
+			t.Fatal("fixture: three scrapes over two minutes must not be a trusted baseline")
+		}
 		res, err := Build(Input{Limits: limits, Views: []observe.PoolView{view}, State: young, CPUCeiling: true})
 		if err != nil {
 			t.Fatal(err)
@@ -223,6 +226,22 @@ func TestTheCPUCeilingBindsOnlyWhenAskedAndOnlyOnATrustedPool(t *testing.T) {
 		}
 		if c := res.CPU[0]; c.Limit != "cpu" || c.Capped {
 			t.Errorf("the report should still say cpu, and not held: %+v", c)
+		}
+	})
+
+	t.Run("asked, not trusted, small ceiling: the gate is the only thing standing", func(t *testing.T) {
+		// Configured for 4, busy at 30: the floor is 4, below the fill count of
+		// 6, so the allocator's floor guard would let the ceiling bind. Only
+		// plan's confidence gate keeps an untrusted pool from being held at 6
+		// while memory would have grown it to 37.
+		small := view
+		small.CurrentMaxChildren = 4
+		res, err := Build(Input{Limits: limits, Views: []observe.PoolView{small}, State: young, CPUCeiling: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := res.Plan.Pools[0]; p.CPUBound || p.MaxChildren <= 6 {
+			t.Errorf("an untrusted pool was held at the CPU ceiling: %+v", p)
 		}
 	})
 }
@@ -237,18 +256,45 @@ func TestAnUnreachablePoolKeepsItsCPURow(t *testing.T) {
 		st.Learn(cpuBusy("shop", 0.72, i, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
 	}
 	views := []observe.PoolView{
-		{Name: "shop", ProcessManager: "dynamic", Err: errDown},
+		{Name: "shop", ProcessManager: "dynamic", CurrentMaxChildren: 40, MaxChildrenKnown: true, Err: errDown},
 		{Name: "new", ProcessManager: "dynamic", Err: errDown},
 	}
 	res, err := Build(Input{
-		Limits: budget.Limits{MemoryBytes: 4 * gb, CPUs: 4, CPUMillicores: 4000, Source: budget.SourceMemInfo},
+		Limits: budget.Limits{MemoryBytes: 16 * gb, CPUs: 4, CPUMillicores: 4000, Source: budget.SourceMemInfo},
 		Views:  views, State: st,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res.CPU) != 1 || res.CPU[0].Name != "shop" || res.CPU[0].Shape != "cpu-bound" {
-		t.Errorf("CPU = %+v, want shop's remembered row and nothing for a pool never seen", res.CPU)
+		t.Fatalf("CPU = %+v, want shop's remembered row and nothing for a pool never seen", res.CPU)
+	}
+	// The plan does not write an unreachable pool, so it keeps its 40: that is
+	// the ceiling to compare against, and what the host sums count.
+	if c := res.CPU[0]; c.Limit != "cpu" || res.HostCPU.NeededAtPlan != 40*700 || res.HostCPU.NeededNow != 40*700 {
+		t.Errorf("an unreachable pool at 40 was not counted at 40: %+v host=%+v", c, res.HostCPU)
+	}
+}
+
+// TestLimitsWithoutMillicoresStillDivide: Limits built by hand carry a core
+// count and no millicores. A core is a thousand of them; dividing by zero
+// would call every pool memory-limited and make --cpu a silent no-op.
+func TestLimitsWithoutMillicoresStillDivide(t *testing.T) {
+	st := state.New()
+	base := time.Now()
+	for i := 0; i < 25; i++ {
+		st.Learn(cpuBusy("shop", 0.72, i, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+	}
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 16 * gb, CPUs: 4, Source: budget.SourceMemInfo},
+		Views:  []observe.PoolView{{Name: "shop", ProcessManager: "dynamic", CurrentMaxChildren: 40, MaxChildrenKnown: true, ObservedPeak: 30}},
+		State:  st, CPUCeiling: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := res.CPU[0]; c.FillWorkers != 6 || c.Limit != "cpu" || !c.Capped || res.HostCPU.Millicores != 4000 {
+		t.Errorf("four cores without millicores: %+v host=%+v", c, res.HostCPU)
 	}
 }
 

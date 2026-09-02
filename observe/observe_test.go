@@ -237,3 +237,25 @@ func TestTheViewKeepsTheNameDiscoveryRead(t *testing.T) {
 			"drop-in will name it", view.Name)
 	}
 }
+
+// TestOwnRequestIsTheStatusPathOrTheProbe: the two requests this tool sends
+// every scrape are kept out of the CPU measurement, and nothing else is. The
+// status path is an exact match — a site's own /status/orders is the site's
+// request, and a prefix match dropped it.
+func TestOwnRequestIsTheStatusPathOrTheProbe(t *testing.T) {
+	for uri, want := range map[string]bool{
+		"/status":                         true,
+		"/cbox-phpfpm-opcache-abc123.php": true,
+		"/status/orders":                  false,
+		"/statusboard":                    false,
+		"/":                               false,
+		"/index.php":                      false,
+	} {
+		if got := ownRequest(uri, "/status"); got != want {
+			t.Errorf("ownRequest(%q) = %v, want %v", uri, got, want)
+		}
+	}
+	if ownRequest("/", "") {
+		t.Error("an empty status path matched the site's root")
+	}
+}

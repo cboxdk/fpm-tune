@@ -45,11 +45,12 @@ It keeps ~85% of the budget for workers and holds the rest back as headroom (tha
 the 15%, tunable with `--reserve`). On a shared box it also subtracts what MySQL and
 friends are actually using; a `used by other services` line shows up then.
 
-Below the table, a second one says which of memory and CPU each pool runs out of
-first. A cpu-bound pool sized on memory alone queues under load however much RAM
-it has: once its busy workers fill the cores, every extra worker only lengthens
-each request. The plan reports that on its own. Pass `--cpu` to let it hold such
-a pool at the workers that fill the CPU. See
+Further down, a `CPU per request` table says which of memory and CPU each pool
+runs out of first, once it has read enough requests (on a first run it says `too
+few readings yet`). A cpu-bound pool sized on memory alone queues under load
+however much RAM it has: once its busy workers fill the cores, every extra
+worker only lengthens each request. The plan reports that on its own. Pass
+`--cpu` to let it hold such a pool at the workers that fill the CPU. See
 [CPU per request](how-it-decides/cpu.md).
 
 On a first run every pool is `estimated`, not measured: the numbers are a

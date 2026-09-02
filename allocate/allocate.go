@@ -156,10 +156,12 @@ type Options struct {
 
 	// MaxWorkersPerCPU caps a pool regardless of available memory.
 	//
-	// PHP work is largely I/O-bound, so a generous multiple of the core count is
-	// reasonable — but memory alone is not a sufficient authority. Without this,
-	// a large host with a cheaply-measured worker produces a max_children in the
-	// hundreds of thousands, and a pm.start_servers to match.
+	// A coarse sanity bound, not a measurement: without it, a large host with
+	// a cheaply-measured worker produces a max_children in the hundreds of
+	// thousands, and a pm.start_servers to match. Fifty per core assumes a
+	// pool whose workers mostly wait, which many do and some do not. The
+	// MEASURED bound for a pool whose workers compute is Pool.CPUCeiling,
+	// which plan sets from what its requests cost when the operator asks.
 	MaxWorkersPerCPU int
 
 	// Spare ratios derive dynamic pm's start/min/max spare servers from
@@ -365,6 +367,7 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	// What each pool would take if the budget were unlimited.
 	wants := make([]int, len(pools))
 	floors := make([]int, len(pools))
+	memoryWants := make([]int, len(pools))
 	cpuBound := make([]bool, len(pools))
 	cpuCap := cpuCeiling(budget, opts)
 	for i, p := range pools {
@@ -373,14 +376,22 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 		if cpuCap > 0 && wants[i] > cpuCap {
 			wants[i] = cpuCap
 		}
+		memoryWants[i] = wants[i]
 		// The measured ceiling, where the operator let it bind. A cap on WANT
-		// only: the floor is a reservation for workers already running, and
-		// plan hands this ceiling only to pools it has watched long enough to
-		// cut, whose floor is the default. Below the floor the cap would be a
-		// cut on a pool that has not earned one, so there it does nothing.
-		if p.CPUCeiling > 0 && !p.Unknown && wants[i] > p.CPUCeiling && floors[i] <= p.CPUCeiling {
-			wants[i] = p.CPUCeiling
-			cpuBound[i] = true
+		// only, and never below the floor: the floor is a reservation for
+		// workers already running, and plan hands this ceiling only to pools it
+		// has watched long enough to cut. A fill count under the floor — one
+		// busy worker fills a half-core container — is raised to the floor, so
+		// the pool is held at the fewest workers it may run rather than not
+		// held at all.
+		if cap := p.CPUCeiling; cap > 0 && !p.Unknown {
+			if cap < floors[i] {
+				cap = floors[i]
+			}
+			if wants[i] > cap {
+				wants[i] = cap
+				cpuBound[i] = true
+			}
 		}
 		// The CPU ceiling is a bound on what to PROPOSE, and an unwritable pool
 		// is not being proposed anything. Its floor is a reservation for workers
@@ -411,6 +422,10 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 	var allocated int64
 	unmet := false
 	for i, p := range pools {
+		// Held at the CPU ceiling only if that is where it ENDED UP. The cap
+		// was on want; the budget can still grant less, and a pool the budget
+		// trimmed is short of memory, whatever the CPU would have allowed.
+		bound := cpuBound[i] && granted[i] >= wants[i]
 		pp := PoolPlan{
 			Name:        p.Name,
 			MaxChildren: granted[i],
@@ -420,10 +435,10 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			ChildBytes:  p.ChildBytes,
 			Want:        wants[i],
 			DemandUnmet: granted[i] < wants[i],
-			CPUBound:    cpuBound[i],
+			CPUBound:    bound,
 			Measured:    p.Measured,
 			Unknown:     p.Unknown,
-			Reason:      reason(p, granted[i], wants[i], floors[i], reduced, cpuBound[i]),
+			Reason:      reason(p, granted[i], wants[i], memoryWants[i], floors[i], reduced, bound),
 		}
 		if pp.DemandUnmet {
 			unmet = true
@@ -971,7 +986,7 @@ func largestGrantedAmong(granted []int, eligible func(int) bool) int {
 }
 
 // reason explains one pool's number, for the plan output.
-func reason(p Pool, granted, want, floor int, exhausted, cpuBound bool) string {
+func reason(p Pool, granted, want, memoryWant, floor int, exhausted, cpuBound bool) string {
 	source := "estimated"
 	if p.Measured {
 		source = "measured"
@@ -1004,7 +1019,7 @@ func reason(p Pool, granted, want, floor int, exhausted, cpuBound bool) string {
 		// the limit: the number is where its busy workers fill the CPU, and
 		// one more would slow every request rather than serve another.
 		return fmt.Sprintf("cpu-bound; %d busy workers fill the CPU, so held there rather than "+
-			"the %d memory allows, %s", granted, p.CPUCeiling, cost)
+			"the %d memory allows, %s", granted, memoryWant, cost)
 	case p.HitMaxChildren:
 		return fmt.Sprintf("hit its ceiling; grown to %d, %s",
 			granted, cost)

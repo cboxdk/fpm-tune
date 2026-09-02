@@ -257,7 +257,7 @@ func Build(in Input) (Result, error) {
 		}
 
 		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name],
-			in.CPUCeiling, in.Limits.CPUMillicores)
+			in.CPUCeiling, hostMillicores(in.Limits))
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -313,7 +313,7 @@ func Build(in Input) (Result, error) {
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
 	result.Advice = adviceFor(in.Views, in.State, allocation)
-	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, in.Limits.CPUMillicores, allocation, ambiguous)
+	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostMillicores(in.Limits), allocation, ambiguous)
 	result.CPUCeiling = in.CPUCeiling
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage

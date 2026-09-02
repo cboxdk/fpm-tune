@@ -329,7 +329,7 @@ func TestCeilingIsRespected(t *testing.T) {
 // varies between runs would reload PHP-FPM for no reason.
 func TestDeterministic(t *testing.T) {
 	pools := []Pool{
-		{Name: "a", ProcessManager: "dynamic", WorkerBytes: 55 * mb, ObservedPeak: 9, CurrentMaxChildren: 10},
+		{Name: "a", ProcessManager: "dynamic", WorkerBytes: 55 * mb, ObservedPeak: 9, CurrentMaxChildren: 10, Reducible: true, CPUCeiling: 5},
 		{Name: "b", ProcessManager: "dynamic", WorkerBytes: 130 * mb, ObservedPeak: 4, HitMaxChildren: true},
 		{Name: "c", ProcessManager: "static", WorkerBytes: 22 * mb, ObservedPeak: 30, QueueDepth: 7},
 	}
@@ -499,8 +499,10 @@ func TestAMeasuredCPUCeilingBindsOnWantOnly(t *testing.T) {
 	if p.Want != 6 {
 		t.Errorf("Want = %d; the cap is on want, so the pool is not reported as held back by the budget", p.Want)
 	}
-	if !strings.Contains(p.Reason, "cpu-bound") {
-		t.Errorf("Reason = %q; it should say the CPU is what held the number", p.Reason)
+	// Both numbers, so the operator can see what the cap cost: 30 busy × the
+	// 1.25 headroom is the 37 memory would have allowed.
+	if !strings.Contains(p.Reason, "cpu-bound") || !strings.Contains(p.Reason, "the 37 memory allows") {
+		t.Errorf("Reason = %q; it should say the CPU held the number and what memory allowed", p.Reason)
 	}
 
 	// The same pool without permission to cut: its floor is its configured
@@ -511,6 +513,26 @@ func TestAMeasuredCPUCeilingBindsOnWantOnly(t *testing.T) {
 	plan = mustComputeWith(t, Budget{TotalBytes: 64 << 30, ReserveBytes: 4 << 30, CPUs: 4}, []Pool{held})
 	if p := plan.Pools[0]; p.MaxChildren < 40 || p.CPUBound {
 		t.Errorf("a pool with a floor of 40 was cut to %d on a CPU ceiling of 6 (CPUBound=%v)", p.MaxChildren, p.CPUBound)
+	}
+
+	// A fill count under the floor: one busy worker fills a half-core
+	// container. The pool is held at the floor, and said to be held — not
+	// left uncapped because the ceiling was smaller than the least it may run.
+	tiny := busy
+	tiny.CPUCeiling = 1
+	plan = mustComputeWith(t, Budget{TotalBytes: 64 << 30, ReserveBytes: 4 << 30, CPUs: 1}, []Pool{tiny})
+	if p := plan.Pools[0]; p.MaxChildren != 2 || !p.CPUBound {
+		t.Errorf("a ceiling of 1 under the floor of 2 gave %d (CPUBound=%v); want held at the floor", p.MaxChildren, p.CPUBound)
+	}
+
+	// And a pool the BUDGET trims below the ceiling is short of memory, not
+	// held at the CPU: the report must not say "held there" beside a plan
+	// table that says "budget allows 4".
+	starved := busy
+	starved.CPUCeiling = 6
+	plan = mustComputeWith(t, Budget{TotalBytes: 4 * 64 << 20, ReserveBytes: 0, CPUs: 4}, []Pool{starved})
+	if p := plan.Pools[0]; p.MaxChildren >= 6 || p.CPUBound {
+		t.Errorf("a budget for 4 workers gave %d (CPUBound=%v); the CPU did not hold this pool, memory did", p.MaxChildren, p.CPUBound)
 	}
 
 	// And an unknown pool is never proposed anything, ceiling or not.

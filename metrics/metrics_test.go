@@ -122,6 +122,44 @@ func TestBaselineIsPublishedWithItsConfidence(t *testing.T) {
 	}
 }
 
+// TestTheCPUDimensionIsPublished: the four series a dashboard needs to answer
+// "is this pool short of CPU or memory", and the stale-series trap for the one
+// an alert would sit on — a cpu_limited that outlives its pool is the alert
+// nobody can silence.
+func TestTheCPUDimensionIsPublished(t *testing.T) {
+	r := result(poolPlan("shop", 12, false), poolPlan("blog", 4, false))
+	r.CPU = []plan.PoolCPU{
+		{Name: "shop", P50: 0.7, P90: 0.75, Samples: 50, Shape: "cpu-bound", MillicoresPerWorker: 700, FillWorkers: 6, Limit: "cpu"},
+		{Name: "blog", Samples: 3},
+	}
+
+	c := New()
+	c.Update(r, state.New(), state.Options{}, 1)
+
+	for want, value := range map[string]string{
+		`fpm_tune_pool_request_cpu_share{estimate="p50",pool="shop"}`: "0.7",
+		`fpm_tune_pool_request_cpu_share{estimate="p90",pool="shop"}`: "0.75",
+		`fpm_tune_pool_request_cpu_readings{pool="shop"}`:             "50",
+		`fpm_tune_pool_cpu_fill_workers{pool="shop"}`:                 "6",
+		`fpm_tune_pool_cpu_limited{pool="shop"}`:                      "1",
+		`fpm_tune_pool_request_cpu_readings{pool="blog"}`:             "3",
+	} {
+		if !exposes(t, c, want+" "+value) {
+			t.Errorf("%s is not published as %s", want, value)
+		}
+	}
+	// A pool without a shape publishes its reading count and nothing else: a
+	// share of 0 would read as a measurement.
+	if exposes(t, c, `fpm_tune_pool_request_cpu_share{estimate="p50",pool="blog"}`) {
+		t.Error("a pool with three readings published a CPU share")
+	}
+
+	c.Update(result(poolPlan("blog", 4, false)), state.New(), state.Options{}, 2)
+	if exposes(t, c, `fpm_tune_pool_cpu_limited{pool="shop"}`) {
+		t.Error("a pool that is gone still publishes cpu_limited")
+	}
+}
+
 // TestBudgetIsPublishedByState so the free headroom can be graphed alongside
 // what was allocated.
 func TestBudgetIsPublishedByState(t *testing.T) {

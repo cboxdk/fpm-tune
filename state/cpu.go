@@ -8,7 +8,8 @@ package state
 // stay busy longer, so the queue stops draining — and the memory budget, which
 // said there was room for eighty workers, saw none of it. Uncached WordPress is
 // the common case, and the people who tune it by hand land on one and a half
-// to two workers per core, not the fifty per core the memory arithmetic allows.
+// to two workers per core, not the fifty per core the allocator's coarse bound
+// allows.
 //
 // This file measures that dimension, always: the number is in every status
 // response the scrape already fetches, so measuring costs nothing and a plan

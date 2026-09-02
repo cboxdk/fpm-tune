@@ -126,8 +126,8 @@ func (r Result) Render(w io.Writer) error {
 		_, _ = fmt.Fprintln(ct, "  POOL\tTYPICAL\tP90\tREADINGS\tPER WORKER\tLIMIT\tWHY")
 		for _, c := range r.CPU {
 			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-				c.Name, cpuPercent(c, c.P50), cpuPercent(c, c.P90), c.Samples,
-				cpuPerWorker(c), cpuLimit(c), cpuWhy(c, r.HostCPU.Millicores))
+				c.Name, c.Percent(c.P50), c.Percent(c.P90), c.Samples,
+				c.PerWorker(), cpuLimit(c), cpuWhy(c, r.HostCPU.Millicores))
 		}
 		if err := ct.Flush(); err != nil {
 			return err
@@ -143,8 +143,8 @@ func (r Result) Render(w io.Writer) error {
 			fmt.Fprintf(&b, "  --cpu is on: a cpu-limited pool is held at the busy workers that fill the\n"+
 				"  CPU, and its row in the plan table says so.\n")
 		} else {
-			fmt.Fprintf(&b, "  Sizing uses memory. A cpu-limited pool gets slower, not faster, past the\n"+
-				"  workers that fill the CPU; pass --cpu to hold it there.\n")
+			fmt.Fprintf(&b, "  Sizing uses memory. A cpu-limited pool only gets slower past the workers\n"+
+				"  that fill the CPU; pass --cpu to hold it there.\n")
 		}
 	}
 
@@ -204,29 +204,6 @@ func (r Result) Render(w io.Writer) error {
 	_, err := io.WriteString(w, b.String())
 
 	return err
-}
-
-// cpuPercent prints a share as a whole percentage, or a dash until there are
-// enough readings to call the shape — a number beside "too few readings" would
-// assert and disclaim in one line. The first bucket is printed as "<5%": its
-// floor is 0, and "0%" claims a measurement of nothing.
-func cpuPercent(c PoolCPU, share float64) string {
-	if c.Shape == "" {
-		return "-"
-	}
-	if share == 0 {
-		return "<5%"
-	}
-
-	return fmt.Sprintf("%.0f%%", share*100)
-}
-
-func cpuPerWorker(c PoolCPU) string {
-	if c.MillicoresPerWorker == 0 {
-		return "-"
-	}
-
-	return fmt.Sprintf("%dm", c.MillicoresPerWorker)
 }
 
 func cpuLimit(c PoolCPU) string {

@@ -344,9 +344,11 @@ const opcacheProbePrefix = "/cbox-phpfpm-opcache-"
 
 // ownRequest reports whether a worker's last request was one this tool sent:
 // the status call, or the opcache probe. The URI arrives with its query string
-// already stripped by the library.
+// already stripped by the library. The status path is matched exactly — a
+// site's own /status/orders is the site's request, and a prefix match would
+// have dropped it from the measurement.
 func ownRequest(uri, statusPath string) bool {
-	if statusPath != "" && strings.HasPrefix(uri, statusPath) {
+	if statusPath != "" && uri == statusPath {
 		return true
 	}
 

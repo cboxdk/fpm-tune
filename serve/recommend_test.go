@@ -156,9 +156,23 @@ func TestRecommendationShowsChildrenWhenAPoolSpawnsThem(t *testing.T) {
 				Samples: 100, SubtreeHighWater: 60 * mb, ChildPerWorker: 0, // nothing spawned
 			},
 		},
+		CPU: []plan.PoolCPU{
+			{Name: "media", P50: 0.7, P90: 0.75, Samples: 50, Shape: "cpu-bound", MillicoresPerWorker: 700, FillWorkers: 6, Limit: "cpu"},
+			{Name: "web", Samples: 2}, // too few readings: no line
+		},
+		HostCPU: plan.HostCPU{Millicores: 4000, Known: 1},
 	}
 
 	file, _ := renderRecommendation(result, time.Unix(1_700_000_000, 0))
+
+	// The CPU dimension, in the same words the plan uses, and only for a pool
+	// whose shape is known.
+	if !strings.Contains(file, "cpu per request: median 70%, p90 75% (50 readings); 700m per busy worker, ~6 fill 4 core(s); limit: cpu") {
+		t.Errorf("the media pool's CPU shape is not in the recommendation:\n%s", file)
+	}
+	if n := strings.Count(file, "cpu per request"); n != 1 {
+		t.Errorf("cpu line rendered %d times, want exactly 1 (web has too few readings):\n%s", n, file)
+	}
 
 	if !strings.Contains(file, "children per worker") {
 		t.Errorf("the media pool's children are not shown; an operator sizing by hand "+

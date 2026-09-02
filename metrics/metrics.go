@@ -87,7 +87,7 @@ func New() *Collectors {
 		cpuReadings: gaugeVec(reg, "fpm_tune_pool_request_cpu_readings",
 			"How many requests the CPU share is built on. Below the threshold (20 by default) the shape is not called and the share series are absent.", "pool"),
 		cpuFillWorkers: gaugeVec(reg, "fpm_tune_pool_cpu_fill_workers",
-			"How many of this pool's workers, all busy at once, fill the host's CPU: the host's millicores over the pool's median per-request CPU. Compare with fpm_tune_pool_workers_recommended: a ceiling above this number is workers that make every request slower rather than serving more. Every pool is measured against the whole host; the figures do not add up across pools.", "pool"),
+			"How many of this pool's workers, all busy at once, fill the host's CPU: the host's millicores over the pool's median per-request CPU. Compare with fpm_tune_pool_workers_recommended: a ceiling above this number is workers that make every request slower rather than serving more. Every pool is measured against the whole host; the figures do not add up across pools. Absent until the shape is known, and for a pool whose median is under 5%, which has no fill count to give.", "pool"),
 		cpuLimited: gaugeVec(reg, "fpm_tune_pool_cpu_limited",
 			"1 when the pool runs out of CPU before it reaches its memory-sized ceiling — the fill count is below what memory allows — or when --cpu held it at the fill count. 0 when memory is the limit. Absent until the shape is known.", "pool"),
 
