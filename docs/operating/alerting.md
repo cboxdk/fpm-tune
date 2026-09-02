@@ -65,7 +65,7 @@ when a host misbehaves at its busiest minute rather than on average.
 ## Which resource a pool runs out of first
 
 ```
-fpm_tune_pool_cpu_share{pool,estimate}   # p50, p90: share of a request's wall time on CPU; above 1 when its children computed alongside
+fpm_tune_pool_cpu_ratio{pool,estimate}   # p50, p90: CPU seconds over wall seconds per request; above 1 when its children computed alongside
 fpm_tune_pool_cpu_readings{pool}         # how many requests that is built on; under 20, no verdict
 fpm_tune_pool_cpu_fill_workers{pool}             # busy workers that fill the host's CPU
 fpm_tune_pool_cpu_limited{pool}                  # 1 when the pool hits the CPU before its memory ceiling

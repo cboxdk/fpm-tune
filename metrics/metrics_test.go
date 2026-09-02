@@ -137,8 +137,8 @@ func TestTheCPUDimensionIsPublished(t *testing.T) {
 	c.Update(r, state.New(), state.Options{}, 1)
 
 	for want, value := range map[string]string{
-		`fpm_tune_pool_cpu_share{estimate="p50",pool="shop"}`: "0.7",
-		`fpm_tune_pool_cpu_share{estimate="p90",pool="shop"}`: "0.75",
+		`fpm_tune_pool_cpu_ratio{estimate="p50",pool="shop"}`: "0.7",
+		`fpm_tune_pool_cpu_ratio{estimate="p90",pool="shop"}`: "0.75",
 		`fpm_tune_pool_cpu_readings{pool="shop"}`:             "50",
 		`fpm_tune_pool_cpu_fill_workers{pool="shop"}`:         "6",
 		`fpm_tune_pool_cpu_limited{pool="shop"}`:              "1",
@@ -150,7 +150,7 @@ func TestTheCPUDimensionIsPublished(t *testing.T) {
 	}
 	// A pool without a shape publishes its reading count and nothing else: a
 	// share of 0 would read as a measurement.
-	if exposes(t, c, `fpm_tune_pool_cpu_share{estimate="p50",pool="blog"}`) {
+	if exposes(t, c, `fpm_tune_pool_cpu_ratio{estimate="p50",pool="blog"}`) {
 		t.Error("a pool with three readings published a CPU share")
 	}
 

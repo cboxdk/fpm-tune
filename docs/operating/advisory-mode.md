@@ -66,5 +66,5 @@ recommends (and the numbers have stopped being profile guesses), either paste th
 changes yourself, or add `--apply` and let it do the writing.
 
 The same percentiles are on `/metrics` as `estimate="p50"`, `"p95"` and `"p99"`,
-and the CPU share as `fpm_tune_pool_cpu_share` with `estimate="p50"` and
+and the CPU share as `fpm_tune_pool_cpu_ratio` with `estimate="p50"` and
 `"p90"`, if you would rather graph them than read a file.
