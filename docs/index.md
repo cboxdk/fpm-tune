@@ -32,6 +32,13 @@ divides the one pile of RAM between them (keeping a deliberate safety margin), a
 if you let it, writes the `pm.max_children` back and reloads. It's beta; more on that
 below.
 
+Memory is the number that OOMs a host, so memory is what it sizes on. It also
+measures what each pool's requests cost in CPU, from php-fpm's own per-request
+figure, and every plan says which of the two a pool runs out of first: a pool
+whose busy workers fill the cores gets nothing from more workers but slower
+requests. Pass `--cpu` to let that cap the pool. See
+[CPU per request](how-it-decides/cpu.md).
+
 ## The one distinction to get
 
 PHP-FPM already starts and stops workers for you. fpm-tune **doesn't replace

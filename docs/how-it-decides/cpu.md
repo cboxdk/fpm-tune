@@ -165,8 +165,8 @@ fpm-tune serve --cpu         # let it bind, in advisory or apply mode as usual
 ```
 
 Or `cpu = true` in the service config. The measurement, the report, the
-`/metrics` series (`fpm_tune_pool_request_cpu_share`,
-`fpm_tune_pool_request_cpu_readings`, `fpm_tune_pool_cpu_fill_workers`,
+`/metrics` series (`fpm_tune_pool_cpu_share`,
+`fpm_tune_pool_cpu_readings`, `fpm_tune_pool_cpu_fill_workers`,
 `fpm_tune_pool_cpu_limited`; see [Alerting](../operating/alerting.md)) and the
 line in the recommendation file are there either way.
 
