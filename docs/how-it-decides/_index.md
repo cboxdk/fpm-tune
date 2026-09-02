@@ -31,6 +31,10 @@ Read it in order:
 6. **[Static, dynamic, ondemand](process-managers.md)**: what it does with each
    `pm` mode, why it sizes within the mode rather than changing it, and the one
    suggestion it will make when a mode doesn't fit the workload.
+7. **[CPU per request](cpu.md)**: the dimension memory cannot see. A
+   cpu-bound pool gets slower, not faster, past the point where its busy
+   workers fill the cores. Measured with `--cpu`, reported, and deliberately
+   not yet sized on.
 
 The allocator ([dividing the budget](dividing-the-budget.md)) is pure
 computation with no I/O and no dependencies, which is what makes it exhaustively

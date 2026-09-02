@@ -279,5 +279,31 @@ echo "  confirmed: refused with $(head -1 "$ROOT/second.out")"
 kill $SERVE 2>/dev/null || true
 wait $SERVE 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+echo "--- the CPU report is opt-in: absent without --cpu, present with it, and the state file stays clean"
+# Everything above ran without the flag, so the baseline it built must carry
+# nothing about CPU: opt-in means the state file has no fields nobody asked for.
+if grep -q '"cpu_' "$STATE/state.json" 2>/dev/null; then
+  fail "the state file carries CPU fields although --cpu was never passed"
+fi
+"$BIN" plan --memory 512MB "${SCOPE[@]}" --state "$STATE/state.json" > "$ROOT/plan-nocpu.out" 2>&1 \
+  || fail "plan without --cpu failed:$(printf '\n')$(cat "$ROOT/plan-nocpu.out")"
+if grep -q "CPU per request" "$ROOT/plan-nocpu.out"; then
+  fail "plan printed the CPU section without --cpu:$(printf '\n')$(cat "$ROOT/plan-nocpu.out")"
+fi
+"$BIN" plan --cpu --memory 512MB "${SCOPE[@]}" --state "$STATE/state.json" > "$ROOT/plan-cpu.out" 2>&1 \
+  || fail "plan --cpu failed:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
+grep -q "CPU per request, as measured (--cpu):" "$ROOT/plan-cpu.out" \
+  || fail "plan --cpu printed no CPU section:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
+# Both pools are listed even though nothing has been served through them: a
+# pool with no readings says so, rather than vanishing from the report.
+for pool in www shop; do
+  grep -E "^  $pool[[:space:]]" "$ROOT/plan-cpu.out" | grep -q "too few readings yet" \
+    || fail "plan --cpu did not list $pool as having too few readings:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
+done
+# Still a plan: the flag adds a section, it must not take one away.
+grep -q "^POOL" "$ROOT/plan-cpu.out" || fail "plan --cpu lost the plan table"
+echo "  confirmed: the section appears only with --cpu, and only reports what was read"
+
 echo
 echo "e2e: all checks passed against php-fpm $("$FPM" -v | head -1)"

@@ -155,6 +155,11 @@ type Result struct {
 	// apart because it is not trying to.
 	Distribution []PoolDistribution
 
+	// CPU is how CPU-bound each pool's requests have measured. Reporting only,
+	// and present only when the operator asked for it (StateOptions.MeasureCPU):
+	// sizing stays on memory, and this is the dimension memory cannot see.
+	CPU []PoolCPU
+
 	// Ambiguous names pool names that appear more than once in this round,
 	// because two masters each have one. Nothing keyed on the name alone can
 	// represent them — not the metrics labels, not the plan table — so both say
@@ -296,6 +301,15 @@ func Build(in Input) (Result, error) {
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
 	result.Advice = adviceFor(in.Views, in.State, allocation)
+	if stateOpts.MeasureCPU {
+		allowed := make(map[string]int, len(allocation.Pools))
+		for _, p := range allocation.Pools {
+			if !p.Unknown {
+				allowed[p.Name] = p.MaxChildren
+			}
+		}
+		result.CPU = cpuOf(in.Views, in.State, in.Limits.CPUs, allowed)
+	}
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage
 	for name := range ambiguous {

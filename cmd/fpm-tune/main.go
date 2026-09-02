@@ -110,6 +110,7 @@ type commonFlags struct {
 	reserve     *string
 	workload    *string
 	sizing      *string
+	cpu         *bool
 	timeout     *time.Duration
 	verbose     *bool
 	noLearn     *bool
@@ -145,6 +146,8 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 			"percentile so a rare monster request doesn't inflate the pool, floored by the most recent "+
 			"peak so a deploy is still caught in one scrape; also p99, or a bare number) or `peak` (the "+
 			"pure peak-follower, most conservative, sizes forever on the worst worker ever seen)"),
+		cpu: fs.Bool("cpu", false, "also measure how CPU-bound each pool's requests are, from php-fpm's own "+
+			"per-request CPU figure, and report it. Advisory: it sizes nothing. Off by default"),
 		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
 		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
@@ -285,6 +288,7 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		ConfidenceSamples: *c.confSamples,
 		ConfidenceSpan:    *c.confSpan,
 		Sizing:            sizing,
+		MeasureCPU:        *c.cpu,
 	}
 	// One clock for the round. Learning and planning both move time-based state,
 	// and two calls to time.Now() a few hundred milliseconds apart is two
@@ -1097,6 +1101,7 @@ func runServe(args []string) error {
 			ConfidenceSamples: *c.confSamples,
 			ConfidenceSpan:    *c.confSpan,
 			Sizing:            sizing,
+			MeasureCPU:        *c.cpu,
 		},
 	}, log)
 	if err != nil {

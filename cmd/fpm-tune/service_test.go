@@ -30,6 +30,36 @@ func writeConfig(t *testing.T, body string) string {
 	return path
 }
 
+// TestCPUIsAFlagOnEveryCommandAndAConfigKey: the CPU report is opt-in, and the
+// opt-in has to reach the daemon too — plan reads the baseline serve builds, so
+// a flag that plan accepted and serve did not would report "too few readings"
+// forever. The service config maps keys to flags by name, so `cpu = true` must
+// land on the same flag.
+func TestCPUIsAFlagOnEveryCommandAndAConfigKey(t *testing.T) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	c := registerCommon(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if *c.cpu {
+		t.Fatal("--cpu is on by default; it must be opt-in")
+	}
+
+	path := writeConfig(t, "cpu = true\n")
+	if err := applyConfig(fs, path); err != nil {
+		t.Fatal(err)
+	}
+	if !*c.cpu {
+		t.Error("cpu = true in the service config did not turn the flag on")
+	}
+
+	// And the rendered config documents the key, so an operator finds it where
+	// the other settings live.
+	if !strings.Contains(renderServiceConfig("advisory", "127.0.0.1:9110"), "# cpu = true") {
+		t.Error("the rendered service config does not mention the cpu key")
+	}
+}
+
 func TestApplyConfigModeApply(t *testing.T) {
 	fs, apply, recommend, metrics, _ := serveFlags()
 	if err := fs.Parse(nil); err != nil {

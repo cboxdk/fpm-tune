@@ -432,6 +432,17 @@ MUTATIONS = [
      "plan/plan.go",
      "	if in.ReserveBytes == 0 && in.Limits.NeighborBytes > 0 {\n		reserve += in.Limits.NeighborBytes\n	}\n",
      ""),
+    # The CPU report stands on one guard: a worker's last request is counted
+    # once. Without it a quiet pool re-counts the same request every scrape and
+    # the distribution describes idleness, not requests.
+    ("state: the same request is counted on every scrape",
+     "state/cpu.go",
+     "		if prev, ok := ps.CPUSeen[w.PID]; ok && w.Requests == prev {",
+     "		if false {"),
+    ("state: CPU is measured without being asked for",
+     "state/state.go",
+     "	if opts.MeasureCPU {\n		ps.observeCPU(obs.Workers)\n	}\n",
+     "	ps.observeCPU(obs.Workers)\n"),
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")

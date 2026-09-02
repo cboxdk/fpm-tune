@@ -315,6 +315,17 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 				PSSBytes:        proc.CurrentPSS,
 				SubtreeRSSBytes: proc.SubtreeRSS,
 				Requests:        proc.Requests,
+
+				// Carried on every scrape whether or not CPU is being measured:
+				// the numbers are already in the status response, and the
+				// learner's option decides what to do with them. php-fpm only
+				// fills in the CPU figure once the request has finished and the
+				// worker is back to Idle; while it is Running the field reads 0,
+				// which is not a measurement, so the state travels with it.
+				PID:               proc.PID,
+				Idle:              strings.EqualFold(proc.State, "Idle"),
+				LastRequestCPU:    proc.LastRequestCPU,
+				LastRequestMicros: proc.RequestDuration,
 			})
 		}
 

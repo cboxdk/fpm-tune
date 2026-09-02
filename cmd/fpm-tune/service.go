@@ -382,6 +382,11 @@ metrics = %s
 # conservative, sizes forever on the worst worker ever seen. Also p99, or a number.
 # sizing = p95
 
+# Also measure how CPU-bound each pool's requests are, from php-fpm's own
+# per-request CPU figure, so "fpm-tune plan --cpu" can report it. Advisory: it
+# sizes nothing. Off by default.
+# cpu = true
+
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
 # drop-in-dir =

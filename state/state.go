@@ -49,6 +49,25 @@ type WorkerSample struct {
 	// Requests is how many requests this worker has served since it started.
 	// It is the maturity signal — see Learn.
 	Requests int64
+
+	// PID identifies the worker across scrapes, so the CPU figure of a request
+	// that has already been counted is not counted again on the next look.
+	// Zero when the scrape did not carry one.
+	PID int
+
+	// Idle is whether the worker was between requests when it was read. php-fpm
+	// fills in LastRequestCPU only for an idle worker: a running one reports
+	// zero, which is not a measurement.
+	Idle bool
+
+	// LastRequestCPU is php-fpm's own figure for the worker's most recent
+	// request: the share of its wall time spent on CPU, as a percentage, with
+	// the CPU of anything it spawned counted in. 100 is a request that
+	// computed the whole time; 10 is one that mostly waited on the database.
+	// LastRequestMicros is that request's duration, which decides whether the
+	// percentage means anything — see cpu.go.
+	LastRequestCPU    float64
+	LastRequestMicros int64
 }
 
 // Observation is one scrape of one pool.
@@ -195,6 +214,15 @@ type PoolState struct {
 	RSSHistogram []uint32 `json:"rss_histogram,omitempty"`
 	RSSSamples   int64    `json:"rss_samples,omitempty"`
 
+	// CPUHistogram counts how CPU-bound this pool's requests have been, in 5%
+	// buckets of the share of wall time a request spent on CPU. CPUSamples is
+	// how many readings are in it, and CPUSeen is each live worker's request
+	// count as of the last reading, so one request is counted once. All three
+	// are absent unless CPU was being measured (Options.MeasureCPU). See cpu.go.
+	CPUHistogram []uint32      `json:"cpu_histogram,omitempty"`
+	CPUSamples   int64         `json:"cpu_samples,omitempty"`
+	CPUSeen      map[int]int64 `json:"cpu_seen,omitempty"`
+
 	// MasterConfig is the php-fpm configuration this pool was learned from.
 	//
 	// A state file can be shared by two daemons, each scoped to one master, and
@@ -316,6 +344,12 @@ type Options struct {
 	// MinMatureWorkers is how many such workers a scrape needs before it counts.
 	// One mature worker is an anecdote.
 	MinMatureWorkers int
+
+	// MeasureCPU records how CPU-bound each pool's requests are, from php-fpm's
+	// own per-request CPU figure. Off by default, and opt-in on purpose: it is
+	// a report, it sizes nothing, and a state file should carry nothing an
+	// operator did not ask for. See cpu.go.
+	MeasureCPU bool
 
 	// AlphaUp is the weight given to an observation LARGER than the current
 	// estimate. Per sample, and deliberately high: a worker costing more than
@@ -740,6 +774,13 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	ps.LastUpdated = at
 	if obs.MasterConfig != "" {
 		ps.MasterConfig = obs.MasterConfig
+	}
+
+	// Before the memory path's early returns: how CPU-bound a request was is
+	// known the moment it finished, and does not wait for the worker that served
+	// it to have loaded the whole application.
+	if opts.MeasureCPU {
+		ps.observeCPU(obs.Workers)
 	}
 
 	// The peak is taken over EVERY worker with a reading; maturity decides only

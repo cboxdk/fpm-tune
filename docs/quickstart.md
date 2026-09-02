@@ -45,6 +45,11 @@ It keeps ~85% of the budget for workers and holds the rest back as headroom (tha
 the 15%, tunable with `--reserve`). On a shared box it also subtracts what MySQL and
 friends are actually using; a `used by other services` line shows up then.
 
+Add `--cpu` to also see how CPU-bound each pool's requests are, and roughly how
+many busy workers it takes to fill the cores. Memory sizing cannot see that, and a
+cpu-bound pool sized on memory alone queues under load however much RAM it has.
+It is a report; it changes no number. See [CPU per request](how-it-decides/cpu.md).
+
 On a first run every pool is `estimated`, not measured: the numbers are a
 profile's guess until the tool has watched real traffic. That is expected, and
 the plan says so.
