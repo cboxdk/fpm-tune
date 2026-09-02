@@ -204,17 +204,53 @@ func TestCPUShareDescribesWhatWasSeen(t *testing.T) {
 		{0.50, 0.10}, // 12% lands in the 10-15% bucket, reported as its floor
 		{0.90, 0.10},
 		{0.95, 0.70},
-		{1.00, 1.30},
+		{1.00, 1.25}, // above 100% the steps are 25% wide: 130% reads as 125%
 	} {
 		if got := ps.CPUShare(tc.p); got < tc.want-0.001 || got > tc.want+0.001 {
 			t.Errorf("p%.0f = %.2f, want %.2f", tc.p*100, got, tc.want)
 		}
 	}
 
-	// A misread.
-	ps.observeCPU([]WorkerSample{idleWorker(pid, 1, 9_000, 200_000)})
-	if got := ps.CPUShare(1); got > 2.0 {
-		t.Errorf("a 9000%% reading came out as %.2f; it should be clamped into the last bucket", got)
+	// A request that ran ffmpeg on eight cores: 800%, and it has to read as
+	// such — a top of 200% would tell the plan one busy worker costs a fifth
+	// of what it costs, in the direction that fills a host.
+	pid++
+	ps.observeCPU([]WorkerSample{idleWorker(pid, 1, 830, 5_000_000)})
+	if got := ps.CPUShare(1); got < 7.99 || got > 8.01 {
+		t.Errorf("an 830%% reading came out as %.2f, want 8.00 (the 800%% bucket's floor)", got)
+	}
+
+	// And a number no host can produce lands in the last bucket.
+	pid++
+	ps.observeCPU([]WorkerSample{idleWorker(pid, 1, 90_000, 200_000)})
+	if got := ps.CPUShare(1); got != 32.0 {
+		t.Errorf("a 90000%% reading came out as %.2f; it should be clamped into the last bucket", got)
+	}
+}
+
+// TestAHistogramFromAnotherLayoutIsDroppedNotIndexed: the buckets are
+// addressed by index, so a state file written by a build with a different
+// bucket count would be read under the wrong floors and then indexed past its
+// end. A description rebuilds itself within a day; a crashed daemon does not.
+func TestAHistogramFromAnotherLayoutIsDroppedNotIndexed(t *testing.T) {
+	s := New()
+	s.Pools["www"] = &PoolState{Pool: "www", CPUHistogram: make([]uint32, 40), CPUSamples: 12, RSSHistogram: make([]uint32, 3), RSSSamples: 3}
+	path := t.TempDir() + "/state.json"
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := loaded.Pools["www"]
+	if ps.CPUHistogram != nil || ps.CPUSamples != 0 || ps.RSSHistogram != nil || ps.RSSSamples != 0 {
+		t.Errorf("misshapen histograms survived the load: %+v", ps)
+	}
+	// And a scrape after that must not panic.
+	ps.observeCPU([]WorkerSample{idleWorker(1, 5, 3_100, 1_000_000)})
+	if ps.CPUSamples != 1 {
+		t.Errorf("CPUSamples = %d after a reading into a rebuilt histogram", ps.CPUSamples)
 	}
 }
 

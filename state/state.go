@@ -530,9 +530,25 @@ func Load(path string) (*State, error) {
 	for _, ps := range s.Pools {
 		ps.inferCadence()
 		ps.forgetTheFuture(now)
+		ps.dropMisshapenHistograms()
 	}
 
 	return &s, nil
+}
+
+// dropMisshapenHistograms discards a histogram whose length is not this
+// build's bucket count. The buckets are addressed by index, so a file written
+// by a build with a different layout — or a hand-edited one — would be read
+// under the wrong floors and, one bucket past its end, would stop the daemon
+// with an index out of range on the first scrape. A histogram is a description
+// that rebuilds itself within a day; the daemon is not.
+func (ps *PoolState) dropMisshapenHistograms() {
+	if ps.RSSHistogram != nil && len(ps.RSSHistogram) != rssBuckets {
+		ps.RSSHistogram, ps.RSSSamples = nil, 0
+	}
+	if ps.CPUHistogram != nil && len(ps.CPUHistogram) != cpuBuckets {
+		ps.CPUHistogram, ps.CPUSamples = nil, 0
+	}
 }
 
 // forgetTheFuture drops timestamps that have not happened yet.

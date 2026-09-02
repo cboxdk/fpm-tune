@@ -23,13 +23,33 @@ package state
 // included), as a percentage. A share of 70% is 700 millicores while the
 // worker is busy — the same unit a container quota is written in.
 
-const (
-	// cpuBuckets covers 0% to 200% in 5% steps. Above 100% is possible — a
-	// request that spawned a child which computed in parallel — and above the
-	// top is a misread rather than a workload, so it lands in the last bucket.
-	cpuBuckets     = 40
-	cpuBucketWidth = 5.0
-)
+// The buckets: 5% steps to 100%, 25% steps to 400%, 100% steps to 3200%.
+//
+// Above 100% is not a misread. php-fpm's figure counts the CPU of the children
+// a request waited for — the ffmpeg behind an exec(), and what that ffmpeg
+// spawned in turn — and a transcode on eight cores for the whole request is a
+// share of 800%. A top of 200% would file that at 195% and tell the plan one
+// busy worker costs a fifth of what it costs, in the direction that fills a
+// host. The steps widen with the share because the arithmetic built on it
+// (cores over share) cares about 5% near the bottom and about 100% near the
+// top. Anything past 3200% lands in the last bucket: no host this tool runs
+// on has more cores than that for one request.
+var cpuBucketFloors = func() []float64 {
+	var floors []float64
+	for p := 0.0; p < 100; p += 5 {
+		floors = append(floors, p)
+	}
+	for p := 100.0; p < 400; p += 25 {
+		floors = append(floors, p)
+	}
+	for p := 400.0; p <= 3200; p += 100 {
+		floors = append(floors, p)
+	}
+
+	return floors
+}()
+
+var cpuBuckets = len(cpuBucketFloors)
 
 // minCPURequestMicros is the shortest request whose CPU share is believed.
 //
@@ -110,14 +130,12 @@ func (ps *PoolState) observeCPU(workers []WorkerSample) {
 	}
 }
 
-// cpuBucketOf maps a percentage to its bucket, clamped at both ends.
+// cpuBucketOf maps a percentage to the last bucket whose floor it reaches,
+// clamped at both ends.
 func cpuBucketOf(percent float64) int {
-	i := int(percent / cpuBucketWidth)
-	if i < 0 {
-		return 0
-	}
-	if i >= cpuBuckets {
-		return cpuBuckets - 1
+	i := 0
+	for i+1 < cpuBuckets && percent >= cpuBucketFloors[i+1] {
+		i++
 	}
 
 	return i
@@ -137,7 +155,7 @@ func (ps *PoolState) CPUShare(p float64) float64 {
 		return 0
 	}
 
-	return float64(i) * cpuBucketWidth / 100
+	return cpuBucketFloors[i] / 100
 }
 
 // CPUShapeKnown reports whether enough requests have been read to say what

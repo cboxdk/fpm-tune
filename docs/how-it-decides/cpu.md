@@ -30,10 +30,28 @@ database. fpm-tune already fetches that page for the worker list, so the figure
 costs no extra read and no extra permission, and it is recorded on every scrape.
 There is no switch to turn on a week early.
 
-Each reading goes into a per-pool histogram in 5% buckets, which decays the same
-way the [memory histogram](measuring-workers.md) does: halved after a few
-thousand readings, so a pool redeployed last month is not described by the
-application it used to run.
+Each reading goes into a per-pool histogram, which decays the same way the
+[memory histogram](measuring-workers.md) does: halved after a few thousand
+readings, so a pool redeployed last month is not described by the application
+it used to run. The buckets are 5% wide up to 100%, then 25% wide to 400%,
+then 100% wide to 3200%, because a share above 100% is not a misread.
+
+## Children
+
+php-fpm's figure counts the CPU of the children a request *waited for*: the
+ffmpeg behind an `exec()` or a `proc_close()`, and whatever that ffmpeg spawned
+in turn, all the way down. A transcode that ran on eight cores for the whole
+request is a share of 800%, and it is filed as such: on a four-core host that
+pool's CPU fills at one busy worker. This is the same footprint the
+[spawned-children](spawned-children.md) memory measurement covers, seen from
+the CPU side.
+
+What the figure cannot see is a child that outlives the request: a job put in
+the background with `&`, a transcode handed off and not waited for, a process
+that daemonised. Their CPU is real, but it is no longer this request's, and
+counting it against the pool would size the pool for work that queues
+elsewhere. That is host pressure, and it belongs to a separate signal (load
+average, the cgroup's throttling counters) this tool does not read yet.
 
 Three filters decide which readings count:
 

@@ -34,6 +34,7 @@ func TestCPUShape(t *testing.T) {
 		{"API waiting on a database", 0.10, true, 4000, "i/o-bound", 100, 40},
 		{"below the first bucket", 0, true, 4000, "i/o-bound", 0, 0},
 		{"half a core", 0.70, true, 500, "cpu-bound", 700, 1},
+		{"ffmpeg on eight cores", 8.0, true, 4000, "cpu-bound", 8000, 1},
 		{"host unknown", 0.70, true, 0, "cpu-bound", 700, 0},
 	} {
 		shape, perWorker, fill := cpuShape(tc.p50, tc.known, tc.host)
