@@ -556,10 +556,12 @@ for label, path, old, new in MUTATIONS:
         continue
     if old == "@@NOOP-DECAY@@":
         src2 = open("state/percentile.go").read()
-        guard = ("	if ps.RSSSamples > decayAfter {\n"
-                 "		for i := range ps.RSSHistogram {\n"
-                 "			ps.RSSHistogram[i] /= 2\n		}\n"
-                 "		ps.RSSSamples = ps.total()\n	}\n")
+        # One helper serves the memory and the CPU histogram, so removing
+        # this is removing decay from both.
+        guard = ("	if *samples > decayAfter {\n"
+                 "		for i := range hist {\n"
+                 "			hist[i] /= 2\n		}\n"
+                 "		*samples = histogramTotal(hist)\n	}\n")
         assert guard in src2, "decay guard not found"
         stash("state/percentile.go")
         open("state/percentile.go", "w").write(src2.replace(guard, "", 1))
