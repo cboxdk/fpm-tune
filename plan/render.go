@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"sort"
@@ -127,13 +128,13 @@ func (r Result) Render(w io.Writer) error {
 		for _, c := range r.CPU {
 			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 				c.Name, c.Percent(c.P50), c.Percent(c.P90), c.Samples,
-				c.PerWorker(), cpuLimit(c), cpuWhy(c, r.HostCPU.Millicores))
+				c.PerWorker(), cmp.Or(c.Limit, "-"), c.Why(r.HostCPU.Millicores))
 		}
 		if err := ct.Flush(); err != nil {
 			return err
 		}
 
-		if h := r.HostCPU; h.Known > 0 && h.Millicores > 0 {
+		if h := r.HostCPU; h.Millicores > 0 && (h.NeededNow > 0 || h.NeededAtPlan > 0) {
 			fmt.Fprintf(&b, "  If every measured pool ran its ceiling busy at once: %s now, %s at this\n"+
 				"  plan, against %s.\n",
 				budget.HumanMillicores(h.NeededNow), budget.HumanMillicores(h.NeededAtPlan),
@@ -204,37 +205,6 @@ func (r Result) Render(w io.Writer) error {
 	_, err := io.WriteString(w, b.String())
 
 	return err
-}
-
-func cpuLimit(c PoolCPU) string {
-	if c.Limit == "" {
-		return "-"
-	}
-
-	return c.Limit
-}
-
-// cpuWhy is the WHY column: the arithmetic beside the ceilings, so the gap
-// between what fills the CPU and what the pool is allowed is on one line.
-func cpuWhy(c PoolCPU, hostMillicores int) string {
-	if c.Shape == "" {
-		return "too few readings yet"
-	}
-	if c.FillWorkers == 0 {
-		return c.Shape
-	}
-
-	line := fmt.Sprintf("%s; ~%d busy workers fill %s", c.Shape, c.FillWorkers, budget.HumanMillicores(hostMillicores))
-	switch {
-	case c.Capped:
-		line += fmt.Sprintf("; held there (now %d)", c.Current)
-	case c.Allowed > 0:
-		line += fmt.Sprintf("; plan allows %d (now %d)", c.Allowed, c.Current)
-	case c.Current > 0:
-		line += fmt.Sprintf("; now %d", c.Current)
-	}
-
-	return line
 }
 
 func currentOf(r Result, name string) int {

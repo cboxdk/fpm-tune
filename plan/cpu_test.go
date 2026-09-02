@@ -14,33 +14,32 @@ import (
 
 var errDown = errors.New("connection refused")
 
-// TestCPUShape is the classification, table-tested: a pool is called something
-// only once it has enough readings, the per-worker cost is the median share in
-// millicores, and the fill count is the host's millicores over it, rounded up.
+// TestCPUShape is the classification, table-tested: the per-worker cost is
+// the median share in millicores, and the fill count is the host's millicores
+// over it, rounded up.
 func TestCPUShape(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		p50             float64
-		known           bool
 		host            int
 		shape           string
 		perWorker, fill int
 	}{
-		{"too few readings", 0.90, false, 4000, "", 0, 0},
-		{"WordPress uncached", 0.70, true, 4000, "cpu-bound", 700, 6},
-		{"on the cpu-bound line", 0.50, true, 2000, "cpu-bound", 500, 4},
-		{"mixed", 0.35, true, 4000, "mixed", 350, 12},
-		{"on the mixed line", 0.20, true, 4000, "mixed", 200, 20},
-		{"API waiting on a database", 0.10, true, 4000, "i/o-bound", 100, 40},
-		{"below the first bucket", 0, true, 4000, "i/o-bound", 0, 0},
-		{"half a core", 0.70, true, 500, "cpu-bound", 700, 1},
-		{"ffmpeg on eight cores", 8.0, true, 4000, "cpu-bound", 8000, 1},
-		{"host unknown", 0.70, true, 0, "cpu-bound", 700, 0},
+		{"WordPress uncached", 0.70, 4000, "cpu-bound", 700, 6},
+		{"on the cpu-bound line", 0.50, 2000, "cpu-bound", 500, 4},
+		{"mixed", 0.35, 4000, "mixed", 350, 12},
+		{"on the mixed line", 0.20, 4000, "mixed", 200, 20},
+		{"API waiting on a database", 0.10, 4000, "i/o-bound", 100, 40},
+		{"below the first bucket", 0, 4000, "i/o-bound", 0, 0},
+		{"half a core", 0.70, 500, "cpu-bound", 700, 1},
+		{"ffmpeg on eight cores", 8.0, 4000, "cpu-bound", 8000, 1},
+		{"host unknown", 0.70, 0, "cpu-bound", 700, 0},
 	} {
-		shape, perWorker, fill := cpuShape(tc.p50, tc.known, tc.host)
+		shape, perWorker := cpuShape(tc.p50)
+		fill := fillWorkers(perWorker, tc.host)
 		if shape != tc.shape || perWorker != tc.perWorker || fill != tc.fill {
-			t.Errorf("%s: cpuShape(%.2f, %v, %d) = (%q, %d, %d), want (%q, %d, %d)",
-				tc.name, tc.p50, tc.known, tc.host, shape, perWorker, fill, tc.shape, tc.perWorker, tc.fill)
+			t.Errorf("%s: cpuShape(%.2f) on %dm = (%q, %d, fill %d), want (%q, %d, fill %d)",
+				tc.name, tc.p50, tc.host, shape, perWorker, fill, tc.shape, tc.perWorker, tc.fill)
 		}
 	}
 }
@@ -101,7 +100,7 @@ func TestTheReportSaysWhatEachPoolRunsOutOfFirst(t *testing.T) {
 	if shop.Limit != "cpu" || shop.Allowed <= shop.FillWorkers {
 		t.Errorf("shop = %+v: memory allows %d, the CPU fills at %d, so the limit is cpu", shop, shop.Allowed, shop.FillWorkers)
 	}
-	if shop.Capped {
+	if shop.CPUBound {
 		t.Error("shop was capped without --cpu")
 	}
 	if api.Shape != "i/o-bound" || api.Limit != "memory" {
@@ -109,7 +108,7 @@ func TestTheReportSaysWhatEachPoolRunsOutOfFirst(t *testing.T) {
 	}
 
 	// The host line adds the known pools up against the real CPU.
-	if res.HostCPU.Known != 2 || res.HostCPU.Millicores != 4000 {
+	if res.HostCPU.Millicores != 4000 {
 		t.Errorf("HostCPU = %+v", res.HostCPU)
 	}
 	if want := 40*700 + 10*50; res.HostCPU.NeededNow != want {
@@ -199,7 +198,7 @@ func TestTheCPUCeilingBindsOnlyWhenAskedAndOnlyOnATrustedPool(t *testing.T) {
 		if !strings.Contains(p.Reason, "cpu-bound") {
 			t.Errorf("the plan row does not say why: %q", p.Reason)
 		}
-		if c := res.CPU[0]; !c.Capped || c.Limit != "cpu" {
+		if c := res.CPU[0]; !c.CPUBound || c.Limit != "cpu" {
 			t.Errorf("the report does not say it was held: %+v", c)
 		}
 		var b strings.Builder
@@ -225,7 +224,7 @@ func TestTheCPUCeilingBindsOnlyWhenAskedAndOnlyOnATrustedPool(t *testing.T) {
 		if p := res.Plan.Pools[0]; p.CPUBound || p.MaxChildren < 40 {
 			t.Errorf("a pool with two minutes of history was capped from 40 to %d on CPU evidence: %+v", p.MaxChildren, p)
 		}
-		if c := res.CPU[0]; c.Limit != "cpu" || c.Capped {
+		if c := res.CPU[0]; c.Limit != "cpu" || c.CPUBound {
 			t.Errorf("the report should still say cpu, and not held: %+v", c)
 		}
 	})
@@ -294,8 +293,44 @@ func TestLimitsWithoutMillicoresStillDivide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := res.CPU[0]; c.FillWorkers != 6 || c.Limit != "cpu" || !c.Capped || res.HostCPU.Millicores != 4000 {
+	if c := res.CPU[0]; c.FillWorkers != 6 || c.Limit != "cpu" || !c.CPUBound || res.HostCPU.Millicores != 4000 {
 		t.Errorf("four cores without millicores: %+v host=%+v", c, res.HostCPU)
+	}
+}
+
+// TestAShareAboveOneCoreRendersAsSuch: php-fpm counts the children a request
+// waited for, so a transcode on eight cores is a share of 800%, and the whole
+// path — histogram, per-worker cost, fill count, host line, the rendered
+// text — has to carry it rather than fold it back under 100%.
+func TestAShareAboveOneCoreRendersAsSuch(t *testing.T) {
+	st := state.New()
+	base := time.Now()
+	for i := 0; i < 25; i++ {
+		st.Learn(cpuBusy("media", 8.0, i, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+	}
+	res, err := Build(Input{
+		Limits: budget.Limits{MemoryBytes: 16 * gb, CPUs: 4, CPUMillicores: 4000, Source: budget.SourceMemInfo},
+		Views:  []observe.PoolView{{Name: "media", ProcessManager: "dynamic", CurrentMaxChildren: 10, MaxChildrenKnown: true, ObservedPeak: 3}},
+		State:  st,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.CPU[0]
+	if c.P50 != 8.0 || c.MillicoresPerWorker != 8000 || c.FillWorkers != 1 || c.Limit != "cpu" {
+		t.Errorf("media = %+v", c)
+	}
+	if res.HostCPU.NeededNow != 10*8000 {
+		t.Errorf("NeededNow = %d, want 80000", res.HostCPU.NeededNow)
+	}
+	var b strings.Builder
+	if err := res.Render(&b); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"800%", "8000m", "~1 busy worker fill 4 core(s)", "80 core(s) now"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("rendered plan lacks %q:\n%s", want, b.String())
+		}
 	}
 }
 

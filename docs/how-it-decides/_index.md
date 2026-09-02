@@ -32,9 +32,8 @@ Read it in order:
    `pm` mode, why it sizes within the mode rather than changing it, and the one
    suggestion it will make when a mode doesn't fit the workload.
 7. **[CPU per request](cpu.md)**: which of memory and CPU a pool runs out
-   of first. A cpu-bound pool gets slower, not faster, past the point where
-   its busy workers fill the cores. Measured on every scrape and reported in
-   every plan; allowed to cap a pool only with `--cpu`.
+   of first. Measured on every scrape and reported in every plan; allowed to
+   cap a pool only with `--cpu`.
 
 The allocator ([dividing the budget](dividing-the-budget.md)) is pure
 computation with no I/O and no dependencies, which is what makes it exhaustively

@@ -1,27 +1,15 @@
 package state
 
-// How CPU-bound a pool's requests are, kept beside the memory it measures.
-//
-// Memory is the wrong dimension for a whole class of pool. A request that
-// computes for most of its wall time gets SLOWER for every worker that runs
-// beside it once the cores are full: the requests take longer, so the workers
-// stay busy longer, so the queue stops draining — and the memory budget, which
-// said there was room for eighty workers, saw none of it. Uncached WordPress is
-// the common case, and the people who tune it by hand land on one and a half
-// to two workers per core, not the fifty per core the allocator's coarse bound
-// allows.
-//
-// This file measures that dimension, always: the number is in every status
-// response the scrape already fetches, so measuring costs nothing and a plan
-// can say which of the two — memory or CPU — is the one a pool runs out of
-// first. Whether the measurement is allowed to CAP a pool is the operator's
-// call (plan.Input.CPUCeiling); a report and a ceiling are different levels of
-// trust and are switched separately.
+// How CPU-bound a pool's requests are, kept beside the memory it measures, so
+// a plan can say which of the two a pool runs out of first. The why is in
+// docs/how-it-decides/cpu.md; this file is the how.
 //
 // The source is php-fpm's own `last request cpu` from the full status page:
-// the share of the request's wall time spent on CPU (user plus system, children
-// included), as a percentage. A share of 70% is 700 millicores while the
-// worker is busy — the same unit a container quota is written in.
+// the share of the request's wall time spent on CPU (user plus system, and
+// the children the request waited for), as a percentage. A share of 70% is
+// 700 millicores while the worker is busy — the unit a container quota is
+// written in. Measured on every scrape; whether it may CAP a pool is the
+// operator's call (plan.Input.CPUCeiling).
 
 // The buckets: 5% steps to 100%, 25% steps to 400%, 100% steps to 3200%.
 //
@@ -49,7 +37,11 @@ var cpuBucketFloors = func() []float64 {
 	return floors
 }()
 
-var cpuBuckets = len(cpuBucketFloors)
+// cpuBuckets is the three ranges added up: 20 of 5%, 12 of 25%, 29 of 100%.
+// A constant rather than len(cpuBucketFloors), so the number a state file's
+// histogram is checked against is one a reader can see; a test holds the two
+// together.
+const cpuBuckets = 20 + 12 + 29
 
 // minCPURequestMicros is the shortest request whose CPU share is believed.
 //

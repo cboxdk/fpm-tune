@@ -54,9 +54,10 @@ type PoolCPU struct {
 	// above FillWorkers — or when the measurement was allowed to bind and did.
 	Limit string
 
-	// Capped reports that the allocation was actually held at FillWorkers,
-	// which happens only when the operator passed --cpu.
-	Capped bool
+	// CPUBound reports that the allocation was actually held at FillWorkers,
+	// which happens only when the operator passed --cpu. The same fact as
+	// allocate.PoolPlan.CPUBound, under the same name.
+	CPUBound bool
 }
 
 // HostCPU is the host's CPU against what the plan would need of it.
@@ -68,12 +69,9 @@ type HostCPU struct {
 	// NeededAtPlan is what every pool with a known shape would draw if it ran
 	// its planned ceiling busy at once, and NeededNow the same for the
 	// ceilings in effect now. Both are the worst case, not a prediction: they
-	// say whether the ceilings, taken together, could ever fit the CPU.
+	// say whether the ceilings, taken together, could ever fit the CPU. Zero
+	// when no pool has a shape yet, or none costs a millicore.
 	NeededAtPlan, NeededNow int
-
-	// Known counts the pools that contributed; the sums say nothing about the
-	// rest.
-	Known int
 }
 
 // The shape thresholds, on the median share. Coarse on purpose: the point is
@@ -84,14 +82,10 @@ const (
 	mixedFrom    = 0.20
 )
 
-// cpuShape classifies a pool from its median share, and works out how many
-// busy workers fill the host's CPU. A pure function of numbers, so it can be
-// table-tested. known is whether there are enough readings to say anything.
-func cpuShape(p50 float64, known bool, hostMillicores int) (shape string, perWorker, fill int) {
-	if !known {
-		return "", 0, 0
-	}
-
+// cpuShape classifies a pool from its median share and prices a busy worker
+// in millicores. A pure function of the share, so it can be table-tested; the
+// caller decides whether there are enough readings to ask.
+func cpuShape(p50 float64) (shape string, perWorker int) {
 	switch {
 	case p50 >= cpuBoundFrom:
 		shape = "cpu-bound"
@@ -101,38 +95,31 @@ func cpuShape(p50 float64, known bool, hostMillicores int) (shape string, perWor
 		shape = "i/o-bound"
 	}
 
-	perWorker = int(math.Round(p50 * 1000))
-	if hostMillicores > 0 && perWorker > 0 {
-		fill = int(math.Ceil(float64(hostMillicores) / float64(perWorker)))
+	return shape, int(math.Round(p50 * 1000))
+}
+
+// fillWorkers is how many busy workers at the given per-worker cost fill the
+// host's CPU, rounded up; zero when either side is unknown.
+func fillWorkers(perWorker, hostMillicores int) int {
+	if hostMillicores <= 0 || perWorker <= 0 {
+		return 0
 	}
 
-	return shape, perWorker, fill
+	return int(math.Ceil(float64(hostMillicores) / float64(perWorker)))
 }
 
 // cpuCeilingFor is the ceiling plan hands the allocator for one pool: its
-// FillWorkers, but only for a pool that has been watched long enough to be
-// CUT on memory evidence too. Twenty readings say what shape a pool's
-// requests have; they are not permission to take workers away from a pool
-// whose traffic pattern this tool has not yet seen through.
+// fill count, but only for a pool that has been watched long enough to be CUT
+// on memory evidence too. Twenty readings say what shape a pool's requests
+// have; they are not permission to take workers away. See cpu.md, "What
+// --cpu does".
 func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int) int {
 	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {
 		return 0
 	}
-	_, _, fill := cpuShape(ps.CPUShare(0.50), true, hostMillicores)
+	_, perWorker := cpuShape(ps.CPUShare(0.50))
 
-	return fill
-}
-
-// hostMillicores is the CPU to divide by. Limits built by hand, or by a source
-// that fills only the core count, carry no millicores; a core is a thousand of
-// them, and a report that divides by zero would call every pool memory-limited
-// and turn --cpu into a silent no-op.
-func hostMillicores(limits budget.Limits) int {
-	if limits.CPUMillicores > 0 {
-		return limits.CPUMillicores
-	}
-
-	return limits.CPUs * 1000
+	return fillWorkers(perWorker, hostMillicores)
 }
 
 // Percent prints a share as a whole percentage, or a dash until there are
@@ -158,6 +145,35 @@ func (c PoolCPU) PerWorker() string {
 	}
 
 	return fmt.Sprintf("%dm", c.MillicoresPerWorker)
+}
+
+// Why is the sentence beside the numbers: the shape, the arithmetic, and the
+// ceilings the arithmetic is compared with, so the gap between what fills the
+// CPU and what the pool is allowed is on one line. The plan and the
+// recommendation file both print it.
+func (c PoolCPU) Why(hostMillicores int) string {
+	if c.Shape == "" {
+		return "too few readings yet"
+	}
+	if c.FillWorkers == 0 {
+		return c.Shape
+	}
+
+	workers := "workers"
+	if c.FillWorkers == 1 {
+		workers = "worker"
+	}
+	line := fmt.Sprintf("%s; ~%d busy %s fill %s", c.Shape, c.FillWorkers, workers, budget.HumanMillicores(hostMillicores))
+	switch {
+	case c.CPUBound:
+		line += fmt.Sprintf("; held there (now %d)", c.Current)
+	case c.Allowed > 0:
+		line += fmt.Sprintf("; plan allows %d (now %d)", c.Allowed, c.Current)
+	case c.Current > 0:
+		line += fmt.Sprintf("; now %d", c.Current)
+	}
+
+	return line
 }
 
 // cpuOf builds the CPU report: one row for every pool this round, whether or
@@ -199,7 +215,7 @@ func cpuOf(
 		row := PoolCPU{Name: v.Name, Current: v.CurrentMaxChildren}
 		if pp, ok := plans[v.Name]; ok && !pp.Unknown {
 			row.Allowed = pp.MaxChildren
-			row.Capped = pp.CPUBound
+			row.CPUBound = pp.CPUBound
 		}
 		// A pool the plan does not write keeps the ceiling it has, so that is
 		// the ceiling to compare against and to count in the host sums.
@@ -211,16 +227,17 @@ func cpuOf(
 			row.P50 = ps.CPUShare(0.50)
 			row.P90 = ps.CPUShare(0.90)
 			row.Samples = ps.CPUSamples
-			row.Shape, row.MillicoresPerWorker, row.FillWorkers =
-				cpuShape(row.P50, ps.CPUShapeKnown(opts), hostMillicores)
+			if ps.CPUShapeKnown(opts) {
+				row.Shape, row.MillicoresPerWorker = cpuShape(row.P50)
+				row.FillWorkers = fillWorkers(row.MillicoresPerWorker, hostMillicores)
+			}
 		}
 		if row.Shape != "" {
 			row.Limit = "memory"
-			if row.Capped || (row.FillWorkers > 0 && atPlan > row.FillWorkers) {
+			if row.CPUBound || (row.FillWorkers > 0 && atPlan > row.FillWorkers) {
 				row.Limit = "cpu"
 			}
 
-			host.Known++
 			host.NeededAtPlan += atPlan * row.MillicoresPerWorker
 			host.NeededNow += row.Current * row.MillicoresPerWorker
 		}

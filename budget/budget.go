@@ -287,10 +287,10 @@ func detectWith(p sysPaths) Limits {
 		limits.MemoryBytes, limits.Source = bytes, SourceSysctl
 	}
 
-	if cpus, ok := readCgroupV2CPU(p.cgroupV2CPU); ok {
-		limits.CPUs, limits.CPUMillicores = cpus.cores, cpus.millicores
-	} else if cpus, ok := readCgroupV1CPU(p.cgroupV1Quota, p.cgroupV1Period); ok {
-		limits.CPUs, limits.CPUMillicores = cpus.cores, cpus.millicores
+	if m, ok := readCgroupV2CPU(p.cgroupV2CPU); ok {
+		limits.CPUMillicores, limits.CPUs = m, coresFor(m)
+	} else if m, ok := readCgroupV1CPU(p.cgroupV1Quota, p.cgroupV1Period); ok {
+		limits.CPUMillicores, limits.CPUs = m, coresFor(m)
 	}
 
 	return limits
@@ -469,65 +469,69 @@ func readSysctlMemory() (int64, bool) {
 	return v, true
 }
 
-// cpuQuota is a CFS quota read two ways: whole cores rounded up, for the
-// allocator's coarse per-core bound, and millicores, for anything that divides
-// by the CPU and must not be told a half-core quota is a core.
-type cpuQuota struct {
-	cores      int
-	millicores int
+// coresFor rounds millicores up to whole cores: half a core still runs one
+// worker at a time, and rounding down would report zero.
+func coresFor(millicores int) int {
+	return (millicores + 999) / 1000
 }
 
-func readCgroupV2CPU(path string) (cpuQuota, bool) {
+// Millicores is the CPU to divide by. Limits built by hand, or by a source
+// that fills only the core count, carry no millicores; a core is a thousand of
+// them, and a division by zero would call every pool memory-limited.
+func (l Limits) Millicores() int {
+	if l.CPUMillicores > 0 {
+		return l.CPUMillicores
+	}
+
+	return l.CPUs * 1000
+}
+
+func readCgroupV2CPU(path string) (int, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cpuQuota{}, false
+		return 0, false
 	}
 
 	// "max 100000" means no quota; otherwise "<quota> <period>".
 	fields := strings.Fields(strings.TrimSpace(string(data)))
 	if len(fields) != 2 || fields[0] == "max" {
-		return cpuQuota{}, false
+		return 0, false
 	}
 
-	return quotaToCPUs(fields[0], fields[1])
+	return quotaToMillicores(fields[0], fields[1])
 }
 
-func readCgroupV1CPU(quotaPath, periodPath string) (cpuQuota, bool) {
+func readCgroupV1CPU(quotaPath, periodPath string) (int, bool) {
 	quota, err := os.ReadFile(quotaPath)
 	if err != nil {
-		return cpuQuota{}, false
+		return 0, false
 	}
 	period, err := os.ReadFile(periodPath)
 	if err != nil {
-		return cpuQuota{}, false
+		return 0, false
 	}
 
-	return quotaToCPUs(strings.TrimSpace(string(quota)), strings.TrimSpace(string(period)))
+	return quotaToMillicores(strings.TrimSpace(string(quota)), strings.TrimSpace(string(period)))
 }
 
-// quotaToCPUs converts a CFS quota/period pair to a core count, rounding up
-// (half a core still runs one worker at a time, and rounding down would report
-// zero), and to millicores, which keep the fraction.
-func quotaToCPUs(quotaRaw, periodRaw string) (cpuQuota, bool) {
+// quotaToMillicores converts a CFS quota/period pair to millicores, rounded
+// up so a quota is never reported as nothing.
+func quotaToMillicores(quotaRaw, periodRaw string) (int, bool) {
 	quota, err := strconv.ParseInt(quotaRaw, 10, 64)
 	if err != nil || quota <= 0 {
-		return cpuQuota{}, false
+		return 0, false
 	}
 	period, err := strconv.ParseInt(periodRaw, 10, 64)
 	if err != nil || period <= 0 {
-		return cpuQuota{}, false
+		return 0, false
 	}
 
-	cpus := int((quota + period - 1) / period)
-	if cpus < 1 {
-		cpus = 1
-	}
 	millicores := int((quota*1000 + period - 1) / period)
 	if millicores < 1 {
 		millicores = 1
 	}
 
-	return cpuQuota{cores: cpus, millicores: millicores}, true
+	return millicores, true
 }
 
 // HumanMillicores prints a CPU amount the way people read it: whole cores when

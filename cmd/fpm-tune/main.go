@@ -263,6 +263,9 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	if err != nil {
 		return plan.Result{}, nil, err
 	}
+	for _, notice := range st.Notices {
+		log.Warn("State file adjusted on load", "what", notice)
+	}
 
 	views := observe.Sample(ctx, targets, log)
 

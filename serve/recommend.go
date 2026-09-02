@@ -251,12 +251,8 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 		// Which of the two this pool runs out of first, once its requests have
 		// been read enough times to say. The dimension memory cannot see.
 		if c, ok := cpu[p.Name]; ok && c.Shape != "" {
-			fmt.Fprintf(&b, ";   cpu per request: median %s, p90 %s (%d readings); %s per busy worker",
-				c.Percent(c.P50), c.Percent(c.P90), c.Samples, c.PerWorker())
-			if c.FillWorkers > 0 {
-				fmt.Fprintf(&b, ", ~%d fill %s", c.FillWorkers, budget.HumanMillicores(result.HostCPU.Millicores))
-			}
-			fmt.Fprintf(&b, "; limit: %s\n", c.Limit)
+			fmt.Fprintf(&b, ";   cpu per request: median %s, p90 %s (%d readings); %s per busy worker; %s; limit: %s\n",
+				c.Percent(c.P50), c.Percent(c.P90), c.Samples, c.PerWorker(), c.Why(result.HostCPU.Millicores), c.Limit)
 		}
 		if bootstrapped[p.Name] {
 			fmt.Fprintf(&b, ";   NOT YET MEASURED — this is a profile's guess, not this "+

@@ -17,8 +17,7 @@ workers, and there was, and eight would have been faster. Uncached WordPress is
 the common case. People who tune it by hand land on one and a half to two
 workers per core, not the fifty per core this tool's coarse sanity bound allows.
 
-So every plan answers one more question per pool: which runs out first, memory
-or CPU?
+So every plan asks one more question per pool.
 
 ## What it measures
 
@@ -34,7 +33,8 @@ Each reading goes into a per-pool histogram, which decays the same way the
 [memory histogram](measuring-workers.md) does: halved after a few thousand
 readings, so a pool redeployed last month is not described by the application
 it used to run. The buckets are 5% wide up to 100%, then 25% wide to 400%,
-then 100% wide to 3200%, because a share above 100% is not a misread.
+then 100% wide to 3200%, because a share above 100% is not a misread (see
+[Children](#children)).
 
 ## Children
 
@@ -46,11 +46,10 @@ pool's CPU fills at one busy worker. This is the same footprint the
 [spawned-children](spawned-children.md) memory measurement covers, seen from
 the CPU side.
 
-What the figure cannot see is a child that outlives the request: a job put in
-the background with `&`, a transcode handed off and not waited for, a process
-that daemonised. Their CPU is real, but it is no longer this request's, and
-counting it against the pool would size the pool for work that queues
-elsewhere. That is host pressure, and it belongs to a separate signal (load
+What the figure cannot see is a child that outlives the request: a job
+backgrounded with `&`, or a process that daemonised. Their CPU is real, but it
+is no longer this request's, and counting it against the pool would size the
+pool for work that queues elsewhere. That is host pressure, and it belongs to a separate signal (load
 average, the cgroup's throttling counters) this tool does not read yet.
 
 Three filters decide which readings count:
@@ -62,7 +61,8 @@ Three filters decide which readings count:
   scrape lands is the long, CPU-heavy one this exists to see.
 - **Only requests of 50ms or more.** php-fpm computes the share from a clock
   that ticks at 100Hz, so a two-millisecond request reads as 0% or 500%
-  depending on whether it caught a tick. Fifty milliseconds is five ticks.
+  depending on whether it caught a tick: one ten-millisecond tick over a
+  two-millisecond request. Fifty milliseconds is five ticks.
 - **Each request once, and never our own.** The status page reports each
   worker's *last* request, and a worker that has served nothing since the
   previous scrape is still reporting the same one. The per-worker request
@@ -82,8 +82,8 @@ CPU per request, as measured:
   blog  -        -    7         -           -       too few readings yet
   If every measured pool ran its ceiling busy at once: 31 core(s) now, 12800m at this
   plan, against 4 core(s).
-  Sizing uses memory. A cpu-limited pool gets slower, not faster, past the
-  workers that fill the CPU; pass --cpu to hold it there.
+  Sizing uses memory. A cpu-limited pool only gets slower past the workers
+  that fill the CPU; pass --cpu to hold it there.
 ```
 
 `TYPICAL` is the median share; `P90` says how much heavier the heavy requests
@@ -114,7 +114,7 @@ fair "not yet" on a quiet one.
 Every pool is measured against the whole host, so the fill counts do not add up
 across pools. The line under the table is where they do: what every measured
 pool would draw if it ran its ceiling busy at once, now and at this plan,
-against the CPU there is. That is a worst case, not a prediction, and it is the
+against the CPU there is. That is a worst case, not a prediction. It is also the
 one line that can say the host as a whole is short of CPU.
 
 The shape word is coarse on purpose: `cpu-bound` at a median of 50% and above,
@@ -134,6 +134,11 @@ row in the plan table says so:
 POOL  MODE     NOW  PLAN  MEMORY    WHY
 shop  dynamic  40   6     600.0MiB  cpu-bound; 6 busy workers fill the CPU, so held there rather than the 14 memory allows, measured 100.0MiB/worker
 ```
+
+In the CPU table the same pool's WHY reads `cpu-bound; ~6 busy workers fill 4
+core(s); held there (now 40)`, and the line under the table becomes `--cpu is
+on: a cpu-limited pool is held at the busy workers that fill the CPU, and its
+row in the plan table says so.`
 
 The cap has two limits.
 

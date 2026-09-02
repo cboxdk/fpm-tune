@@ -281,19 +281,40 @@ wait $SERVE 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 echo "--- the CPU dimension is always reported, and --cpu only changes what may bind"
+# Real requests through www, each computing for ~100ms: past the 50ms floor,
+# and not this tool's own traffic, so they count. The script has to be
+# readable by the workers, which as root run as www-data.
+cat > "$ROOT/work.php" <<'PHP'
+<?php
+$end = microtime(true) + (float)($_GET['hold'] ?? 0.1);
+while (microtime(true) < $end) { hash('sha256', 'x'); }
+echo "ok";
+PHP
+chmod 755 "$ROOT"; chmod 644 "$ROOT/work.php"
+go run ./testing/loadgen --socket "127.0.0.1:$BASE" --script "$ROOT/work.php" \
+  --concurrency 2 --duration 2s --query 'hold=0.1' >/dev/null 2>&1 \
+  || fail "loadgen could not put requests through www"
 # Measured on every scrape, so a plan can say which of memory and CPU a pool
 # runs out of first without anyone having turned a switch a week earlier.
 "$BIN" plan --memory 512MB "${SCOPE[@]}" --state "$STATE/state.json" > "$ROOT/plan-cpu.out" 2>&1 \
   || fail "plan failed:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
 grep -q "CPU per request, as measured:" "$ROOT/plan-cpu.out" \
   || fail "plan printed no CPU section:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
-# Both pools are listed even though nothing has been served through them but
-# this tool's own probes, which are not the site's traffic: a pool with no
-# readings says so, rather than vanishing from the report.
+# Both pools are listed. shop served nothing but this tool's own probes, which
+# are not the site's traffic, so it has no readings and says so rather than
+# vanishing; www served real requests, and one scrape reads each idle worker's
+# last one, so it has a few — still short of the twenty a verdict needs.
 for pool in www shop; do
   grep -E "^  $pool[[:space:]]" "$ROOT/plan-cpu.out" | grep -q "too few readings yet" \
     || fail "plan did not list $pool as having too few readings:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
 done
+# The READINGS column of the CPU table, not the memory table above it, which
+# lists the same pools.
+cpu_readings() { awk -v pool="$1" '/^CPU per request/ {f=1} f && $1 == pool {print $4; exit}' "$ROOT/plan-cpu.out"; }
+readings=$(cpu_readings www)
+[ "${readings:-0}" -gt 0 ] || fail "www served real requests but plan shows ${readings:-0} CPU readings:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
+readings=$(cpu_readings shop)
+[ "${readings:-0}" -eq 0 ] || fail "shop served only this tool's probes but plan shows $readings CPU readings"
 grep -q "pass --cpu to hold it there" "$ROOT/plan-cpu.out" \
   || fail "plan did not say the ceiling is off:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
 # The rows are there on a run that learned nothing, against a state file that

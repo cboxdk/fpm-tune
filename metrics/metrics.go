@@ -83,7 +83,7 @@ func New() *Collectors {
 		poolMeasured: gaugeVec(reg, "fpm_tune_pool_measured",
 			"1 when a pool is sized from its own observed memory rather than a bootstrap estimate.", "pool"),
 		cpuShare: gaugeVec(reg, "fpm_tune_pool_request_cpu_share",
-			"The share of a request's wall time spent on CPU, 0 to 1 (above 1 when a spawned child computed alongside), as php-fpm reports it for each worker's last request. estimate=\"p50\" is what the shape and the fill count are built on; \"p90\" says how much heavier the heavy requests are. Bucket floors, so read as at-least. Absent until the pool has enough readings (see fpm_tune_pool_request_cpu_readings).", "pool", "estimate"),
+			"The share of a request's wall time spent on CPU, 0 to 1, as php-fpm reports it for each worker's last request, counting the children the request waited for: a transcode on eight cores for the whole request is 8. estimate=\"p50\" is what the shape and the fill count are built on; \"p90\" says how much heavier the heavy requests are. Bucket floors, so read as at-least. Absent until the pool has enough readings (see fpm_tune_pool_request_cpu_readings).", "pool", "estimate"),
 		cpuReadings: gaugeVec(reg, "fpm_tune_pool_request_cpu_readings",
 			"How many requests the CPU share is built on. Below the threshold (20 by default) the shape is not called and the share series are absent.", "pool"),
 		cpuFillWorkers: gaugeVec(reg, "fpm_tune_pool_cpu_fill_workers",

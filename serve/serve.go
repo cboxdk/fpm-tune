@@ -235,6 +235,9 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 
 		return nil, err
 	}
+	for _, notice := range st.Notices {
+		log.Warn("State file adjusted on load", "what", notice)
+	}
 
 	return &Loop{
 		cfg:     cfg,

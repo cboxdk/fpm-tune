@@ -530,10 +530,11 @@ for label, path, old, new in MUTATIONS:
     if old == "@@MOVE@@":
         block = ("	// After the plan: the counters are what the NEXT round compares against, and\n"
                  "	// storing them earlier made the comparison one against itself.\n"
-                 "	plan.RecordCounters(l.state, views)\n")
+                 "	if !l.cfg.NoLearn {\n		plan.RecordCounters(l.state, views)\n	}\n")
         anchor = "	plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)\n"
+        assert block in src, "RecordCounters block not found"
         moved = src.replace(block, "", 1).replace(
-            anchor, anchor + "	plan.RecordCounters(l.state, views)\n", 1)
+            anchor, anchor + "	if !l.cfg.NoLearn {\n		plan.RecordCounters(l.state, views)\n	}\n", 1)
         stash(path)
         open(path, "w").write(moved)
         failed = suite_fails(path)

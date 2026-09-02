@@ -26,6 +26,7 @@ number in the comments:
 ```ini
 ; shop: peak 34 workers busy; raised to 42, measured 96.0MiB/worker
 ;   measured per worker: median 88.0MiB, p95 137.0MiB, p99 194.0MiB, worst 512.0MiB (4096 readings)
+;   cpu per request: median 70%, p90 90% (1204 readings); 700m per busy worker; cpu-bound; ~6 busy workers fill 4 core(s); plan allows 42 (now 34); limit: cpu
 
 [shop]
 pm.max_children = 42
@@ -65,4 +66,5 @@ recommends (and the numbers have stopped being profile guesses), either paste th
 changes yourself, or add `--apply` and let it do the writing.
 
 The same percentiles are on `/metrics` as `estimate="p50"`, `"p95"` and `"p99"`,
-if you would rather graph them than read a file.
+and the CPU share as `fpm_tune_pool_request_cpu_share` with `estimate="p50"` and
+`"p90"`, if you would rather graph them than read a file.

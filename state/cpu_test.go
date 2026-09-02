@@ -177,8 +177,9 @@ func TestWorkersWithNothingToReportAreSkipped(t *testing.T) {
 }
 
 // TestCPUShareDescribesWhatWasSeen: the report's numbers are the floor of the
-// bucket the fraction lands in, and a reading past the top is a misread that
-// lands in the last bucket rather than anywhere the arithmetic could believe.
+// bucket the fraction lands in, a share above 100% is a request whose children
+// computed alongside it, and a number no host can produce lands in the last
+// bucket rather than anywhere the arithmetic could believe.
 func TestCPUShareDescribesWhatWasSeen(t *testing.T) {
 	ps := &PoolState{}
 	if got := ps.CPUShare(0.5); got != 0 {
@@ -228,6 +229,26 @@ func TestCPUShareDescribesWhatWasSeen(t *testing.T) {
 	}
 }
 
+// TestTheCPUBucketLayout pins the three ranges and their boundaries, so an
+// edit to the floors table (a `<=` that adds 100 twice, say) fails here and
+// not in a state file.
+func TestTheCPUBucketLayout(t *testing.T) {
+	if len(cpuBucketFloors) != cpuBuckets {
+		t.Fatalf("len(cpuBucketFloors) = %d, cpuBuckets = %d", len(cpuBucketFloors), cpuBuckets)
+	}
+	for _, tc := range []struct{ percent, floor float64 }{
+		{-1, 0}, {0, 0}, {4.9, 0}, {5, 5}, {99, 95}, {100, 100}, {124, 100}, {125, 125},
+		{399, 375}, {400, 400}, {499, 400}, {3199, 3100}, {3200, 3200}, {90_000, 3200},
+	} {
+		if got := cpuBucketFloors[cpuBucketOf(tc.percent)]; got != tc.floor {
+			t.Errorf("%.1f%% filed under floor %.0f, want %.0f", tc.percent, got, tc.floor)
+		}
+	}
+	if cpuBucketOf(90_000) != cpuBuckets-1 {
+		t.Error("a share past the top is not in the last bucket")
+	}
+}
+
 // TestAHistogramFromAnotherLayoutIsDroppedNotIndexed: the buckets are
 // addressed by index, so a state file written by a build with a different
 // bucket count would be read under the wrong floors and then indexed past its
@@ -246,6 +267,11 @@ func TestAHistogramFromAnotherLayoutIsDroppedNotIndexed(t *testing.T) {
 	ps := loaded.Pools["www"]
 	if ps.CPUHistogram != nil || ps.CPUSamples != 0 || ps.RSSHistogram != nil || ps.RSSSamples != 0 {
 		t.Errorf("misshapen histograms survived the load: %+v", ps)
+	}
+	// And the load says what it did, so the journal explains a pool that
+	// flipped to "too few readings" after an upgrade.
+	if len(loaded.Notices) != 2 {
+		t.Errorf("Notices = %v, want one per dropped histogram", loaded.Notices)
 	}
 	// And a scrape after that must not panic.
 	ps.observeCPU([]WorkerSample{idleWorker(1, 5, 3_100, 1_000_000)})

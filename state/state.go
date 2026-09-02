@@ -219,10 +219,11 @@ type PoolState struct {
 	RSSHistogram []uint32 `json:"rss_histogram,omitempty"`
 	RSSSamples   int64    `json:"rss_samples,omitempty"`
 
-	// CPUHistogram counts how CPU-bound this pool's requests have been, in 5%
-	// buckets of the share of wall time a request spent on CPU. CPUSamples is
-	// how many readings are in it, and CPUSeen is each live worker's request
-	// count as of the last reading, so one request is counted once. See cpu.go.
+	// CPUHistogram counts how CPU-bound this pool's requests have been: the
+	// share of wall time a request spent on CPU, in buckets 5% wide to 100%,
+	// 25% wide to 400% and 100% wide to 3200% (cpu.go has the why). CPUSamples
+	// is how many readings are in it, and CPUSeen is each live worker's request
+	// count as of the last reading, so one request is counted once.
 	CPUHistogram []uint32      `json:"cpu_histogram,omitempty"`
 	CPUSamples   int64         `json:"cpu_samples,omitempty"`
 	CPUSeen      map[int]int64 `json:"cpu_seen,omitempty"`
@@ -271,6 +272,11 @@ type PoolState struct {
 
 // State is the whole store.
 type State struct {
+	// Notices is what Load had to do to the file to use it, one line each,
+	// for the caller to log. Not persisted: it describes this load, not the
+	// state.
+	Notices []string `json:"-"`
+
 	Version int                   `json:"version"`
 	Pools   map[string]*PoolState `json:"pools"`
 
@@ -530,25 +536,34 @@ func Load(path string) (*State, error) {
 	for _, ps := range s.Pools {
 		ps.inferCadence()
 		ps.forgetTheFuture(now)
-		ps.dropMisshapenHistograms()
+		s.Notices = append(s.Notices, ps.dropMisshapenHistograms()...)
 	}
 
 	return &s, nil
 }
 
 // dropMisshapenHistograms discards a histogram whose length is not this
-// build's bucket count. The buckets are addressed by index, so a file written
-// by a build with a different layout — or a hand-edited one — would be read
-// under the wrong floors and, one bucket past its end, would stop the daemon
-// with an index out of range on the first scrape. A histogram is a description
-// that rebuilds itself within a day; the daemon is not.
-func (ps *PoolState) dropMisshapenHistograms() {
+// build's bucket count, and says so. The buckets are addressed by index, so a
+// file written by a build with a different layout — or a hand-edited one —
+// would be read under the wrong floors and, one bucket past its end, would
+// stop the daemon with an index out of range on the first scrape. A histogram
+// is a description that rebuilds itself within a day; the daemon is not. The
+// notice is for the journal: a pool that flips to "too few readings" after an
+// upgrade should have a line beside it saying why.
+func (ps *PoolState) dropMisshapenHistograms() []string {
+	var notices []string
 	if ps.RSSHistogram != nil && len(ps.RSSHistogram) != rssBuckets {
+		n := len(ps.RSSHistogram)
 		ps.RSSHistogram, ps.RSSSamples = nil, 0
+		notices = append(notices, fmt.Sprintf("pool %q: dropped its memory histogram, written with %d buckets where this build uses %d; it rebuilds from the next scrape", ps.Pool, n, rssBuckets))
 	}
 	if ps.CPUHistogram != nil && len(ps.CPUHistogram) != cpuBuckets {
+		n := len(ps.CPUHistogram)
 		ps.CPUHistogram, ps.CPUSamples = nil, 0
+		notices = append(notices, fmt.Sprintf("pool %q: dropped its CPU histogram, written with %d buckets where this build uses %d; it rebuilds from the next scrape", ps.Pool, n, cpuBuckets))
 	}
+
+	return notices
 }
 
 // forgetTheFuture drops timestamps that have not happened yet.
