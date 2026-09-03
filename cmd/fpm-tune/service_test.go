@@ -64,8 +64,13 @@ func TestCPUIsAFlagOnEveryCommandAndAConfigKey(t *testing.T) {
 	if !strings.Contains(on, "\ncpu = true\n") {
 		t.Errorf("with -cpu the rendered config should carry cpu = true:\n%s", on)
 	}
+	// The whole file has to load, so the flagset needs the keys serve's own
+	// flags supply beside the common ones.
 	fs2 := flag.NewFlagSet("serve", flag.ContinueOnError)
 	c2 := registerCommon(fs2)
+	fs2.Bool("apply", false, "")
+	fs2.String("recommend", "", "")
+	fs2.String("metrics", "", "")
 	if err := fs2.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
