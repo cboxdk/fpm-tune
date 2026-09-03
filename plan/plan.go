@@ -246,6 +246,9 @@ func Build(in Input) (Result, error) {
 	// old record.
 	ambiguous := ambiguousNames(in.Views)
 
+	// Pools whose own headroom marker could not be read, for one warning.
+	var badHeadrooms []string
+
 	// The CPU to divide by, read once for the round, and the headroom the
 	// ceiling carries on top of the fill count.
 	hostCPU := in.Limits.Millicores()
@@ -269,8 +272,12 @@ func Build(in Input) (Result, error) {
 			result.Unreachable = append(result.Unreachable, view.Name)
 		}
 
+		poolHeadroom, _, headroomOK := headroomFor(view.CPUHeadroom, headroom)
+		if !headroomOK {
+			badHeadrooms = append(badHeadrooms, fmt.Sprintf("%s (%q)", view.Name, view.CPUHeadroom))
+		}
 		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name],
-			in.CPUCeiling, hostCPU, headroom)
+			in.CPUCeiling, hostCPU, poolHeadroom)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -319,6 +326,12 @@ func Build(in Input) (Result, error) {
 		allocation.Warnings = append(allocation.Warnings, fmt.Sprintf(
 			"unknown env[FPM_TUNE_WORKLOAD] on %s — reserving nothing for their children; "+
 				"known values are %s", strings.Join(badMarkers, ", "), KnownWorkloads))
+	}
+	if len(badHeadrooms) > 0 {
+		sort.Strings(badHeadrooms)
+		allocation.Warnings = append(allocation.Warnings, fmt.Sprintf(
+			"unreadable %s on %s — using the host's %.2g×; it takes a number of one or more",
+			HeadroomMarker, strings.Join(badHeadrooms, ", "), headroom))
 	}
 
 	result.Plan = allocation

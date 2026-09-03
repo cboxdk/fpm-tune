@@ -427,3 +427,67 @@ func TestTheBoxCostChangesTheFillCount(t *testing.T) {
 		t.Errorf("Why = %q", c.Why(4000))
 	}
 }
+
+// TestAPoolCanCarryItsOwnHeadroom: env[FPM_TUNE_CPU_HEADROOM] on the pool wins
+// over the host's --cpu-headroom for that pool alone, the report says so, and
+// a marker that does not read as a number of one or more is a warning, not a
+// silent default.
+func TestAPoolCanCarryItsOwnHeadroom(t *testing.T) {
+	for marker, want := range map[string]struct {
+		headroom float64
+		fromPool bool
+		ok       bool
+	}{
+		"":      {2, false, true},
+		"3":     {3, true, true},
+		" 1.5 ": {1.5, true, true},
+		"0.5":   {2, false, false},
+		"abc":   {2, false, false},
+		"-1":    {2, false, false},
+	} {
+		h, fromPool, ok := headroomFor(marker, 2)
+		if h != want.headroom || fromPool != want.fromPool || ok != want.ok {
+			t.Errorf("headroomFor(%q, 2) = (%.2g, %v, %v), want (%.2g, %v, %v)", marker, h, fromPool, ok, want.headroom, want.fromPool, want.ok)
+		}
+	}
+
+	st := state.New()
+	base := time.Now()
+	for i := 0; i < 25; i++ {
+		at := base.Add(time.Duration(i) * 2 * time.Minute)
+		st.Learn(cpuBusy("shop", 0.72, i, at), state.Options{})
+		st.Learn(cpuBusy("api", 0.72, i, at), state.Options{})
+	}
+	limits := budget.Limits{MemoryBytes: 16 * gb, CPUs: 4, CPUMillicores: 4000, Source: budget.SourceMemInfo}
+	views := []observe.PoolView{
+		{Name: "shop", ProcessManager: "dynamic", CurrentMaxChildren: 40, MaxChildrenKnown: true, ObservedPeak: 30, CPUHeadroom: "3"},
+		{Name: "api", ProcessManager: "dynamic", CurrentMaxChildren: 40, MaxChildrenKnown: true, ObservedPeak: 30, CPUHeadroom: "lots"},
+	}
+	res, err := Build(Input{Limits: limits, Views: views, State: st, CPUCeiling: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, shop := res.CPU[0], res.CPU[1]
+	// Six fill the box at 700m; shop asked for three times that, api's marker
+	// is unreadable so it gets the host's two.
+	if shop.Ceiling != 18 || !shop.HeadroomFromPool || !strings.Contains(shop.Why(4000), "at 3× headroom (the pool's own)") {
+		t.Errorf("shop = %+v\nwhy = %s", shop, shop.Why(4000))
+	}
+	if api.Ceiling != 12 || api.HeadroomFromPool {
+		t.Errorf("api = %+v; an unreadable marker should fall back to the host's headroom", api)
+	}
+	for _, p := range res.Plan.Pools {
+		if p.Name == "shop" && (!p.CPUBound || p.MaxChildren != 18) {
+			t.Errorf("shop's own headroom did not reach the allocator: %+v", p)
+		}
+	}
+	found := false
+	for _, w := range res.Plan.Warnings {
+		if strings.Contains(w, HeadroomMarker) && strings.Contains(w, `api ("lots")`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no warning about api's unreadable marker in %v", res.Plan.Warnings)
+	}
+}

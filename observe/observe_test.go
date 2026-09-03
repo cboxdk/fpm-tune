@@ -275,3 +275,14 @@ func TestStatCPUTicksAreCountedFromTheCommandName(t *testing.T) {
 		t.Errorf("pid 0 gave %d", got)
 	}
 }
+
+// TestPoolMarkerNeedsAConfigToRead: without a binary and a config path there
+// is nothing to parse, and the marker is simply absent rather than an error.
+func TestPoolMarkerNeedsAConfigToRead(t *testing.T) {
+	if got := poolMarker(phpfpm.Target{Name: "www"}, "env[FPM_TUNE_CPU_HEADROOM]"); got != "" {
+		t.Errorf("a target with no config gave %q", got)
+	}
+	if got := poolMarker(phpfpm.Target{Name: "www", Binary: "/nonexistent/php-fpm", ConfigPath: "/nonexistent.conf"}, "env[FPM_TUNE_CPU_HEADROOM]"); got != "" {
+		t.Errorf("a target whose config cannot be parsed gave %q", got)
+	}
+}

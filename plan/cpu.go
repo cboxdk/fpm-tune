@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/budget"
@@ -59,9 +61,12 @@ type PoolCPU struct {
 	// on top, never below one worker per core plus one. The headroom is the
 	// one figure here that is a judgement rather than a measurement: it is
 	// how many workers may sit waiting on I/O or absorbing a burst past the
-	// point where the CPU is full. Zero until the shape is known.
-	Ceiling  int
-	Headroom float64
+	// point where the CPU is full. HeadroomFromPool says the pool set its own
+	// (env[FPM_TUNE_CPU_HEADROOM]) rather than taking the host's. Zero until
+	// the shape is known.
+	Ceiling          int
+	Headroom         float64
+	HeadroomFromPool bool
 
 	// StarvedRounds is how many scrapes found requests queued while the box
 	// was full: the direct observation that another worker would not have
@@ -139,6 +144,29 @@ func fillWorkers(perWorker, hostMillicores int) int {
 // the CPU. Operators who size cpu-bound PHP by hand land between one and a half
 // and two workers per core; two is the generous end.
 const DefaultCPUHeadroom = 2.0
+
+// HeadroomMarker is the key a pool sets in its own configuration to carry more
+// or less headroom than the host: a pool with a slow payment API behind it
+// wants workers to wait in while the CPU is full, and can say so without every
+// other pool getting the same.
+const HeadroomMarker = "env[FPM_TUNE_CPU_HEADROOM]"
+
+// headroomFor resolves a pool's headroom: its own marker when it set one that
+// reads as a number of one or more, otherwise the host's. ok is false for a
+// marker that could not be read, so the caller can warn — a typo should tell
+// the operator, not quietly hand the pool the default.
+func headroomFor(marker string, host float64) (headroom float64, fromPool, ok bool) {
+	marker = strings.TrimSpace(marker)
+	if marker == "" {
+		return host, false, true
+	}
+	v, err := strconv.ParseFloat(marker, 64)
+	if err != nil || v < 1 || math.IsInf(v, 0) || math.IsNaN(v) {
+		return host, false, false
+	}
+
+	return v, true, true
+}
 
 // cpuCeiling is the number --cpu holds a pool at: the fill count with headroom
 // on top, never below one worker per core plus one — a cap that leaves a box
@@ -232,6 +260,9 @@ func (c PoolCPU) Why(hostMillicores int) string {
 	}
 	if c.Ceiling > 0 {
 		line += fmt.Sprintf("; ceiling %d at %.2g× headroom", c.Ceiling, c.Headroom)
+		if c.HeadroomFromPool {
+			line += " (the pool's own)"
+		}
 	}
 	switch {
 	case c.CPUBound:
@@ -315,8 +346,9 @@ func cpuOf(
 				row.Shape, row.MillicoresPerWorker = cpuShape(row.P50)
 				row.BoxMillicoresPerWorker, row.Overhead, row.BoxMeasured = boxCost(ps, opts, row.MillicoresPerWorker)
 				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)
-				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, headroom)
-				row.Headroom = headroom
+				own, fromPool, _ := headroomFor(v.CPUHeadroom, headroom)
+				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, own)
+				row.Headroom, row.HeadroomFromPool = own, fromPool
 			}
 		}
 		if row.Shape != "" {
