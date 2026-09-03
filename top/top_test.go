@@ -153,3 +153,62 @@ func TestFetchHistoryTalksToTheDaemon(t *testing.T) {
 		t.Errorf("an old daemon without the endpoint gave %v", err)
 	}
 }
+
+// TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags: a opens the panel
+// with the plan's changes and the command it would run, Esc closes it, and
+// in apply mode a is refused with a notice rather than a second writer
+// racing the daemon.
+func TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags(t *testing.T) {
+	resp := fixture()
+	resp.Host.Apply = false
+	resp.Host.CPUHeadroom = 1.5
+	for i := range resp.Rounds[len(resp.Rounds)-1].Pools {
+		if resp.Rounds[len(resp.Rounds)-1].Pools[i].Pool == "www-forge" {
+			resp.Rounds[len(resp.Rounds)-1].Pools[i].Configured = 22
+		}
+	}
+	m := newModel(Options{Addr: "x", Refresh: time.Second})
+	next, _ := m.Update(fetchedMsg{resp: resp, at: time.Now()})
+	m = next.(model)
+	m.width, m.height = 120, 40
+	press := func(k tea.KeyMsg) {
+		var mm tea.Model
+		mm, _ = m.Update(k)
+		m = mm.(model)
+	}
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if !m.confirm {
+		t.Fatal("a did not open the apply panel")
+	}
+	out := m.View()
+	for _, want := range []string{"APPLY THE PLAN?", "www-forge", "22 → 10", "apply --cpu --cpu-headroom 1.5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("panel lacks %q:\n%s", want, out)
+		}
+	}
+	if pending := m.pending(); len(pending) != 1 || pending[0].Pool != "www-forge" {
+		t.Errorf("pending = %+v, want www-forge only (www is at its plan)", pending)
+	}
+	press(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.confirm {
+		t.Error("Esc did not close the panel")
+	}
+
+	args := applyArgs(serve.HostInfo{CPUCeiling: true, CPUHeadroom: 2}, "/usr/local/bin/fpm-tune")
+	if strings.Join(args, " ") != "sudo /usr/local/bin/fpm-tune apply --cpu --cpu-headroom 2" {
+		t.Errorf("args = %v", args)
+	}
+	if args := applyArgs(serve.HostInfo{}, "fpm-tune"); strings.Join(args, " ") != "sudo fpm-tune apply" {
+		t.Errorf("args without cpu = %v", args)
+	}
+
+	// In apply mode the daemon holds the pool directory and applies on its
+	// own; a from the view says so instead of racing it.
+	resp.Host.Apply = true
+	next, _ = m.Update(fetchedMsg{resp: resp, at: time.Now()})
+	m = next.(model)
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.confirm || !strings.Contains(m.notice, "apply mode") {
+		t.Errorf("in apply mode: confirm=%v notice=%q", m.confirm, m.notice)
+	}
+}

@@ -180,10 +180,11 @@ func (h *history) snapshot(last int) ([]HistorySample, []HistoryEvent) {
 // HostInfo is what a client needs to label the history: which box, how big,
 // and what the daemon is allowed to do to it.
 type HostInfo struct {
-	Hostname   string `json:"hostname"`
-	Version    string `json:"version"`
-	Apply      bool   `json:"apply"`
-	CPUCeiling bool   `json:"cpu_ceiling"`
+	Hostname    string  `json:"hostname"`
+	Version     string  `json:"version"`
+	Apply       bool    `json:"apply"`
+	CPUCeiling  bool    `json:"cpu_ceiling"`
+	CPUHeadroom float64 `json:"cpu_headroom"`
 
 	MemoryBytes   int64  `json:"memory_bytes"`
 	CPUMillicores int    `json:"cpu_millicores"`

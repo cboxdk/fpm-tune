@@ -444,6 +444,7 @@ func (l *Loop) round(ctx context.Context) {
 	hostname, _ := os.Hostname()
 	l.history.setHost(HostInfo{
 		Hostname: hostname, Version: l.cfg.Version, Apply: l.cfg.Apply, CPUCeiling: l.cfg.CPUCeiling,
+		CPUHeadroom: l.cfg.CPUHeadroom,
 		MemoryBytes: limits.MemoryBytes, CPUMillicores: limits.Millicores(), Source: string(limits.Source),
 	})
 

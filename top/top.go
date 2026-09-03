@@ -14,7 +14,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,7 +117,16 @@ type model struct {
 	selected      int
 	pools         []string // pool names in display order, from the newest round
 	span          int      // index into spans
+
+	// confirm is the apply panel: open when the operator pressed a, closed
+	// by Enter (apply) or Esc. notice is one line of feedback under the
+	// title, from the last apply or a refused one.
+	confirm bool
+	notice  string
 }
+
+// appliedMsg is the outcome of an apply run from the view.
+type appliedMsg struct{ err error }
 
 func newModel(opts Options) model {
 	return model{
@@ -182,12 +195,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
+	case appliedMsg:
+		if msg.err != nil {
+			m.notice = sBad.Render("apply failed: " + msg.err.Error())
+		} else {
+			m.notice = sOK.Render("applied; the daemon reports the change on its next round")
+		}
+
+		return m, m.fetch()
+
 	case tea.KeyMsg:
+		if m.confirm {
+			switch msg.String() {
+			case "enter", "y":
+				m.confirm = false
+
+				return m, m.apply()
+			case "esc", "n", "q", "a":
+				m.confirm = false
+			}
+
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "r":
 			return m, m.fetch()
+		case "a":
+			if m.resp == nil {
+				return m, nil
+			}
+			if m.resp.Host.Apply {
+				m.notice = sWarn.Render("the daemon is in apply mode and applies on its own; `fpm-tune mode advisory` hands that to you")
+
+				return m, nil
+			}
+			m.notice = ""
+			m.confirm = true
 		case "up", "k":
 			if m.selected > 0 {
 				m.selected--
@@ -210,6 +255,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// pending is what an apply would change right now: the pools whose planned
+// ceiling differs from the configured one, from the newest round.
+func (m model) pending() []serve.PoolSample {
+	if m.resp == nil || len(m.resp.Rounds) == 0 {
+		return nil
+	}
+	var out []serve.PoolSample
+	for _, p := range m.resp.Rounds[len(m.resp.Rounds)-1].Pools {
+		if !p.Unknown && p.Recommended != p.Configured {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pool < out[j].Pool })
+
+	return out
+}
+
+// applyArgs is the command an apply from the view runs: this binary's own
+// apply, with the CPU flags the daemon runs with, so the two agree on what
+// the plan is. sudo, because the pool directory is root's; the terminal is
+// handed over so a password prompt can appear.
+func applyArgs(host serve.HostInfo, self string) []string {
+	args := []string{"sudo", self, "apply"}
+	if host.CPUCeiling {
+		args = append(args, "--cpu")
+		if host.CPUHeadroom > 0 {
+			args = append(args, "--cpu-headroom", strconv.FormatFloat(host.CPUHeadroom, 'g', -1, 64))
+		}
+	}
+
+	return args
+}
+
+// apply runs fpm-tune apply in the terminal and comes back with the outcome.
+func (m model) apply() tea.Cmd {
+	self, err := os.Executable()
+	if err != nil {
+		self = "fpm-tune"
+	}
+	args := applyArgs(m.resp.Host, self)
+	cmd := exec.Command(args[0], args[1:]...) //nolint:gosec // the operator asked for exactly this
+
+	return tea.ExecProcess(cmd, func(err error) tea.Msg { return appliedMsg{err: err} })
 }
 
 // poolNames is the display order: the newest round's pools, by name.
@@ -286,11 +376,17 @@ func (m model) View() string {
 		hostH, poolH = 7, 12
 	}
 
-	parts := []string{
-		m.titleBar(content + 4),
+	parts := []string{m.titleBar(content + 4)}
+	if m.notice != "" {
+		parts = append(parts, "  "+m.notice)
+	}
+	if m.confirm {
+		parts = append(parts, sPanel.Width(inner).BorderForeground(cAccent).Render(m.confirmPanel(content)))
+	}
+	parts = append(parts,
 		sPanel.Width(inner).Render(m.hostPanel(content, hostH)),
 		sPanel.Width(inner).Render(m.poolsPanel(content)),
-	}
+	)
 	if len(m.pools) > 0 {
 		parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(content, poolH)))
 	}
@@ -701,10 +797,42 @@ func (m model) eventsPanel(width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// confirmPanel is what Enter would do: the plan's changes, pool by pool,
+// and the command that makes them.
+func (m model) confirmPanel(width int) string {
+	self, err := os.Executable()
+	if err != nil {
+		self = "fpm-tune"
+	}
+	lines := []string{sAccent.Render("APPLY THE PLAN?") + sDim.Render("  Enter applies, Esc cancels")}
+	pending := m.pending()
+	if len(pending) == 0 {
+		lines = append(lines, sDim.Render("nothing to change: every pool is already at its planned ceiling"))
+	}
+	for _, p := range pending {
+		arrow := sOK.Render("↑")
+		if p.Recommended < p.Configured {
+			arrow = sWarn.Render("↓")
+		}
+		why := ""
+		if p.CPUBound {
+			why = sDim.Render("  held at the cpu ceiling")
+		}
+		lines = append(lines, fmt.Sprintf("  %s %-14s %d → %d%s", arrow, p.Pool, p.Configured, p.Recommended, why))
+	}
+	// The command by its base name: the path is this binary's own and adds
+	// nothing but length.
+	shown := applyArgs(m.resp.Host, filepath.Base(self))
+	lines = append(lines, sDim.Render(trunc("runs: "+strings.Join(shown, " "), width)))
+
+	return strings.Join(lines, "\n")
+}
+
 func (m model) keys() string {
 	k := func(key, what string) string { return sKey.Render(key) + sDim.Render(" "+what) }
+	items := []string{k("↑↓", "pool"), k("1", "hour"), k("2", "six hours"), k("3", "all"), k("a", "apply"), k("r", "refresh"), k("q", "quit")}
 
-	return "  " + strings.Join([]string{k("↑↓", "pool"), k("1", "hour"), k("2", "six hours"), k("3", "all"), k("r", "refresh"), k("q", "quit")}, "   ")
+	return "  " + strings.Join(items, "   ")
 }
 
 // The sparkline used in the table and for the queue and CPU rows. Eight

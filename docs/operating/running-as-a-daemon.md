@@ -102,8 +102,13 @@ A terminal view of that history: the box's CPU over time, every pool with its
 busy workers, queue, ceiling now and planned, CPU share, fill count and which
 resource limits it, the selected pool's charts, and every resize and failed
 apply since the daemon started. Arrow keys pick a pool, `1`/`2`/`3` set the
-span (an hour, six, everything), `q` quits. It reads and changes nothing;
-`fpm-tune mode` and `fpm-tune apply` are for acting.
+span (an hour, six, everything), `q` quits.
+
+It reads and changes nothing on its own. With the daemon in advisory mode, `a`
+opens the plan's pending changes, pool by pool, and Enter runs `fpm-tune apply`
+in the terminal with the daemon's own CPU flags, so what you saw is what gets
+applied; the daemon then records the change as an event. In apply mode the
+daemon applies on its own and `a` says so.
 
 ## The self-repair is part of applying
 
