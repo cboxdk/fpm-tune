@@ -67,6 +67,30 @@ Each interval, in order:
 8. **Publish** the plan as metrics, and (with `--recommend`) write it as
    configuration.
 
+## A day of rounds, for drawing
+
+Every round leaves one sample in a ring in the daemon's memory, and every apply
+leaves an event, and the metrics address serves them as JSON:
+
+```
+curl -s 127.0.0.1:9110/history.json | jq '.rounds[-1]'
+curl -s '127.0.0.1:9110/history.json?last=120' | jq '.rounds[].pools[] | select(.pool=="www") | .active'
+```
+
+A round carries, per pool, what was observed (busy workers, listen queue, the
+configured ceiling), what was planned (the recommended ceiling, whether demand
+went unmet, the per-worker cost sized on) and the CPU side (median share,
+readings, fill count, ceiling, whether the pool is CPU-limited and whether it
+was held at the CPU ceiling), plus how busy the box's CPU was over the interval.
+Events are resizes (pool, from, to, reason), failed applies, rollbacks, and
+repairs.
+
+`--history` sets how far back it reaches (a day by default; the ring holds
+history ÷ interval rounds and a thousand events). It starts empty at every
+daemon start and is never written to disk: it is for a dashboard or a terminal
+UI to draw a line from, not a store. Prometheus is the place for anything that
+must outlive a restart.
+
 ## The self-repair is part of applying
 
 A daemon without `--apply` will not fix a host whose master this tool's own file

@@ -115,6 +115,10 @@ type Config struct {
 	// CPUCeiling. Zero means plan.DefaultCPUHeadroom.
 	CPUHeadroom float64
 
+	// History is how far back /history.json reaches: the ring holds
+	// History / Interval rounds. Zero means a day. It lives in memory only.
+	History time.Duration
+
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
@@ -132,6 +136,9 @@ type Config struct {
 func (c Config) Defaults() Config {
 	if c.Interval <= 0 {
 		c.Interval = 30 * time.Second
+	}
+	if c.History <= 0 {
+		c.History = 24 * time.Hour
 	}
 	if c.StatePath == "" {
 		c.StatePath = state.DefaultPath
@@ -170,6 +177,14 @@ type Loop struct {
 	// largest CurrentBytes seen is accumulated here to stand in — and it survives
 	// a scrape where the reading briefly dips, which a raw current never would.
 	cgroupPeak int64
+
+	// history is the ring of rounds and events behind /history.json.
+	history *history
+
+	// lastHostCPU is the box's CPU reading from the previous round, so this
+	// round's busy ratio can be recorded in the history.
+	lastHostCPU budget.HostCPU
+	hasHostCPU  bool
 
 	// lastRec is the recommendation last LOGGED for each pool — the value and when —
 	// so it is reported the first time it is seen, whenever it moves, and, as a sign
@@ -244,6 +259,7 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 	}
 
 	return &Loop{
+		history: newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
 		cfg:     cfg,
 		log:     log,
 		metrics: metrics.New(),
@@ -407,10 +423,13 @@ func (l *Loop) round(ctx context.Context) {
 	// no memory.peak still accumulates one, and a momentary dip cannot lower it.
 	// The box's CPU beside the pools' own, for what a busy worker costs the
 	// host as a whole. After the limits, which say how much CPU the box has.
+	// Read whether or not the loop learns: the history wants the busy ratio
+	// either way.
+	hostCPU, hostOK := budget.HostCPUOf(masterPID)
 	if !l.cfg.NoLearn {
-		hostCPU, hostOK := budget.HostCPUOf(masterPID)
 		plan.LearnCPULoad(l.state, views, hostCPU, hostOK, limits.Millicores(), now)
 	}
+	hostBusy, hostBusyKnown := l.hostBusyRatio(hostCPU, hostOK, limits.Millicores())
 
 	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 	if hasCgroup {
@@ -453,6 +472,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
+	l.history.record(historySampleOf(result, now, hostBusy, hostBusyKnown))
 	l.logPlan(result, now)
 	l.writeRecommendation(result, now)
 
@@ -736,6 +756,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 			// is the difference between restarting php-fpm now and finding out
 			// in the morning. The CLI had the same sentence and the same fault.
 			if errors.Is(err, apply.ErrMasterDidNotSurvive) {
+				l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: err.Error()})
 				l.log.Error("PHP-FPM IS DOWN AND COULD NOT BE PUT BACK. The master did "+
 					"not survive the reload, and the configuration that killed it could "+
 					"not be removed. Remove these by hand, then reset-failed and start "+
@@ -750,11 +771,17 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 				"the next reload from any source will adopt it, and a master that fails "+
 				"to start does not come back. Remove these by hand.",
 				"paths", applied.RollbackFailed, "error", err)
+			l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: err.Error()})
 
 			return
 		}
 
 		l.log.Error("Apply failed", "error", err, "rolled_back", applied.RolledBack)
+		kind := EventApplyFailed
+		if applied.RolledBack {
+			kind = EventRolledBack
+		}
+		l.history.event(HistoryEvent{At: now, Kind: kind, Detail: err.Error()})
 
 		return
 	}
@@ -762,6 +789,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	if changed := applied.Changed(); len(changed) > 0 {
 		for _, o := range changed {
 			l.log.Info("Pool resized", "pool", o.Pool, "from", o.From, "to", o.To, "reason", o.Reason)
+			l.history.event(HistoryEvent{At: now, Kind: EventResized, Pool: o.Pool, From: o.From, To: o.To, Detail: o.Reason})
 		}
 		// The applied values are the hysteresis baseline for the next round, so
 		// they go to disk now rather than waiting for the save interval.
@@ -829,6 +857,7 @@ func (l *Loop) reconcile(ctx context.Context) {
 		// not when the attempt failed, which is what this used to count and is
 		// the opposite of what the name says.
 		l.metrics.RecordRepair()
+		l.history.event(HistoryEvent{At: time.Now(), Kind: EventRepaired})
 	}
 	if err != nil {
 		// Released, so the operator's own `fpm-tune apply` is not refused by a
@@ -1003,6 +1032,7 @@ func (l *Loop) startMetrics() (*http.Server, error) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.Handle("/history.json", l.history)
 
 	// Bound here rather than inside the goroutine so that a port already in use
 	// is an error the caller sees, not a line in a log nobody reads.

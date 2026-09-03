@@ -1010,6 +1010,7 @@ func runServe(args []string) error {
 	c := registerCommon(fs)
 	var (
 		interval    = fs.Duration("interval", 30*time.Second, "how often to sample the pools")
+		history     = fs.Duration("history", 24*time.Hour, "how far back /history.json reaches, in memory: the ring holds history/interval rounds and the daemon's apply events, for a dashboard or a terminal UI to draw from. Nothing is written to disk; Prometheus is the place for anything that must outlive a restart")
 		metricsAddr = fs.String("metrics", ":9110", "address for /metrics (empty disables it)")
 		doApply     = fs.Bool("apply", false,
 			"act on the plan. Without it the loop observes, learns and publishes metrics "+
@@ -1107,6 +1108,7 @@ func runServe(args []string) error {
 		Workload:        resolveWorkload(*c.workload, log),
 		CPUCeiling:      *c.cpu,
 		CPUHeadroom:     *c.cpuHeadroom,
+		History:         *history,
 		ScrapeTimeout:   *c.timeout,
 		HeartbeatEvery:  *heartbeat,
 		ApplyOptions: apply.Options{
