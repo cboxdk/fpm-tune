@@ -438,7 +438,7 @@ MUTATIONS = [
      "		_ = rememberedMaster"),
     ("serve: the lock does not follow the directory being written",
      "serve/serve.go",
-     '	if !l.holdResource(master.DropInDir) {\n		l.outcome = ApplyOutcome{Error: "cannot take the pool-directory lock: another fpm-tune is writing to " + master.DropInDir}\n\n		return\n	}\n	if !l.reconciled {\n		l.log.Warn("The pool directory changed under this process; reconciling before "+\n			"writing to it", "dir", master.DropInDir)\n		l.outcome = ApplyOutcome{Message: "nothing was applied: the pool directory changed under the daemon, which reconciles it first; ask again"}\n\n		return\n	}\n',
+     '	if !l.holdResource(master.DropInDir) {\n		return\n	}\n	if !l.reconciled {\n		l.log.Warn("The pool directory changed under this process; reconciling before "+\n			"writing to it", "dir", master.DropInDir)\n		l.outcome = ApplyOutcome{Message: "nothing was applied: the pool directory changed under the daemon, which reconciles it first; ask again"}\n\n		return\n	}\n',
      ""),
     ("serve: a blocked apply publishes nothing",
      "serve/serve.go", "		l.metrics.SetApplyBlocked(\"no_master\")", "		l.metrics.SetApplyBlocked(\"\")"),

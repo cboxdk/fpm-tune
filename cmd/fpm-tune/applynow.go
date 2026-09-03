@@ -50,17 +50,15 @@ func runApplyNow(args []string) error {
 	return nil
 }
 
-// describeOutcome is the outcome as lines a person reads.
+// describeOutcome is the outcome as lines a person reads. A failure is not
+// among them: it goes back as the error, which main prints once.
 func describeOutcome(out serve.ApplyOutcome) string {
 	s := ""
 	for _, c := range out.Changed {
 		s += fmt.Sprintf("%s  %d → %d  %s\n", c.Pool, c.From, c.To, c.Detail)
 	}
-	if len(out.Changed) == 0 && out.Message != "" {
+	if len(out.Changed) == 0 && out.Message != "" && out.Error == "" {
 		s += out.Message + "\n"
-	}
-	if out.Error != "" {
-		s += "apply failed: " + out.Error + "\n"
 	}
 
 	return s

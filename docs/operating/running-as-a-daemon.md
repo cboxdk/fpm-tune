@@ -146,6 +146,10 @@ The socket is `/var/lib/fpm-tune/control.sock` (`--control` on both `serve` and
 `apply-now` moves it), created mode 0600 and owned by the daemon's user, so
 `apply-now` needs root. Each call is one full round with the damping off, so
 do not script it in a loop: that is `--apply` with the safeguards removed.
+One daemon writes a pool directory: an apply-mode daemon holds the
+directory's lock for as long as it runs, so an `apply-now` sent to a second,
+watching daemon beside it is refused, and says so. Ask the daemon that holds
+the lock.
 
 ## The self-repair is part of applying
 

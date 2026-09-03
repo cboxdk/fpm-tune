@@ -576,7 +576,9 @@ func (l *Loop) round(ctx context.Context) {
 
 	if l.applying() && l.reconciled {
 		l.applyPlan(roundCtx, result, now)
-	} else if l.forceApply {
+	} else if l.forceApply && l.outcome.Error == "" {
+		// The reconcile that just ran says why when it failed on the lock or
+		// the repair; this is for the rest (no master to reconcile against).
 		l.outcome = ApplyOutcome{Message: "nothing was applied: the host is not reconciled, so writing to it is refused this round"}
 	}
 
@@ -767,8 +769,6 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// unread. holdResource clears the reconciled flag when the directory
 	// changes, which sends the next round through recovery first.
 	if !l.holdResource(master.DropInDir) {
-		l.outcome = ApplyOutcome{Error: "cannot take the pool-directory lock: another fpm-tune is writing to " + master.DropInDir}
-
 		return
 	}
 	if !l.reconciled {
@@ -970,6 +970,7 @@ func (l *Loop) reconcile(ctx context.Context) {
 		l.metrics.SetApplyBlocked("unrepaired")
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
+		l.outcome = ApplyOutcome{Error: "a previous run left configuration this daemon could not repair; not applying: " + err.Error()}
 
 		return
 	}
@@ -1124,6 +1125,11 @@ func (l *Loop) holdResource(dropInDir string) bool {
 		l.metrics.SetApplyBlocked("lock")
 		l.log.Error("Cannot take the pool-directory lock; not applying",
 			"dir", dropInDir, "error", err)
+		// The answer to an apply-now that ran into this, whether here on the
+		// way to the plan or in the reconcile before it: an apply-mode daemon
+		// keeps the lock for as long as it runs, and that is the usual holder.
+		l.outcome = ApplyOutcome{Error: "cannot take the pool-directory lock on " + dropInDir +
+			": " + err.Error() + " (an fpm-tune serve --apply keeps it for as long as it runs; ask that daemon instead)"}
 
 		return false
 	}

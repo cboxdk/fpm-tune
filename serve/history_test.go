@@ -15,6 +15,7 @@ import (
 
 	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/fpm-tune/metrics"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
 )
@@ -199,6 +200,13 @@ func TestTheLockComesBackWithoutARoundOfRecovery(t *testing.T) {
 	}
 	if !l.holdResource(other) || l.reconciled {
 		t.Errorf("a directory never reconciled: held=%v reconciled=%v", l.resource != nil, l.reconciled)
+	}
+
+	// Held by another process (an apply-mode daemon, usually): the refusal
+	// is the outcome an apply-now gets, not a generic 'not reconciled'.
+	second := &Loop{log: discardLogger(), metrics: metrics.New()}
+	if second.holdResource(other) || !strings.Contains(second.outcome.Error, "pool-directory lock") {
+		t.Errorf("a held lock: held=%v outcome=%+v", second.resource != nil, second.outcome)
 	}
 }
 
