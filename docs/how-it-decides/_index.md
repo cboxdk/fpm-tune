@@ -1,42 +1,28 @@
 ---
 title: How it decides
 weight: 20
-description: The budget, the learner, the allocator, and when it moves versus holds, the part to read before you trust it.
+description: The budget, the learner, the allocator, the damping and the CPU side, for anyone deciding whether to let it write.
 ---
 
 # How it decides
 
-A tool that writes production configuration earns trust by being legible, not by
-being clever. This section is the whole of what it does with a host's memory,
-and every non-obvious choice here was made because the obvious one is wrong in a
-way that only shows up under load.
+This section is what fpm-tune does with a host's memory and CPU between reading
+the status pages and writing `pm.max_children`. Read it before switching a
+daemon to apply mode, or when a plan's number looks wrong and you want to know
+where it came from.
 
-Read it in order:
-
-1. **[The budget](the-budget.md)**: where the number it divides comes from, and
-   why reading the machine's memory is the wrong answer on a VM.
-2. **[Measuring workers](measuring-workers.md)**: the learner: how it decides
-   what one worker costs, why it separates "what it costs" from "may I shrink
-   it", and why it will believe an expensive reading instantly but a cheap one
-   only slowly.
-3. **[Spawned children](spawned-children.md)**: the memory a worker's own RSS
-   does not include: the ffmpeg it shelled out to. How that is measured, why the
-   cgroup is the ground truth where there is one, and how a workload declaration
-   keeps a media pool safe on the run before it has been measured.
-4. **[Dividing the budget](dividing-the-budget.md)**: the allocator: floors
-   first, then demand to the pools a shortage is actually hurting, cheapest fix
-   first; and what it does when the floors themselves do not fit.
-5. **[Hysteresis](hysteresis.md)**: when a change is worth a reload and when it
-   is not, and why growing and shrinking are not held to the same caution.
-6. **[Static, dynamic, ondemand](process-managers.md)**: what it does with each
-   `pm` mode, why it sizes within the mode rather than changing it, and the one
-   suggestion it will make when a mode doesn't fit the workload.
-7. **[CPU per request](cpu.md)**: which of memory and CPU a pool runs out
-   of first. Measured on every scrape and reported in every plan; allowed to
-   cap a pool only with `--cpu`.
-
-The allocator ([dividing the budget](dividing-the-budget.md)) is pure
-computation with no I/O and no dependencies, which is what makes it exhaustively
-testable. A randomised sweep over hundreds of thousands of generated plans
-checks the one invariant that matters: a plan never commits more memory than the
-budget.
+- **[The budget](the-budget.md)**: where the memory it divides comes from, what
+  it holds back, and how to give php-fpm a hard limit.
+- **[Dividing the budget](dividing-the-budget.md)**: the allocator: floors,
+  demand, and what happens when the host is out of capacity.
+- **[Measuring workers](measuring-workers.md)**: what one worker costs, which
+  readings count, and when a pool may be shrunk.
+- **[Spawned children](spawned-children.md)**: the ffmpeg behind a worker, how
+  it is measured, and how to declare it before it is.
+- **[Static, dynamic, ondemand](process-managers.md)**: what it writes for each
+  `pm` mode, and the one suggestion it makes.
+- **[Hysteresis](hysteresis.md)**: when a change is worth a reload.
+- **[CPU per request](cpu.md)**: which of memory and CPU a pool runs out of
+  first, and the ceiling `--cpu` holds it at.
+- **[CPU measurement](cpu-measurement.md)**: appendix: how the CPU figures are
+  measured.

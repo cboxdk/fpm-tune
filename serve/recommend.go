@@ -193,7 +193,7 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 	// yet see.
 	if result.HasCgroupUsage {
 		fmt.Fprintf(&b, "; cgroup used %s now, %s at its peak (workers AND everything "+
-			"they spawned — the number the OOM killer enforces against)\n",
+			"they spawned, the number the OOM killer enforces against)\n",
 			budget.HumanBytes(result.CgroupUsage.CurrentBytes),
 			budget.HumanBytes(result.CgroupUsage.PeakBytes))
 	}
@@ -222,7 +222,7 @@ func renderRecommendation(result plan.Result, now time.Time) (file, settings str
 			// The plan reserves for it and never writes it, so a recommendation
 			// naming it would be one nobody can act on: setting a ceiling means
 			// knowing the one being replaced, and this pool's could not be read.
-			fmt.Fprintf(&b, ";\n; %s: not recommended — %s\n", p.Name, p.Reason)
+			fmt.Fprintf(&b, ";\n; %s: not recommended: %s\n", p.Name, p.Reason)
 
 			continue
 		}

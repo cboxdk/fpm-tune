@@ -1,189 +1,95 @@
 ---
 title: Running as a daemon
 weight: 1
-description: What the serve loop does each round, and the difference between watching and acting.
+description: Installing the service under systemd, switching its mode, what each round does, and what it logs.
 ---
 
 # Running as a daemon
 
-```bash
-fpm-tune serve            # watch, learn, publish metrics, change nothing
-fpm-tune serve --apply    # also act on the plan
-```
+This page is for the person installing fpm-tune as a service and reading its log afterwards. It covers the install, the two modes, the round, and the log.
 
-Without `--apply`, `serve` is a permanent observer: every interval it discovers
-the pools, scrapes them, folds the readings into the learned baselines, builds a
-plan, and publishes it as metrics. It touches no configuration. This is a
-reasonable way to run it forever, as a source of sizing metrics, or as an
-adviser (see [Advisory mode](advisory-mode.md)). It is where anyone sensible
-starts.
-
-With `--apply`, the same loop also writes the plan when a change clears the
-[hysteresis thresholds](../how-it-decides/hysteresis.md), reloads the master, and
-repairs the host if its own file is ever what stops php-fpm from starting.
-
-## In the background, under systemd
-
-You do not have to write a unit. One command installs and starts it:
+## Installing the service
 
 ```bash
-sudo fpm-tune install-service          # advisory (watch and recommend)
-sudo fpm-tune install-service --apply  # act on the plan
-sudo fpm-tune install-service --cpu    # also let the CPU measurement cap a pool
+sudo fpm-tune install-service            # advisory: watch, learn, recommend
+sudo fpm-tune install-service --apply    # apply: also act on the plan
+sudo fpm-tune install-service --cpu      # let the CPU measurement hold a pool at its CPU ceiling
+sudo fpm-tune install-service --print    # show the config and unit; install nothing
 ```
 
-It writes `/etc/fpm-tune/config` and a unit that reads it, then enables and starts
-the service. `--print` shows both without installing anything.
+It writes `/etc/fpm-tune/config` and `/etc/systemd/system/fpm-tune.service`, runs `daemon-reload`, enables the unit and starts it. The unit runs `fpm-tune serve --config /etc/fpm-tune/config`, so every setting lives in the config file and the unit never needs editing. The relevant lines of `--print`:
 
-The **mode lives in the config, not the unit**, so switching between watching and
-acting is a command, no unit edit, no `daemon-reload`:
+```
+# /etc/fpm-tune/config
+mode = advisory
+
+# Where /metrics is served. Empty disables it.
+metrics = 127.0.0.1:9110
+
+# /etc/systemd/system/fpm-tune.service
+ExecStart=/usr/local/bin/fpm-tune serve --config /etc/fpm-tune/config
+Restart=on-failure
+RestartSec=5
+StateDirectory=fpm-tune
+StateDirectoryMode=0700
+```
+
+The installed service binds `/metrics` to loopback (`127.0.0.1:9110`); a hand-run `fpm-tune serve` binds `:9110`, every interface. `--metrics` changes the address, and the install warns when it is reachable off the host, because the endpoint has no authentication. The unit says `Wants=php-fpm.service`; on Debian and Ubuntu the unit is `php8.4-fpm.service`, so that ordering does nothing there. It does not matter: the daemon looks for the master every round.
+
+Re-running `install-service` keeps the config and changes only the keys you name. `--apply` sets `mode`, `--metrics` sets `metrics`, `--cpu` or `--cpu=false` sets `cpu`; everything else, including a mode set with `fpm-tune mode` and any hand edit, is left as it was. The unit is rewritten and the service restarted, which is also how an [upgrade](lifecycle.md) takes effect.
+
+## The mode
+
+The daemon is in one of two modes. In advisory mode it watches, learns, publishes metrics and writes [the recommendation file](advisory-mode.md) at `/var/lib/fpm-tune/recommended.conf`; it changes nothing. In apply mode it also writes `zz-fpm-tune.conf` and reloads the master when a change clears the [hysteresis](../how-it-decides/hysteresis.md). The self-repair belongs to apply mode: an advisory daemon will not remove its own file from a host whose master that file stops from starting. See [Recovering a host](recovering.md).
+
+`mode` is one line in the config, and `fpm-tune mode` rewrites it and restarts the service:
 
 ```bash
-sudo fpm-tune mode apply       # let it act on what it finds
-sudo fpm-tune mode advisory    # back to watch-only
-fpm-tune mode                  # print the current mode
+sudo fpm-tune mode apply
+sudo fpm-tune mode advisory
+fpm-tune mode
 ```
 
-Each rewrites the one line in `/etc/fpm-tune/config` and restarts the service. The
-sensible path is `install-service` (advisory), leave it a day or two to build a
-baseline, read the recommendation, then `mode apply`. Follow it with
-`journalctl -u fpm-tune -f`.
+```
+mode = apply (/etc/fpm-tune/config)
+```
+
+The other keys are documented in the [configuration reference](../configuration/reference.md).
 
 ## What a round does
 
-Each interval, in order:
+Every 30 seconds (`interval`), in this order:
 
-1. **Reconcile**, if a previous run left something unfinished, before discovery,
-   because a broken configuration a previous run left would stop the master from
-   parsing, and from that point on nothing is discoverable.
-2. **Discover** the masters and their pools, re-reading the effective
-   configuration each round so a `pm.max_children` an operator changed by hand is
-   seen rather than assumed.
-3. **Scrape** each pool's status and worker memory.
-4. **Learn**: fold the readings into the baselines.
-5. **Plan**: read the budget from the master's cgroup, divide it.
-6. **Record** the ceiling counters, for the next round to compare against.
-7. **Apply** (with `--apply`, or for the one round an `apply-now` asks for),
-   if a change is worth a reload.
-8. **Publish** the plan as metrics, and (with `--recommend`) write it as
-   configuration.
-
-## History: a day of rounds
-
-Every round leaves one sample in a ring in the daemon's memory, every apply and
-every change the daemon notices leaves an event, and the metrics address serves
-them as JSON:
-
-```
-curl -s 127.0.0.1:9110/history.json | jq '.rounds[-1]'
-curl -s '127.0.0.1:9110/history.json?last=120' | jq '.rounds[].pools[] | select(.pool=="www") | .active'
-```
-
-A round carries, per pool, what was observed (busy workers, listen queue, the
-configured ceiling), what was planned (the recommended ceiling, whether demand
-went unmet, the per-worker cost sized on, what memory alone would have set, so
-a CPU-capped pool shows the gap) and the CPU side (median share, readings, fill
-count, ceiling, whether the pool is CPU-limited and whether it was held at the
-CPU ceiling), plus how busy the box's CPU was over the interval. A `host`
-object carries the hostname, the version, the mode, whether the CPU ceiling is
-on and where the budget came from; that is what `top`'s title bar reads.
-Events carry a `kind`: `resized` (pool, from, to, reason), `apply_failed`,
-`rolled_back`, `rollback_failed`, `repaired`, and `changed`: a ceiling that
-moved without the daemon moving it, a hand edit, a deploy, or an `fpm-tune
-apply` run beside it.
-
-`--history` sets how far back it reaches (a day by default; the ring holds
-history ÷ interval rounds and a thousand events). It starts empty at every
-daemon start and is never written to disk: it is for a dashboard or a terminal
-UI to draw a line from, not a store. Prometheus is the place for anything that
-must outlive a restart.
-
-It is served on the same address as `/metrics`, with the same absence of
-authentication, and it says more than the metrics do: pool names, hostname,
-version, and a day of per-pool load. Bind the address to loopback (the
-installed service does) or a private network, and reach it from elsewhere over
-an SSH tunnel.
-
-## Watching it: `fpm-tune top`
-
-```bash
-fpm-tune top                       # the installed service
-fpm-tune top --addr 10.0.0.5:9110  # another host's daemon
-```
-
-A terminal view of that history: the box's CPU over time, every pool with its
-busy workers, queue, ceiling now and planned, CPU share, fill count and which
-resource limits it, the selected pool's charts, and every event (resizes,
-outside changes, failed applies, rollbacks, repairs) since the daemon started.
-Arrow keys (or `j`/`k`) pick a pool, `1`/`2`/`3` set the span (an hour, six,
-everything), `r` refreshes, `a` applies, `q` quits.
-
-It reads and changes nothing on its own. `a` opens the plan's pending changes,
-pool by pool, and Enter runs `fpm-tune apply-now` in the terminal (through
-`sudo`, unless you are root), which asks the daemon to apply the plan it
-showed. The daemon does the writing, with its own state, lock and flags, so
-what you saw is what gets applied, and it records the resize as an event. It
-stays in whatever mode it is in. `--addr` reads another host's history over
-plain HTTP, for looking; `a` is refused there, because `apply-now` reaches only
-the daemon on the box it runs on.
-
-## Applying once: `fpm-tune apply-now`
-
-```bash
-sudo fpm-tune apply-now
-```
-
-The daemon holds the state lock for as long as it runs, so `fpm-tune apply`
-beside it is refused: two writers of one state file is how an hour of learning
-gets discarded. `apply-now` is the way to act on a watching daemon's plan
-without switching it to apply mode: it asks the daemon, over a control socket,
-to run one round with applying forced on and the
-[hysteresis](../how-it-decides/hysteresis.md) waived (you have read the plan
-and asked for it), and prints what changed. The daemon stays in the mode it
-was in; on an apply-mode daemon, `apply-now` is a way to skip the damping for a
-change you have already read. This is the two-part way to run it: the daemon
-watches and plans, a person applies, from the terminal or from `top`.
-
-The socket is `/var/lib/fpm-tune/control.sock` (`--control` on both `serve` and
-`apply-now` moves it), created mode 0600 and owned by the daemon's user, so
-`apply-now` needs root. Each call is one full round with the damping off, so
-do not script it in a loop: that is `--apply` with the safeguards removed.
-One daemon writes a pool directory: an apply-mode daemon holds the
-directory's lock for as long as it runs, so an `apply-now` sent to a second,
-watching daemon beside it is refused, and says so. Ask the daemon that holds
-the lock.
-
-## The self-repair is part of applying
-
-A daemon without `--apply` will not fix a host whose master this tool's own file
-is stopping from starting. The repair is part of acting, not part of watching.
-If you run it as an adviser, keep in mind that it will diagnose that situation in
-its metrics and logs but not resolve it. See [Recovering a host](recovering.md).
+1. **Reconcile**, in apply mode, when the host has not been reconciled since this daemon last wrote: finish or undo a change a previous run left in flight, before discovery, because a broken configuration stops the master from parsing and nothing is discoverable after that. This step also turns the status page on for pools that lack one.
+2. **Discover** the masters and their pools, re-reading the effective configuration, so a `pm.max_children` someone changed by hand is seen.
+3. **Warn** about pools with no status page. In advisory mode they are not sized; in apply mode the next reconcile turns the page on.
+4. **Scrape** each pool's status page and its workers' memory and CPU.
+5. **Learn**: fold the readings into the baselines.
+6. **Forget** pools that are no longer configured.
+7. **Budget and CPU**: read the master's memory limit and the host's CPU.
+8. **Plan**: divide the budget.
+9. **Record** the counters the next round compares against.
+10. **Publish**: metrics, the history ring, the log, and the recommendation file.
+11. **Apply**, in apply mode or for the one round an [`apply-now`](applying-once.md) asks for, when a change is worth a reload.
+12. **Save** the baselines, every 5 minutes, at once after a resize, and on shutdown.
 
 ## What it logs
 
-`serve` logs at info level, because a daemon's log is its output: it says when it
-resized a pool, when a host is no longer at capacity, when a recommendation
-changed. A daemon that logged only problems could not answer "what has this been
-doing", the first question anyone asks of a process that has been up for a
-month. Pass `--verbose` for the per-scrape detail.
-
-The line worth watching is the recommendation itself:
+The log is the daemon's output, at info level. Follow it with `sudo journalctl -u fpm-tune -f`. The line to watch is the recommendation:
 
 ```
-level=INFO msg="Pool recommendation" pool=www now=20 recommend=24 why="peak 18 workers busy; raised to 24, measured 52.0MiB/worker"
+time=2026-09-03T17:11:01.747Z level=INFO msg="Pool recommendation" pool=www now=20 recommend=20 why="peak 2 workers busy, but not yet watched under load; held at its configured 20, estimated 48.0MiB/worker"
 ```
 
-It is logged the first time a pool is seen and **when the recommended
-`pm.max_children` changes**, not every round, and not on the per-scrape wobble of
-the peak. So the log reads as a running account of what it would set and why, rather
-than a wall of identical lines. In `--apply` mode you see this when the plan
-concludes it, and the separate "resized" line when a change actually clears the
-[hysteresis thresholds](../how-it-decides/hysteresis.md) and reaches the master.
+It is logged the first time a pool is seen and whenever the recommended ceiling changes, in both modes. As a heartbeat it is repeated every 30 minutes even when nothing changed (`heartbeat` in the config, `--heartbeat` on `serve`, `0` disables it), so a quiet host still shows a sign of life and the `why` firming up.
 
-To keep the log from going silent on a quiet host, the same line is re-logged as a
-**heartbeat** every `--heartbeat` interval (default 30 minutes; `heartbeat` in the
-config, `0` to disable) even when nothing changed, a steady sign of life, and each
-one carries the current `why`, so you watch the measurement firm up over the first
-hours. For a continuous view rather than a pulse, scrape `/metrics`; for per-scrape
-detail, run with `--verbose`.
+The other lines, by their `msg`:
+
+- `Pool resized`, with `pool`, `from`, `to` and `reason`: a change reached the master. Apply mode only.
+- `Mode suggestion`, with `pool`, `mode`, `consider` and `why`: this pool might fit a different `pm` better. Logged once per pool, and again only if the suggestion changes; fpm-tune never changes `pm` itself. See [Process managers](../how-it-decides/process-managers.md).
+- `Forgot pools that are no longer configured`, with `pools`: their baselines were dropped.
+- `Capacity exhausted`, a warning, once when the host becomes [out of capacity](../how-it-decides/dividing-the-budget.md), and `No longer at capacity` when it stops being.
+- `Pools have no status page`, a warning, when the set of unsized pools changes.
+- `The recommendation changed`, with `path`: the recommendation file was rewritten.
+
+`--verbose` adds the per-scrape detail. Persistent conditions are logged on the transition, not every round; `/metrics` is the continuous view. See [Metrics and alerting](metrics-and-alerting.md).

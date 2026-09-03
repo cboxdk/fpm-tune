@@ -29,7 +29,7 @@ func (r Result) Render(w io.Writer) error {
 		fmt.Fprintf(&b, "  used by other services:  %s (left for them; cap php-fpm's cgroup for a hard limit)\n",
 			budget.HumanBytes(r.Budget.NeighborBytes))
 	}
-	fmt.Fprintf(&b, "  headroom kept:           %s (%s)\n",
+	fmt.Fprintf(&b, "  reserve kept:            %s (%s)\n",
 		budget.HumanBytes(r.Reserve-r.Budget.NeighborBytes), r.ReserveReason)
 	fmt.Fprintf(&b, "  available to workers:    %s\n\n",
 		budget.HumanBytes(r.Plan.TotalBytes-r.Reserve))
@@ -114,7 +114,7 @@ func (r Result) Render(w io.Writer) error {
 			return err
 		}
 
-		fmt.Fprintf(&b, "  Sizing uses neither of these directly — it follows the typical\n"+
+		fmt.Fprintf(&b, "  Sizing uses neither of these directly. It follows the typical\n"+
 			"  peak, which rises fast and falls on a half-life. The spread is here for\n"+
 			"  the decision you are making by hand: a pool whose p99 is far above its\n"+
 			"  median has a tail, and a tail is what fills a host at the wrong moment.\n")
@@ -166,7 +166,7 @@ func (r Result) Render(w io.Writer) error {
 	if allocatable := r.Plan.TotalBytes - r.Reserve; r.WorstCaseBytes > allocatable {
 		fmt.Fprintf(&b, "\nIf every pool filled its ceiling with the largest worker ever seen\n"+
 			"from it, this plan would need %s against %s. That is a rare\n"+
-			"combination and not what the sizing assumes — but if this host OOMs, it is\n"+
+			"combination and not what the sizing assumes, but if this host OOMs, it is\n"+
 			"the arithmetic to look at.\n",
 			budget.HumanBytes(r.WorstCaseBytes), budget.HumanBytes(allocatable))
 	}
@@ -185,7 +185,7 @@ func (r Result) Render(w io.Writer) error {
 	// plan is short because the budget ran out, and telling an operator to wait
 	// for the next run would have been advice to wait for nothing.
 	if r.Plan.CapacityExhausted {
-		fmt.Fprintf(&b, "\nCAPACITY EXHAUSTED — pools marked * want more workers and there is\n"+
+		fmt.Fprintf(&b, "\nCAPACITY EXHAUSTED: pools marked * want more workers and there is\n"+
 			"nowhere left to get them: %s free against the %s one more worker would\n"+
 			"cost the cheapest of them. No configuration change will help; this host\n"+
 			"needs more memory, or fewer sites.\n",
@@ -195,8 +195,8 @@ func (r Result) Render(w io.Writer) error {
 	// Advisory, and last, because it changes nothing: a mode fits a workload or
 	// it doesn't, and fpm-tune only ever sizes within the mode you chose.
 	if len(r.Advice) > 0 {
-		fmt.Fprintf(&b, "\nWorth a look — the mode these pools run may not fit their workload\n"+
-			"(fpm-tune won't change it; that's your call):\n")
+		fmt.Fprintf(&b, "\nMode suggestion: the mode these pools run may not fit their workload\n"+
+			"(fpm-tune will not change it; that is your call):\n")
 		for _, a := range r.Advice {
 			fmt.Fprintf(&b, "  %s (%s → %s): %s\n", a.Pool, a.From, a.To, a.Why)
 		}

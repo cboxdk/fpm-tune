@@ -1,80 +1,52 @@
 ---
 title: How it fails safe
 weight: 1
-description: The guarantees around every write, covering sandbox validation, atomic replacement, graceful reload, rollback, and crash recovery.
+description: The chain from plan to reloaded master, in order, and the path back from every step that can fail.
 ---
 
 # How it fails safe
 
-A change reaches a host through a sequence designed so that every failure has a
-path back. None of these is decoration; each exists because the obvious approach
-takes a host down, and each is tested against a real master.
+This page is the safety chain: what happens, in order, when fpm-tune writes a pool ceiling, and what it does when a step fails. Read it before running `apply` or `mode apply` on a host you care about.
 
-## Only `pm.*` keys, in one file
+## What it writes
 
-The tool writes one file, `zz-fpm-tune.conf`, into the directory your master
-already includes. It contains only `pm.*` settings; your pool configuration
-(`listen`, `user`, everything else) is not touched. PHP-FPM merges a section
-defined across several included files, so repeating each section header with just
-these keys overrides them and leaves the rest as you wrote it.
+Two files, both in the directory your master already includes (`/etc/php/8.4/fpm/pool.d` on Debian and Ubuntu):
 
-Deleting that file returns everything to what you configured. The next run writes
-a fresh one from what it can see; it does not put the old overrides back.
+- `zz-fpm-tune.conf` holds the sizes. For each pool it manages there is a section with `pm.max_children` and, for a dynamic pool, `pm.start_servers`, `pm.min_spare_servers` and `pm.max_spare_servers`. Nothing else.
+- `zz-fpm-tune-status.conf` turns on `pm.status_path` for pools that had none. `enable-status` writes it, and so does `apply`, for a pool it could not otherwise measure.
 
-## Validated against a sandbox first
+PHP-FPM merges a section defined across several files, so a section header with only these keys overrides them and leaves `listen`, `user` and the rest as you wrote them. The `zz-` prefix sorts last in the include glob, so these files win over anything already there. Both open with a marker line naming the tool; a file under either name without it is refused, never overwritten.
 
-Before anything reaches the live directory, the change is rendered and checked
-with `php-fpm -t` against a *copy* of the pool directory. A configuration php-fpm
-would reject never reaches the directory it globs, not even for the length of a
-fork. `--dry-run` stops there: it renders and validates and writes nothing.
+Delete `zz-fpm-tune.conf` and reload, and every pool is back at its own configured values. Delete `zz-fpm-tune-status.conf` and reload, and the status pages are off again. A daemon in apply mode writes the sizes back on its next round, so switch it to advisory or stop it first. [Lifecycle](../operating/lifecycle.md) has the commands.
 
-## One atomic write
+## The chain
 
-The change set is indivisible. A growth and the reduction that funds it reach the
-host together, in a single rename, or not at all. A file php-fpm might read
-mid-write is never on disk: a reader sees the old file or the new one, never half
-of either.
+**1. Refuse before writing.** Nothing is written when the master does not include the path the file would take (the change would validate, reload and do nothing), when a file under that name was not written by this tool, when no running master was found, or when `apply` could not read the memory limit. [The trust boundary](the-trust-boundary.md) lists what else is refused.
 
-## A reload, never a restart
+**2. Validate a copy.** The pool directory is copied to a temporary directory, the new file is placed in the copy, and `php-fpm -t` runs against a master configuration rewritten to include the copy. A configuration php-fpm rejects never reaches the directory it globs, not even for the length of a fork. `apply --dry-run` stops here.
 
-The master is reloaded with SIGUSR2, php-fpm's graceful reload: it re-reads the
-config and cycles workers without stopping the service, so an in-flight request is
-not killed and the pool is never fully down. A daemonized master comes back under a
-new pid (php-fpm's own default), which is followed rather than mistaken for a death.
+**3. Write once, atomically.** The previous file is saved under `/var/lib/fpm-tune/backup` with a transaction record beside it. The new file is then written under a temporary name and renamed into place, and the directory is fsynced. A reader sees the old file or the new one, never half of either, and because the file holds every pool the tool overrides, a growth and the reduction that pays for it land together or not at all.
 
-One honest caveat, and it is php-fpm's, not this tool's. On reload php-fpm recreates
-a pool's **listen socket**, so under concurrent load a request arriving in the
-sub-second window before the new socket is accepting can fail to connect and get a
-502. It is rare, and this tool keeps it rare on purpose: a resize only reloads when
-the change clears the [hysteresis](../how-it-decides/hysteresis.md) threshold, so a
-pool is not reloaded for every small drift. If even a resize-time blip is
-unacceptable, a TCP pool (`listen = 127.0.0.1:9000`) with `SO_REUSEPORT` hands the
-socket over without the recreate window, where a unix-socket pool cannot. Sizing is
-identical either way.
+**4. Validate in place.** `php-fpm -t` runs again against the real tree. If it fails, the previous file goes back, and the master has not been signalled.
 
-## Rolled back if the master does not survive
+**5. Record, then reload.** The transaction record is rewritten to say the master is about to be signalled, and made durable before the signal goes out; if that write fails, the previous file goes back and there is no reload. The master then gets SIGUSR2, php-fpm's graceful reload: it re-reads the configuration and cycles workers without stopping the service. A daemonized master comes back under a new pid, which fpm-tune follows through the pid file. It then watches the master for 2 s.
 
-Validation forks a separate process with no sockets to bind; a live master can
-still fail to initialise on a configuration that validated. If the master does
-not come back from the reload, the previous file is restored and the master
-reloaded onto it. If even the restore cannot be written (a full or read-only
-directory), you are told exactly which state the host is in, because the operator's
-next move depends on it: a rejected file that was never signalled is not yet
-dangerous, but a master that is *down* and cannot be put back needs a `systemctl
-start` now.
+**6. Roll back if the master does not come back.** The previous file is restored and the master is signalled once more so it reloads onto it. If the restore itself fails (a full or read-only directory), the error says which state the host is in, because the next move depends on it: a rejected file that was never signalled is armed for the next reload from any source, and a master that is down and cannot be put back needs `sudo systemctl start php8.4-fpm` now.
 
-## Recoverable across a crash
+**7. Close the record.** Once the master has survived the settle window, the transaction record is removed, then the saved copy. A crash between the two leaves a backup nothing reads, which the next start sweeps.
 
-What is about to be written is recorded first (path, phase, and a hash of the
-intended content), and the record is made durable before the master is signalled.
-An interrupted run is finished or undone on the next start. The rollback itself is
-rehearsed against a sandbox before it is performed, because a configuration can be
-broken by something that is not this tool, and reverting a change that would not
-have fixed it makes things worse. See [Recovering a host](../operating/recovering.md).
+## After a crash
 
-## One writer at a time
+A transaction record found at startup means a process died between steps 3 and 7: the OOM killer, a reboot, Ctrl-C during the reload. The next `apply`, and the first round of a daemon in apply mode, resolves it before writing anything. The record carries the phase (written or signalled), a hash of what was written, and where php-fpm lives, so recovery works with no master running and no state file.
 
-A lock on the pool directory (not just the state file) stops two processes
-writing the same file. It is keyed on the directory itself, at a fixed path, so a
-second run pointed at its own state file and backups is still refused. A crashed
-process cannot leave a stale lock: it is an `flock` the kernel drops on exit.
+If the file on disk does not match the hash and the master was never signalled, the rename never happened and there is nothing to undo. If it matches and php-fpm accepts it, the reload is finished; a master that already adopted it re-reads the same file. If php-fpm rejects it, the rollback is rehearsed in a sandbox first, because a configuration can be broken by something other than this file, and undoing a change that would not fix it only loses the change. A check that is interrupted leaves the record for the next start.
+
+With no record, the same start checks whether php-fpm accepts its configuration at all. If it does not, and removing `zz-fpm-tune.conf` makes it valid (rehearsed in a sandbox, then confirmed in place), the file is removed and the next round writes it again for the pools that remain. The usual cause is a site removed while its section was still in the file: a pool defined only there has no `listen` and no `user`, so php-fpm refuses to start. The repair is part of applying, so a daemon in advisory mode does not perform it. `fpm_tune_repairs_total` counts repairs, and [Recovering a host](../operating/recovering.md) covers the cases it cannot fix.
+
+## One writer per pool directory
+
+An `flock` under `/run/fpm-tune`, keyed on the pool directory at a fixed path, stops two processes writing the same file. A second run pointed at its own state file and backup directory is still refused, and a crashed process cannot leave a stale lock, because the kernel drops it on exit. The state file has its own lock beside it, held by a running daemon for its lifetime: a `plan` beside the daemon reports without recording, `apply` beside it is refused, and `apply-now` asks the daemon to act instead ([Applying once](../operating/applying-once.md)).
+
+## The reload and a 502
+
+On reload php-fpm recreates a pool's listen socket, so under concurrent load a request arriving in the sub-second window before the new socket is accepting can fail to connect and get a 502. That is php-fpm's behaviour, and it is rare because a resize only reloads when the change clears the [hysteresis](../how-it-decides/hysteresis.md) threshold. If even a resize-time blip is unacceptable, a TCP pool (`listen = 127.0.0.1:9000`) with `SO_REUSEPORT` hands the socket over without the recreate window, where a unix-socket pool cannot. Sizing is identical either way.

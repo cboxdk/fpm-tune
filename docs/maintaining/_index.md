@@ -1,13 +1,11 @@
 ---
 title: Maintaining
-weight: 50
-description: For maintainers, how a release is cut, signed, and published to the Homebrew tap.
+weight: 70
+description: For people working on fpm-tune itself, starting with how a release is made.
 ---
 
 # Maintaining
 
-For people working on fpm-tune itself rather than running it.
+This section is for people changing fpm-tune rather than running it. It covers the parts of the workflow that are not obvious from the repository alone.
 
-- **[Releasing](releasing.md)**: a release is one tag push: what the workflow
-  builds and signs, how the Homebrew tap is updated, and the one secret that step
-  needs.
+- **[Releasing](releasing.md)**: what a tag push triggers, what gets signed, how the Homebrew tap is updated, and the one secret involved.

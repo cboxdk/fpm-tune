@@ -1,74 +1,40 @@
 ---
 title: Advisory mode
-weight: 2
-description: Run it permanently as an adviser that writes its conclusion to a file you paste by hand, and never touches the host.
+weight: 4
+description: The recommendation file an advisory daemon writes, and how to act on it by hand.
 ---
 
 # Advisory mode
 
-Watching without acting is a first-class way to run this tool, not just a step on
-the way to `--apply`. A daemon without `--apply` changes nothing on its own. The one exception is
-an `apply-now` you send it, which applies the plan it showed once and leaves
-it advisory.
-But until now it could not leave its conclusion anywhere you could act on: the
-numbers were in a log line and on a metrics endpoint, and neither is something
-you can put into a pool file.
+This page is for the person who wants fpm-tune's numbers without letting it write them. In advisory mode the daemon watches, learns, publishes metrics and writes its conclusion to a file. It changes nothing.
 
-`--recommend` gives it somewhere to write.
+## The recommendation file
 
-```bash
-fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf
-```
-
-## What it writes
-
-PHP-FPM configuration you can read, diff, and paste, with the evidence for each
-number in the comments:
+The installed service starts in advisory mode and writes `/var/lib/fpm-tune/recommended.conf` (`recommend` in the config; `--recommend` on a hand-run `serve`). Nothing reads it. It is PHP-FPM configuration to read, diff and paste, with the evidence in the comments:
 
 ```ini
-; shop: peak 34 workers busy; raised to 42, measured 96.0MiB/worker
-;   measured per worker: median 88.0MiB, p95 137.0MiB, p99 194.0MiB, worst 512.0MiB (4096 readings)
-;   cpu per request: median 70%, p90 90% (1204 readings); 700m per busy worker; cpu-bound; ~6 busy workers fill 4 core(s); plan allows 42 (now 34); limit: cpu
-
-[shop]
-pm.max_children = 42
+; PHP-FPM pool settings recommended by fpm-tune.
+;
+; NOTHING READS THIS FILE. It is written by a daemon running without
+; --apply, which means it has changed nothing and will change nothing.
+; Copy what you want into the directory your master includes.
+;
+; As of 2026-09-03T14:18:33Z
+;
+; www-forge: cpu-bound; 10 busy workers fill the CPU, so held there rather than the 41 memory allows, measured 35.2MiB/worker + 37.6KiB children
+;   measured per worker: median 26.9MiB, p95 32.0MiB, p99 38.1MiB, worst 38.1MiB (2992 readings)
 ```
 
-The spread is there because one number cannot answer the question you are
-actually asking. Sizing follows the typical peak (it rises fast and falls on a
-half-life, which is what makes it safe to divide a budget by), but a pool whose
-p99 is twice its median has a tail, and a tail is what fills a host at the wrong
-moment. A pool that sits flat wants a different decision from one that spikes, and
-only the distribution tells them apart.
+The pool sections follow, in the same form as `zz-fpm-tune.conf`. A pool not yet measured is marked `NOT YET MEASURED`: its number is a profile's guess. The numbers are undamped: the [hysteresis](../how-it-decides/hysteresis.md) exists because every change the daemon makes costs a reload, and deciding by hand you do not need it.
 
-A pool that has not been measured yet is labelled plainly (the number is a
-profile's guess, not the pool's own memory), so you know which figures to wait on.
+The file is rewritten only when the `pm.*` settings change, not when the commentary moves, so its modification time says when the advice last moved. Each rewrite logs `The recommendation changed`.
 
-## Three things it does that a naive version would not
-
-- **It refuses a path php-fpm would load.** What it writes carries this tool's
-  own marker, so a recommendation left inside a directory your master includes is
-  a file php-fpm loads and the tool believes it wrote, configuring a host from a
-  run that was explicitly not applying anything. A path inside an included
-  directory is refused, with an actionable message.
-- **It is rewritten only when the settings change**, not when the file would
-  differ. The commentary moves every round (the reading count climbs, a
-  percentile shifts by a bucket), and none of that is a change in the advice. So
-  the file's modification time answers "when did this last move", which is the
-  question a sidecar exists to answer, rather than "is the daemon up", which the
-  metrics answer better.
-- **It carries the evidence.** Someone reading it is deciding by hand, and a bare
-  `pm.max_children` tells them nothing about whether to trust it.
+A path inside a directory the master includes is refused. The file carries this tool's own marker, so php-fpm would load it and fpm-tune would take it for its own work. With `--drop-in-dir` it is refused at startup; otherwise every round, logged once.
 
 ## The workflow
 
-Run it with `--recommend` and no `--apply` for a day or two, through a real
-traffic pattern. Diff the file against what you have. When you agree with what it
-recommends (and the numbers have stopped being profile guesses), paste the
-changes yourself, or run `sudo fpm-tune apply-now` (or press `a` in
-`fpm-tune top`), which applies that plan once over the daemon's control socket
-and leaves it advisory, or add `--apply` and let it do the writing from then on.
+Run advisory for a day or two, until the pools you care about are measured. Then act on the file one of three ways:
 
-The same percentiles are on `/metrics` as `estimate="p50"`, `"p95"` and `"p99"`,
-and the CPU share as `fpm_tune_pool_cpu_ratio` with `estimate="p50"` and
-`"p90"`, if you would rather graph them than read a file.
+1. Paste the sections you agree with into the directory your master includes and reload: `sudo systemctl reload php8.4-fpm`.
+2. Run `sudo fpm-tune apply-now`, or press `a` in `fpm-tune top`: the plan is applied once and the daemon stays advisory. See [Applying once](applying-once.md).
+3. Switch with `sudo fpm-tune mode apply`, and the daemon writes from then on.

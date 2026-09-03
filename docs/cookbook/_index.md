@@ -1,12 +1,12 @@
 ---
 title: Cookbook
-weight: 15
-description: Task-oriented recipes for running fpm-tune in the places PHP actually lives.
+weight: 60
+description: Step-by-step recipes for the hosts PHP-FPM is usually found on.
 ---
 
 # Cookbook
 
-Short, practical recipes, the "I just want to get this working here" version.
+Each recipe walks one kind of host from install to a daemon in apply mode, with the commands and what they print. Read the one that matches your host.
 
-- **[Forge & Ploi](forge-and-ploi.md)**: a per-site-pool box with MySQL sharing the
-  RAM is exactly what fpm-tune is for. Here's the whole flow, start to finish.
+- **[Forge and Ploi](forge-and-ploi.md)**: a pool per site, MySQL on the same host, no cgroup limit on php-fpm.
+- **[Two PHP versions](two-php-versions.md)**: two masters on one host, one daemon each, and how to split the budget.

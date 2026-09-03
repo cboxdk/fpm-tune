@@ -1,164 +1,116 @@
 ---
 title: Spawned children
-weight: 3
-description: The memory a worker's own RSS misses (the ffmpeg it shelled out to) and how measuring it, the cgroup, and a workload declaration keep a media pool off the OOM killer.
+weight: 4
+description: The memory a worker's own RSS misses, the ffmpeg it shelled out to, and how it is measured and declared.
 ---
 
 # Spawned children
 
-A PHP-FPM worker is not always the whole cost of a request. A worker that runs
-`exec('ffmpeg …')`, resizes an image, or renders a PDF starts a **separate
-process**, a separate pid, with its own resident memory that the worker's own
-RSS does not include and the status page knows nothing about.
-
-For a tool that divides a memory budget, that gap is where an OOM comes from. The
-budget it sizes against (a cgroup limit, or the machine) is charged for
-**everything**, children included. Sizing each worker at only its own RSS prices
-the pool as if the ffmpeg were free, hands out a `pm.max_children` that fits on
-paper, and blows the limit the moment the workers start transcoding.
-
-So the children are measured, and (because measuring them has a blind spot)
-declared as well.
+A worker that runs `exec('ffmpeg …')`, resizes an image or renders a PDF starts
+a separate process with its own memory, which the worker's RSS does not include
+and the status page knows nothing about. The budget is charged for it all the
+same. This page is how that memory is measured, why it is also declared, and
+what it does to the plan.
 
 ## Two numbers per worker
 
-Every scrape reads each worker's memory twice:
+Every scrape reads each worker twice: its own RSS, and its subtree RSS, the
+worker plus every process descended from it. The difference is what the
+children cost. A plain web worker has none; a worker mid-transcode has a
+600 MiB one. The subtree comes from one snapshot of the process table per
+round, so a host with forty pools pays for the walk once.
 
-- its **own RSS**, the worker process alone; and
-- its **subtree RSS**, the worker plus every process descended from it.
+A snapshot misses what lives and dies between two scrapes. A scrape lands every
+30 seconds and an ffmpeg may live for two, so short children are under-counted,
+and they are the memory that spikes.
 
-The gap between them is what the children cost. A plain web worker has none: its
-subtree equals its own RSS. A worker mid-transcode has a 600&nbsp;MiB one.
+## The cgroup high-water mark
 
-The subtree is read from a single snapshot of the process table taken once per
-round, so every pool is measured against the same instant and a host with forty
-pools pays for the walk once, not forty times.
+Where the master runs under a cgroup, the kernel keeps a high-water mark of
+everything the cgroup has used, children included, continuously rather than
+sampled. fpm-tune reads `memory.peak` (kernel 5.19), `memory.max_usage_in_bytes`
+on cgroup v1, or the largest `memory.current` it has seen, and reports it in
+the recommendation file and on `/metrics`:
 
-### What a snapshot cannot catch
+```
+; cgroup used 209.9MiB now, 460.2MiB at its peak (workers AND everything they spawned, the number the OOM killer enforces against)
+```
 
-A scrape lands every thirty seconds; an ffmpeg lives for two. Most of the time a
-transcode starts and finishes entirely between two scrapes, and the subtree walk
-never sees it. Point-in-time sampling systematically under-counts short-lived
-children, which is exactly the memory that causes the spike.
-
-That is what the cgroup is for.
-
-## The cgroup is the ground truth
-
-Where the master runs under a cgroup (a container, or a systemd service on a VM),
-the kernel maintains a **high-water mark** of the memory that cgroup has used:
-every process in it, children included, continuously, not sampled. It is the
-number the OOM killer actually enforces against, and it catches the two-second
-ffmpeg the scrape missed.
-
-`fpm-tune` reads it (`memory.peak` on a modern kernel, `memory.max_usage_in_bytes`
-on cgroup v1, the largest `memory.current` seen otherwise) and treats it as the
-truth about what the pool really reached. On a **bare VM or dedicated server with
-no cgroup**, there is nothing to read, and there the per-worker subtree
-measurement stands on its own, which is why both exist.
+It is the number the OOM killer enforces against, and the one that catches the
+child a sample missed. Sizing does not use it; compare it with the budget when
+a plan looks optimistic. On a host without a cgroup the subtree measurement
+stands alone.
 
 ## Declaring the workload
 
-Measurement solves the steady state. It does nothing for the **first run**: a
-freshly started media pool has no baseline, has been seen spawning nothing yet,
-and would be sized as if it never will, right up until the first transcode
-arrives and the host with it.
-
-So a pool can say what it is, up front:
+Measurement covers the steady state. It does nothing for the first run: a
+freshly started media pool has spawned nothing yet and would be sized as if it
+never will, until the first transcode. So a pool can say what it is in its own
+configuration:
 
 ```ini
-; in the pool's own php-fpm config
 env[FPM_TUNE_WORKLOAD] = subprocess-heavy
 ```
 
-or globally, for a host where most pools are alike:
+or the host can set a default for pools that declare nothing:
 
 ```bash
-fpm-tune serve --apply --workload subprocess-heavy
+fpm-tune plan --workload subprocess-heavy
 ```
 
-The classes are:
+| Class | Aliases | Assumption | Reserved per worker before measurement |
+|---|---|---|---|
+| `web` | `api`, `simple` | workers spawn nothing (the default) | none |
+| `bursty` | | a 256 MiB child on a quarter of the workers at once | 64 MiB |
+| `subprocess-heavy` | `subprocess`, `media`, `children` | a 512 MiB child on every worker | 512 MiB |
 
-| Workload | What it means | Reserved for children |
-|---|---|---|
-| `web` | Workers serve requests in PHP and spawn nothing. The default. | none |
-| `bursty` | A child now and then (an occasional PDF or image resize). | a little |
-| `subprocess-heavy` | A child on most requests (transcoding, image processing). | a lot |
-
-The per-pool marker wins over the global default, so a mostly-web host with one
-transcode pool sets `--workload web` (or nothing) and annotates the one pool.
-`media` and `children` are accepted as aliases for `subprocess-heavy`.
-
-The declaration is only a **floor**. It keeps the pool safe before it has been
-measured; once real children have been observed, the measurement takes over. And
-a pool wrongly marked `web` that is caught spawning something is reserved for
-anyway, because being wrong about "web" the unsafe way is an OOM.
+Names are case-insensitive, and the pool's marker wins over the host default. A
+marker that matches none of these falls back to the host default and the plan
+warns, naming the pool and the value. The declaration is a floor: once children
+have been measured at more than it, the measurement takes over, and a pool
+marked `web` that is caught spawning is reserved for anyway.
 
 ## How it changes the plan
 
-The child memory is folded into **each worker's cost**, not held back as a
-separate pool of memory. A worker that also runs a 150&nbsp;MiB child costs
-150&nbsp;MiB more, and the allocator sizes `pm.max_children` by dividing the
-budget by that per-worker cost, exactly as it already does for a worker's own
-memory.
+The child memory is folded into each worker's cost, and the allocator divides
+the budget by that cost as it does for a worker's own memory. A
+`subprocess-heavy` pool gets fewer workers; it never makes the plan fail, and
+the allocator's guarantee of never committing more than the budget covers the
+children too.
 
-That per-worker figure is deliberately **amortised**: it is the high-water of a
-scrape's total child memory divided by the pool's worker count, specifically the
-larger of the workers alive in that scrape and the pool's concurrency peak, so a
-scrape that happens to catch a quiet ondemand pool with only its two busy workers
-alive does not record a whole worker's child as the per-worker cost. A pool where
-two of eight workers were each running a 600&nbsp;MiB ffmpeg records
-150&nbsp;MiB per worker, not 600. So multiplying it back by the worker count
-reserves the 1.2&nbsp;GiB that was really there, not the 4.8&nbsp;GiB that never
-was. For a `subprocess-heavy` pool, where every worker has a child, the amortised
-figure is the full child size. The larger of the workload's guess and this
-measurement wins.
-
-Making it a per-worker cost rather than a host-wide reserve is what makes it
-safe. The allocator already guarantees it never commits more than the budget, so
-folding children into the per-worker cost means that guarantee now covers
-children too, whatever the allocator does with the budget. A `subprocess-heavy`
-pool simply gets **fewer workers**; it never causes the plan to fail. (An earlier
-design held the child memory back as a single host-wide reserve; a review found
-that one over-declared pool could then zero the budget for every pool on the
-host, and that redistribution could hand a pool more workers than its reserve
-covered. The per-worker model has neither problem.)
+The measured figure is amortised. It is the high-water mark of a scrape's total
+child memory divided by the pool's worker count, taking the larger of the
+workers in that scrape and the pool's peak concurrency. A pool where two of
+eight workers were each running a 600 MiB ffmpeg records 150 MiB per worker,
+so multiplied back by eight it reserves the 1.2 GiB that was there, and a
+scrape that catches a two-worker ondemand pool mid-transcode does not record a
+whole child as the per-worker cost. The figure only climbs, until the baseline
+is reset.
 
 ## What you will see
 
-In `--recommend` output, a pool that spawns children carries the split:
+The plan's WHY column shows the child part as its own term:
 
-```ini
-; reserved for spawned children: 1.8GiB (folded into each worker's cost, sized to the workers planned)
-;
-; transcode: measured 90MiB
-;   measured per worker: median 60.0MiB, p95 90.0MiB, p99 95.0MiB, worst 95.0MiB (240 readings)
-;   plus ~150.0MiB of children per worker (folded into the sizing; worst single worker+children seen 690.0MiB)
+```
+www-forge  dynamic  10   41    1.7GiB    peak 33 workers busy; raised to 41, measured 41.9MiB/worker + 37.6KiB children
 ```
 
-On `/metrics`:
+The recommendation file carries the total, and the worst single
+worker-plus-children seen:
 
-- `fpm_tune_pool_subtree_rss_bytes{pool}`: the worst single worker's whole footprint
-- `fpm_tune_pool_child_rss_bytes{pool}`: the child memory folded into each worker's cost
-- `fpm_tune_cgroup_memory_bytes{state="current|peak"}`: the cgroup's own usage, for cross-checking
-- `fpm_tune_budget_bytes{state="reserved_children"}`: what the plan committed to children in total
+```
+; reserved for spawned children: 376.5KiB (folded into each worker's cost, sized to the workers planned)
+;   plus ~37.6KiB of children per worker (folded into the sizing; worst single worker+children seen 168.7MiB)
+```
 
-A pool whose `child_rss_bytes` climbs while its `worker_rss_bytes` sits flat is a
-pool doing more subprocess work than its workers show, and the one to give a
-workload declaration if it does not have one.
+On `/metrics`: `fpm_tune_pool_subtree_rss_bytes{pool}` is the worst single
+worker's whole footprint, `fpm_tune_pool_child_rss_bytes{pool}` the child
+memory folded into each worker, `fpm_tune_cgroup_memory_bytes{state="current"|"peak"}`
+the cgroup's own usage, and `fpm_tune_budget_bytes{state="reserved_children"}`
+what the plan committed to children in total. A pool whose child bytes climb
+while its worker bytes sit flat is the one to give a declaration.
 
-## What it does not catch
-
-The subtree walk is a point-in-time sample. A child that lived and died between
-two scrapes is missed, and a child whose worker was recycled (at
-`pm.max_requests`) has reparented away from any worker by the time the next
-scrape lands. Where the master runs under a cgroup, the cgroup's own high-water
-(reported above) catches those, and is worth watching against the budget. On a
-host with no cgroup, and no workload declaration, subtree measurement is
-best-effort: declare the workload on a pool you know shells out, and its floor
-holds regardless of what the sampling happens to catch.
-
-The CPU those children burn is measured on the other axis. php-fpm's
-per-request CPU share counts every child the request waited for, so a
-transcode shows up as a share above 100% in the
-[CPU per request](cpu.md) table even when the subtree walk missed its memory.
+The CPU those children burn is counted on the other axis: php-fpm's per-request
+CPU share includes every child the request waited for, so a transcode shows as
+a share above 100% in the [CPU table](cpu.md) even when the memory sample
+missed it.

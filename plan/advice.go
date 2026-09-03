@@ -76,7 +76,7 @@ func adviseMode(in adviceInput) (ModeAdvice, bool) {
 			From: "static",
 			To:   "dynamic",
 			Why: fmt.Sprintf(
-				"static keeps all %d workers resident; the busiest moment used %d, so ~%d sit idle — about %s you could hand back between requests. Keep static only if you want them always warm for latency.",
+				"static keeps all %d workers resident; the busiest moment used %d, so ~%d sit idle, about %s you could hand back between requests. Keep static only if you want them always warm for latency.",
 				in.Current, in.Peak, idle, budget.HumanBytes(reclaim)),
 		}, true
 
