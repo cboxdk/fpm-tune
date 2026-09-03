@@ -29,6 +29,35 @@
   },
   "components": [
     {
+      "bom-ref": "pkg:golang/github.com/NimbleMarkets/ntcharts@v0.5.1?type=module",
+      "type": "library",
+      "name": "github.com/NimbleMarkets/ntcharts",
+      "version": "v0.5.1",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1d6b5e92e6c45df112c22db8a721729f01a8d87ba56dbf5f3e1ec834c51cd5d8"
+        }
+      ],
+      "purl": "pkg:golang/github.com/NimbleMarkets/ntcharts@v0.5.1?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/NimbleMarkets/ntcharts",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
       "bom-ref": "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
       "type": "library",
       "name": "github.com/aymanbagabas/go-osc52/v2",
@@ -160,6 +189,35 @@
       "externalReferences": [
         {
           "url": "https://github.com/cespare/xxhash",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/bubbles@v0.20.0?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/bubbles",
+      "version": "v0.20.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8d266eeaa0fc71143a93d38c7d1d5694cfabb8cf1f90f5a41ef4160fd2c8bad1"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/bubbles@v0.20.0?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/bubbles",
           "type": "vcs"
         }
       ],
@@ -392,6 +450,35 @@
       "externalReferences": [
         {
           "url": "https://github.com/go-ole/go-ole",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/lrstanley/bubblezone@devel?type=module",
+      "type": "library",
+      "name": "github.com/lrstanley/bubblezone",
+      "version": "devel",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "38bc19f3155a795aebbb4c727ae397f9f9ded204131441a5cdf3638a909bc655"
+        }
+      ],
+      "purl": "pkg:golang/github.com/lrstanley/bubblezone@devel?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/lrstanley/bubblezone",
           "type": "vcs"
         }
       ],
@@ -1088,11 +1175,35 @@
     {
       "ref": "pkg:golang/github.com/cboxdk/fpm-tune@devel?type=module",
       "dependsOn": [
+        "pkg:golang/github.com/NimbleMarkets/ntcharts@v0.5.1?type=module",
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/cboxdk/phpfpm@v1.2.0?type=module",
         "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
         "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
         "pkg:golang/github.com/prometheus/client_golang@v1.24.1?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/NimbleMarkets/ntcharts@v0.5.1?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+        "pkg:golang/github.com/charmbracelet/bubbles@v0.20.0?type=module",
+        "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+        "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+        "pkg:golang/github.com/lrstanley/bubblezone@devel?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+        "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/muesli/ansi@devel?type=module",
+        "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+        "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
+        "pkg:golang/golang.org/x/text@v0.40.0?type=module"
       ]
     },
     {
@@ -1121,6 +1232,27 @@
     },
     {
       "ref": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module"
+    },
+    {
+      "ref": "pkg:golang/github.com/charmbracelet/bubbles@v0.20.0?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+        "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+        "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+        "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/muesli/ansi@devel?type=module",
+        "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+        "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
+        "pkg:golang/golang.org/x/text@v0.40.0?type=module"
+      ]
     },
     {
       "ref": "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
@@ -1211,6 +1343,27 @@
       "ref": "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
       "dependsOn": [
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/lrstanley/bubblezone@devel?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+        "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+        "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+        "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/muesli/ansi@devel?type=module",
+        "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+        "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
+        "pkg:golang/golang.org/x/text@v0.40.0?type=module"
       ]
     },
     {

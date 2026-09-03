@@ -74,7 +74,7 @@ func TestTheViewShowsThePoolsAndTheEvents(t *testing.T) {
 		m = next.(model)
 		out := m.View()
 		for _, want := range []string{"cbox-web", "apply", "cpu ceiling on", "www-forge", "www", "22 → 10", "apply failed",
-			"8.0GiB memory", "4 core(s)", "held", "85%", "5/10", "last "} {
+			"8.0GiB memory", "4 core(s)", "held", "85%", "5/10", "span"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("width %d: view lacks %q:\n%s", width, want, out)
 			}
@@ -110,12 +110,14 @@ func TestKeysMoveTheCursorAndTheWindow(t *testing.T) {
 		t.Errorf("selected = %d, want 0", m.selected)
 	}
 	press("1")
-	if m.window != 60 || len(m.rounds()) != 40 {
-		t.Errorf("window = %d rounds shown %d", m.window, len(m.rounds()))
+	from, to, rounds := m.window()
+	if m.span != 0 || to.Sub(from) != time.Hour || len(rounds) != 40 {
+		t.Errorf("after 1: span %d, axis %s, %d rounds (the axis is the hour even with 20 minutes of data)", m.span, to.Sub(from), len(rounds))
 	}
 	press("3")
-	if m.window != 0 {
-		t.Errorf("window = %d after 3, want 0 (all)", m.window)
+	from, to, rounds = m.window()
+	if m.span != 2 || len(rounds) != 40 || to.Sub(from) < 19*time.Minute {
+		t.Errorf("after 3: span %d, axis %s, %d rounds", m.span, to.Sub(from), len(rounds))
 	}
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {

@@ -12,13 +12,13 @@ package top
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/NimbleMarkets/ntcharts/linechart/timeserieslinechart"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -41,17 +41,10 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Refresh <= 0 {
 		opts.Refresh = 5 * time.Second
 	}
-	m := newModel(opts)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
-	final, err := p.Run()
-	if err != nil {
-		return err
-	}
-	if fm, ok := final.(model); ok && fm.fatal != nil {
-		return fm.fatal
-	}
+	p := tea.NewProgram(newModel(opts), tea.WithAltScreen(), tea.WithContext(ctx))
+	_, err := p.Run()
 
-	return nil
+	return err
 }
 
 // The palette. Adaptive, so it reads on a light terminal as well as a dark
@@ -64,7 +57,9 @@ var (
 	cDim    = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#9CA3AF"}
 	cFaint  = lipgloss.AdaptiveColor{Light: "#D1D5DB", Dark: "#374151"}
 	cText   = lipgloss.AdaptiveColor{Light: "#111827", Dark: "#F3F4F6"}
-	cSpark  = lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"}
+	cBusy   = lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"}
+	cPlan   = lipgloss.AdaptiveColor{Light: "#7C3AED", Dark: "#C4B5FD"}
+	cNow    = lipgloss.AdaptiveColor{Light: "#9CA3AF", Dark: "#6B7280"}
 
 	sTitle  = lipgloss.NewStyle().Bold(true).Foreground(cText)
 	sAccent = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
@@ -73,13 +68,16 @@ var (
 	sOK     = lipgloss.NewStyle().Foreground(cOK)
 	sWarn   = lipgloss.NewStyle().Foreground(cWarn)
 	sBad    = lipgloss.NewStyle().Foreground(cBad).Bold(true)
-	sSpark  = lipgloss.NewStyle().Foreground(cSpark)
+	sBusy   = lipgloss.NewStyle().Foreground(cBusy)
+	sPlan   = lipgloss.NewStyle().Foreground(cPlan)
+	sNow    = lipgloss.NewStyle().Foreground(cNow)
 	sBadge  = lipgloss.NewStyle().Padding(0, 1).Bold(true)
 	sPanel  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cFaint).Padding(0, 1)
 	sHeader = lipgloss.NewStyle().Foreground(cDim).Bold(true)
-	sRow    = lipgloss.NewStyle()
 	sRowSel = lipgloss.NewStyle().Background(lipgloss.AdaptiveColor{Light: "#EDE9FE", Dark: "#3B2A6B"}).Bold(true)
 	sKey    = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+	sAxis   = lipgloss.NewStyle().Foreground(cFaint)
+	sLabel  = lipgloss.NewStyle().Foreground(cDim)
 )
 
 type tickMsg time.Time
@@ -90,6 +88,15 @@ type fetchedMsg struct {
 	at   time.Time
 }
 
+// span is how much time the charts cover. Zero is everything the daemon
+// holds.
+type span struct {
+	name string
+	d    time.Duration
+}
+
+var spans = []span{{"1h", time.Hour}, {"6h", 6 * time.Hour}, {"all", 0}}
+
 // model is the whole view: what was last fetched, the terminal, and the
 // operator's cursor.
 type model struct {
@@ -99,15 +106,11 @@ type model struct {
 	resp    *serve.HistoryResponse
 	err     error
 	fetched time.Time
-	fatal   error
 
 	width, height int
 	selected      int
 	pools         []string // pool names in display order, from the newest round
-
-	// window is how many rounds the charts span: 1 for the whole ring, or a
-	// number of rounds. Cycled with the number keys.
-	window int
+	span          int      // index into spans
 }
 
 func newModel(opts Options) model {
@@ -191,12 +194,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selected+1 < len(m.pools) {
 				m.selected++
 			}
+		case "tab":
+			if len(m.pools) > 0 {
+				m.selected = (m.selected + 1) % len(m.pools)
+			}
 		case "1":
-			m.window = 60
+			m.span = 0
 		case "2":
-			m.window = 360
+			m.span = 1
 		case "3":
-			m.window = 0
+			m.span = 2
 		}
 	}
 
@@ -218,6 +225,34 @@ func poolNames(resp *serve.HistoryResponse) []string {
 	return names
 }
 
+// window is the time range the charts show: the chosen span back from the
+// newest round, or everything when the span is "all". The axis is the span
+// even when the data is shorter, so pressing 1, 2 or 3 visibly changes the
+// chart, and a daemon started four minutes ago draws four minutes at the
+// right of an hour.
+func (m model) window() (from, to time.Time, rounds []serve.HistorySample) {
+	all := m.resp.Rounds
+	if len(all) == 0 {
+		now := time.Now()
+
+		return now.Add(-time.Hour), now, nil
+	}
+	to = all[len(all)-1].At
+	d := spans[m.span].d
+	if d == 0 {
+		from = all[0].At
+		if to.Sub(from) < 2*time.Minute {
+			from = to.Add(-2 * time.Minute)
+		}
+
+		return from, to, all
+	}
+	from = to.Add(-d)
+	i := sort.Search(len(all), func(i int) bool { return !all[i].At.Before(from) })
+
+	return from, to, all[i:]
+}
+
 // View lays the panels out: a title bar, the host, the pools, the selected
 // pool's charts, the events, and the keys.
 func (m model) View() string {
@@ -235,25 +270,35 @@ func (m model) View() string {
 	// that less the padding. Every panel is given the text width, so nothing
 	// it draws can wrap.
 	inner := m.width - 4
-	if inner < 40 {
-		inner = 40
+	if inner < 60 {
+		inner = 60
 	}
 	content := inner - 2
 
+	// Chart heights by what the terminal has: the pools and the events keep
+	// their rows, the two charts share what is left.
+	hostH, poolH := 5, 8
+	if m.height < 36 {
+		hostH, poolH = 4, 6
+	}
+	if m.height >= 50 {
+		hostH, poolH = 7, 12
+	}
+
 	parts := []string{
-		m.titleBar(),
-		sPanel.Width(inner).Render(m.hostPanel(content)),
+		m.titleBar(content + 4),
+		sPanel.Width(inner).Render(m.hostPanel(content, hostH)),
 		sPanel.Width(inner).Render(m.poolsPanel(content)),
 	}
 	if len(m.pools) > 0 {
-		parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(content)))
+		parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(content, poolH)))
 	}
 	parts = append(parts, sPanel.Width(inner).Render(m.eventsPanel(content)), m.keys())
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-func (m model) titleBar() string {
+func (m model) titleBar(width int) string {
 	h := m.resp.Host
 	mode := sBadge.Background(cOK).Foreground(lipgloss.Color("#062E1F")).Render("advisory")
 	if h.Apply {
@@ -262,14 +307,6 @@ func (m model) titleBar() string {
 	cpu := sDim.Render("cpu ceiling off")
 	if h.CPUCeiling {
 		cpu = sAccent.Render("cpu ceiling on")
-	}
-	stamp := "never"
-	if !m.fetched.IsZero() {
-		stamp = m.fetched.Format("15:04:05")
-	}
-	status := sDim.Render(fmt.Sprintf("updated %s · every %s", stamp, m.opts.Refresh))
-	if m.err != nil {
-		status = sBad.Render("stale: " + m.err.Error())
 	}
 	name := h.Hostname
 	if name == "" {
@@ -280,68 +317,118 @@ func (m model) titleBar() string {
 		left += "  " + sDim.Render("v"+h.Version)
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", status)
-}
-
-// rounds is the slice of rounds the charts span.
-func (m model) rounds() []serve.HistorySample {
-	r := m.resp.Rounds
-	if m.window > 0 && m.window < len(r) {
-		r = r[len(r)-m.window:]
+	stamp := "never"
+	if !m.fetched.IsZero() {
+		stamp = m.fetched.Format("15:04:05")
+	}
+	right := sDim.Render(fmt.Sprintf("span %s · %s of data · updated %s · every %s",
+		sKey.Render(spans[m.span].name), m.dataExtent(), stamp, m.opts.Refresh))
+	if m.err != nil {
+		right = sBad.Render("stale: " + m.err.Error())
+	}
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 2 {
+		gap = 2
 	}
 
-	return r
+	return left + strings.Repeat(" ", gap) + right
 }
 
-func (m model) hostPanel(width int) string {
+// dataExtent is how much history the daemon holds, as a word.
+func (m model) dataExtent() string {
+	r := m.resp.Rounds
+	if len(r) < 2 {
+		return "1 round"
+	}
+
+	return humanDuration(r[len(r)-1].At.Sub(r[0].At))
+}
+
+func humanDuration(d time.Duration) string {
+	switch {
+	case d < 2*time.Minute:
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	case d < 2*time.Hour:
+		return fmt.Sprintf("%.0fm", d.Minutes())
+	default:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	}
+}
+
+// chart is a time-series line chart with the view's axes and the chosen
+// window, braille-drawn. One per panel per frame; they are cheap.
+func (m model) chart(width, height int, yMax float64, yLabel func(float64) string) timeserieslinechart.Model {
+	from, to, _ := m.window()
+	c := timeserieslinechart.New(width, height,
+		timeserieslinechart.WithAxesStyles(sAxis, sLabel),
+		// Local time on the axis, like the event list; the daemon stamps
+		// rounds in UTC.
+		timeserieslinechart.WithXLabelFormatter(func(_ int, v float64) string {
+			return time.Unix(int64(v), 0).Local().Format("15:04")
+		}),
+		timeserieslinechart.WithYLabelFormatter(func(_ int, v float64) string { return yLabel(v) }),
+		timeserieslinechart.WithXYSteps(xSteps(width), 3),
+		timeserieslinechart.WithYRange(0, yMax),
+		timeserieslinechart.WithTimeRange(from, to),
+	)
+	c.SetViewTimeAndYRange(from, to, 0, yMax)
+
+	return c
+}
+
+func xSteps(width int) int {
+	switch {
+	case width < 50:
+		return 3
+	case width < 100:
+		return 5
+	default:
+		return 8
+	}
+}
+
+func (m model) hostPanel(width, height int) string {
 	h := m.resp.Host
-	rounds := m.rounds()
-	busy := make([]float64, 0, len(rounds))
+	_, _, rounds := m.window()
+
+	var now string
+	nowStyle := sDim
+	if len(rounds) > 0 && rounds[len(rounds)-1].HostBusyKnown {
+		v := rounds[len(rounds)-1].HostBusyRatio
+		now = fmt.Sprintf("%.0f%%", v*100)
+		switch {
+		case v >= 0.9:
+			nowStyle = sBad
+		case v >= 0.7:
+			nowStyle = sWarn
+		default:
+			nowStyle = sOK
+		}
+	} else {
+		now = "-"
+	}
+	head := sHeader.Render("HOST  ") +
+		fmt.Sprintf("%s memory · %s", budget.HumanBytes(h.MemoryBytes), budget.HumanMillicores(h.CPUMillicores)) +
+		sDim.Render("  ("+h.Source+")") +
+		"      " + sHeader.Render("CPU busy ") + nowStyle.Render(now)
+
+	c := m.chart(width, height, 1, func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) })
+	c.SetDataSetStyle("busy", sBusy)
 	for _, r := range rounds {
 		if r.HostBusyKnown {
-			busy = append(busy, r.HostBusyRatio)
-		} else {
-			busy = append(busy, -1)
+			c.PushDataSet("busy", timeserieslinechart.TimePoint{Time: r.At, Value: r.HostBusyRatio})
 		}
 	}
-	span := spanLabel(rounds, m.resp.IntervalSeconds)
-	var now string
-	if len(busy) > 0 && busy[len(busy)-1] >= 0 {
-		now = fmt.Sprintf("%3.0f%%", busy[len(busy)-1]*100)
-	} else {
-		now = "  -"
-	}
+	c.DrawBrailleAll()
 
-	line1 := sHeader.Render("HOST  ") +
-		fmt.Sprintf("%s memory · %s", budget.HumanBytes(h.MemoryBytes), budget.HumanMillicores(h.CPUMillicores)) +
-		sDim.Render("  ("+h.Source+")")
-	// Label, spark, a space, the value, two spaces, the span: the spark takes
-	// what is left so the line never wraps.
-	sparkWidth := width - 6 - 1 - len(now) - 2 - len(span)
-	if sparkWidth < 10 {
-		sparkWidth = 10
-	}
-	line2 := sHeader.Render("CPU   ") + colorSpark(busy, sparkWidth, 1) + " " + busyStyle(busy).Render(now) + sDim.Render("  "+span)
-
-	return line1 + "\n" + line2
-}
-
-func busyStyle(busy []float64) lipgloss.Style {
-	if len(busy) == 0 || busy[len(busy)-1] < 0 {
-		return sDim
-	}
-	switch v := busy[len(busy)-1]; {
-	case v >= 0.9:
-		return sBad
-	case v >= 0.7:
-		return sWarn
-	default:
-		return sOK
-	}
+	return head + "\n" + c.View()
 }
 
 func (m model) poolsPanel(width int) string {
-	rounds := m.rounds()
+	_, _, rounds := m.window()
+	if len(rounds) == 0 {
+		rounds = m.resp.Rounds
+	}
 	last := rounds[len(rounds)-1]
 	byName := make(map[string]serve.PoolSample, len(last.Pools))
 	for _, p := range last.Pools {
@@ -364,7 +451,7 @@ func (m model) poolsPanel(width int) string {
 		if sparkWidth < len(label) {
 			label = "TREND"
 		}
-		sparkHeader = fmt.Sprintf("%-*s  ", sparkWidth, trunc(label, sparkWidth))
+		sparkHeader = fmt.Sprintf("%-*s  ", sparkWidth, label)
 	}
 	header := fmt.Sprintf("%-14s %6s %5s %5s %5s  %s%6s  %8s  %-6s",
 		"POOL", "BUSY", "QUEUE", "NOW", "PLAN", sparkHeader, "CPU", "FILL/CAP", "LIMIT")
@@ -415,8 +502,6 @@ func (m model) poolsPanel(width int) string {
 			sparkCell, cpu, fill, limit)
 		if i == m.selected {
 			row = sRowSel.Render(row)
-		} else {
-			row = sRow.Render(row)
 		}
 		lines = append(lines, row)
 	}
@@ -434,98 +519,133 @@ func poolValue(r serve.HistorySample, name string, f func(serve.PoolSample) floa
 	return -1
 }
 
-func (m model) detailPanel(width int) string {
+// detailPanel is the selected pool: a legend with the current numbers, then
+// one chart with busy workers against the ceilings, then the queue and the
+// CPU share as sparklines beside their values.
+func (m model) detailPanel(width, height int) string {
 	name := m.pools[m.selected]
-	rounds := m.rounds()
+	_, _, rounds := m.window()
+	if len(rounds) == 0 {
+		rounds = m.resp.Rounds
+	}
 	var last serve.PoolSample
 	for _, p := range rounds[len(rounds)-1].Pools {
 		if p.Pool == name {
 			last = p
 		}
 	}
-	series := func(f func(serve.PoolSample) float64) []float64 {
-		out := make([]float64, 0, len(rounds))
-		for _, r := range rounds {
-			out = append(out, poolValue(r, name, f))
-		}
 
-		return out
+	head := sHeader.Render("POOL  ") + sAccent.Render(name) + sDim.Render(fmt.Sprintf("  %s/worker · %d cpu readings",
+		budget.HumanBytes(last.WorkerBytes), last.CPUReadings))
+
+	// The ceilings the busy line is drawn against, and the y range that
+	// holds all of them.
+	yMax := 1.0
+	for _, r := range rounds {
+		for _, p := range r.Pools {
+			if p.Pool != name {
+				continue
+			}
+			for _, v := range []int{p.Active, p.Configured, p.Recommended, p.CPUCeiling} {
+				if float64(v) > yMax {
+					yMax = float64(v)
+				}
+			}
+		}
 	}
-	active := series(func(s serve.PoolSample) float64 { return float64(s.Active) })
-	queue := series(func(s serve.PoolSample) float64 { return float64(s.Queue) })
-	cpu := series(func(s serve.PoolSample) float64 {
+	yMax = yMax * 1.1
+
+	legend := []string{
+		sBusy.Render("●") + " busy " + sTitle.Render(fmt.Sprintf("%d", last.Active)),
+		sNow.Render("●") + " now " + fmt.Sprintf("%d", last.Configured),
+		sPlan.Render("●") + " plan " + fmt.Sprintf("%d", last.Recommended),
+	}
+	if last.CPUCeiling > 0 {
+		legend = append(legend, sWarn.Render("●")+" cpu ceiling "+fmt.Sprintf("%d", last.CPUCeiling))
+	}
+	if last.CPUBound {
+		legend = append(legend, sAccent.Render("held at the ceiling"))
+	}
+
+	c := m.chart(width, height, yMax, func(v float64) string { return fmt.Sprintf("%.0f", v) })
+	c.SetDataSetStyle("busy", sBusy)
+	c.SetDataSetStyle("now", sNow)
+	c.SetDataSetStyle("plan", sPlan)
+	c.SetDataSetStyle("cap", sWarn)
+	for _, r := range rounds {
+		for _, p := range r.Pools {
+			if p.Pool != name {
+				continue
+			}
+			c.PushDataSet("busy", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Active)})
+			c.PushDataSet("now", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Configured)})
+			c.PushDataSet("plan", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Recommended)})
+			if p.CPUCeiling > 0 {
+				c.PushDataSet("cap", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.CPUCeiling)})
+			}
+		}
+	}
+	c.DrawBrailleAll()
+
+	// Queue and CPU share: a value, then a sparkline, so the number is
+	// beside its name and the line is beside the number.
+	queue := seriesOf(rounds, name, func(s serve.PoolSample) float64 { return float64(s.Queue) })
+	cpu := seriesOf(rounds, name, func(s serve.PoolSample) float64 {
 		if s.CPUReadings < 20 {
 			return -1
 		}
 
 		return s.CPURatioP50
 	})
-	recommended := series(func(s serve.PoolSample) float64 { return float64(s.Recommended) })
+	queueVal := fmt.Sprintf("%d waiting", last.Queue)
+	cpuVal := cpuLabel(last, width < 100)
+	labelW := lipgloss.Width(queueVal)
+	if w := lipgloss.Width(cpuVal); w > labelW {
+		labelW = w
+	}
+	sparkW := width - 8 - labelW - 2
+	if sparkW < 10 {
+		sparkW = 10
+	}
+	tail := sHeader.Render("queue   ") + pad(queueVal, labelW) + "  " + colorSpark(queue, sparkW, maxOf(queue)) + "\n" +
+		sHeader.Render("cpu     ") + pad(cpuVal, labelW) + "  " + colorSpark(cpu, sparkW, 1)
 
-	head := sHeader.Render("POOL  ") + sAccent.Render(name) + sDim.Render(fmt.Sprintf("  %s/worker · %d cpu readings · %s",
-		budget.HumanBytes(last.WorkerBytes), last.CPUReadings, spanLabel(rounds, m.resp.IntervalSeconds)))
-	ceiling := float64(last.Configured)
-	if ceiling <= 0 {
-		ceiling = maxOf(active)
-	}
-	values := []string{
-		fmt.Sprintf("%d of %d", last.Active, last.Configured),
-		fmt.Sprintf("%d", last.Recommended),
-		fmt.Sprintf("%d", last.Queue),
-		cpuLabel(last, width < 100),
-	}
-	// The spark takes what the longest value leaves, so no row wraps.
-	longest := 0
-	for _, v := range values {
-		if n := lipgloss.Width(v); n > longest {
-			longest = n
-		}
-	}
-	sparkWidth := width - 6 - 1 - longest
-	if sparkWidth < 10 {
-		sparkWidth = 10
-	}
-	row := func(label string, s []float64, scale float64, val string) string {
-		return sHeader.Render(fmt.Sprintf("%-6s", label)) + colorSpark(s, sparkWidth, scale) + " " + val
-	}
-	// Busy and plan share a scale, so the two rows read against each other:
-	// a plan row that is all bars beside a busy row that never reaches them
-	// is a pool with room.
-	shared := ceiling
-	if r := maxOf(recommended); r > shared {
-		shared = r
-	}
-	lines := []string{
-		head,
-		row("busy", active, shared, values[0]),
-		row("plan", recommended, shared, values[1]),
-		row("queue", queue, maxOf(queue), values[2]),
-		row("cpu", cpu, 1, values[3]),
-	}
-
-	return strings.Join(lines, "\n")
+	return head + "\n" + strings.Join(legend, "   ") + "\n" + c.View() + "\n" + tail
 }
 
-// cpuLabel is the cpu row's value: the share, the fill count and the ceiling,
-// and whether the pool is held there; shorter words on a narrow terminal.
+func seriesOf(rounds []serve.HistorySample, name string, f func(serve.PoolSample) float64) []float64 {
+	out := make([]float64, 0, len(rounds))
+	for _, r := range rounds {
+		out = append(out, poolValue(r, name, f))
+	}
+
+	return out
+}
+
+// pad right-pads a styled string to a visible width.
+func pad(s string, width int) string {
+	if n := width - lipgloss.Width(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+
+	return s
+}
+
+// cpuLabel is the cpu row's value: the share, the fill count and the ceiling;
+// shorter words on a narrow terminal.
 func cpuLabel(p serve.PoolSample, short bool) string {
 	if p.CPUReadings < 20 {
 		return sDim.Render("too few readings yet")
 	}
 	share := fmt.Sprintf("%.0f%% of a request on CPU", p.CPURatioP50*100)
 	fill := fmt.Sprintf(" · %d fill the box · ceiling %d", p.CPUFill, p.CPUCeiling)
-	held := " · " + sAccent.Render("held there")
 	if short {
 		share = fmt.Sprintf("%.0f%% cpu", p.CPURatioP50*100)
 		fill = fmt.Sprintf(" · %d fill · cap %d", p.CPUFill, p.CPUCeiling)
-		held = " · " + sAccent.Render("held")
 	}
 	s := share
 	if p.CPUCeiling > 0 {
 		s += fill
-	}
-	if p.CPUBound {
-		s += held
 	}
 
 	return s
@@ -538,7 +658,7 @@ func (m model) eventsPanel(width int) string {
 		lines = append(lines, sDim.Render("nothing applied since the daemon started"))
 	}
 	max := 6
-	if m.height > 40 {
+	if m.height > 44 {
 		max = 12
 	}
 	if len(events) > max {
@@ -574,31 +694,13 @@ func (m model) eventsPanel(width int) string {
 func (m model) keys() string {
 	k := func(key, what string) string { return sKey.Render(key) + sDim.Render(" "+what) }
 
-	return "  " + strings.Join([]string{k("↑↓", "pool"), k("1", "last hour"), k("2", "6 hours"), k("3", "all"), k("r", "refresh"), k("q", "quit")}, "   ")
+	return "  " + strings.Join([]string{k("↑↓", "pool"), k("1", "hour"), k("2", "six hours"), k("3", "all"), k("r", "refresh"), k("q", "quit")}, "   ")
 }
 
-// spanLabel says how much time the charts cover.
-func spanLabel(rounds []serve.HistorySample, intervalSeconds float64) string {
-	if len(rounds) < 2 {
-		return "1 round"
-	}
-	d := rounds[len(rounds)-1].At.Sub(rounds[0].At)
-	if d <= 0 {
-		d = time.Duration(float64(len(rounds)) * intervalSeconds * float64(time.Second))
-	}
-	switch {
-	case d < 2*time.Minute:
-		return fmt.Sprintf("last %.0fs", d.Seconds())
-	case d < 2*time.Hour:
-		return fmt.Sprintf("last %.0fm", d.Minutes())
-	default:
-		return fmt.Sprintf("last %.1fh", d.Hours())
-	}
-}
-
-// The sparkline. Eight block heights, one column per bucket of rounds, with
-// the newest at the right. A value below zero is "unknown" and draws as a dot,
-// so a hole in the history looks like a hole and not like zero.
+// The sparkline used in the table and for the queue and CPU rows. Eight
+// block heights, one column per bucket of rounds, newest at the right. A
+// value below zero is "unknown" and draws as a dot, so a hole in the history
+// looks like a hole and not like zero.
 var sparkChars = []rune("▁▂▃▄▅▆▇█")
 
 // spark resamples a series to width columns, taking the maximum in each
@@ -674,7 +776,7 @@ func colorSpark(series []float64, width int, scale float64) string {
 			case level >= 5:
 				b.WriteString(sWarn.Render(string(r)))
 			default:
-				b.WriteString(sSpark.Render(string(r)))
+				b.WriteString(sBusy.Render(string(r)))
 			}
 		}
 	}
@@ -703,6 +805,3 @@ func trunc(s string, n int) string {
 
 	return s[:n-1] + "…"
 }
-
-// ErrNoDaemon is what Run returns when the address never answered.
-var ErrNoDaemon = errors.New("no daemon answered")
