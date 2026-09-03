@@ -79,7 +79,7 @@ func TestCPUIsAFlagOnEveryCommandAndAConfigKey(t *testing.T) {
 	// A re-run switches it without touching the rest of the file: the key
 	// starts commented, so it is added as an active line, and a later
 	// -cpu=false rewrites that line in place.
-	path := writeConfig(t, off)
+	path = writeConfig(t, off)
 	if err := setConfigKey(path, "cpu", "true"); err != nil {
 		t.Fatal(err)
 	}
