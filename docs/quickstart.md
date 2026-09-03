@@ -84,23 +84,25 @@ the workers actually did.
 
 ## 4. Let it act
 
-When you trust the numbers:
+When you trust the numbers, ask the daemon from step 3 to apply them once:
 
 ```bash
-fpm-tune apply
+sudo fpm-tune apply-now     # or press a in fpm-tune top
 ```
 
-This writes one file (`zz-fpm-tune.conf`, in the directory your master already
+It stays advisory afterwards. (Without a daemon running, `fpm-tune apply` does
+the same from the command line; beside one it is refused, because two writers
+of one state file discard each other's learning.) Either way this writes one file (`zz-fpm-tune.conf`, in the directory your master already
 includes), validates it against a sandboxed copy of the configuration, and
 reloads the master with SIGUSR2. If php-fpm would reject the file, it never
 reaches the live directory. If the master does not survive the reload, the
 change is rolled back. Deleting the file returns everything to what you
 configured.
 
-To run it continuously instead of once:
+To let it act on its own from now on:
 
 ```bash
-fpm-tune serve --apply
+fpm-tune serve --apply        # or: sudo fpm-tune mode apply, for the installed service
 ```
 
 Now it closes the loop: measure, decide, apply when a change is worth a reload,

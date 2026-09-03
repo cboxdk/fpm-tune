@@ -62,8 +62,10 @@ profile's guess, not the pool's own memory), so you know which figures to wait o
 
 Run it with `--recommend` and no `--apply` for a day or two, through a real
 traffic pattern. Diff the file against what you have. When you agree with what it
-recommends (and the numbers have stopped being profile guesses), either paste the
-changes yourself, or add `--apply` and let it do the writing.
+recommends (and the numbers have stopped being profile guesses), paste the
+changes yourself, or run `sudo fpm-tune apply-now` (or press `a` in
+`fpm-tune top`), which applies that plan once over the daemon's control socket
+and leaves it advisory, or add `--apply` and let it do the writing from then on.
 
 The same percentiles are on `/metrics` as `estimate="p50"`, `"p95"` and `"p99"`,
 and the CPU share as `fpm_tune_pool_cpu_ratio` with `estimate="p50"` and

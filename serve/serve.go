@@ -175,11 +175,15 @@ type Loop struct {
 	metrics *metrics.Collectors
 	state   *state.State
 
-	lastSaved        time.Time
-	release          lock.Release
-	resource         lock.Release
-	resourceDir      string
-	reconciled       bool
+	lastSaved   time.Time
+	release     lock.Release
+	resource    lock.Release
+	resourceDir string
+	reconciled  bool
+	// reconciledDir is the pool directory the last reconcile looked at, so
+	// taking the lock on the same directory again (after a release) does not
+	// send the next round back through recovery for nothing.
+	reconciledDir    string
 	exhausted        bool
 	boundAddr        string
 	recommendBlocked bool
@@ -285,13 +289,15 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 	}
 
 	return &Loop{
-		history:  newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
-		applyNow: make(chan applyRequest),
-		cfg:      cfg,
-		log:      log,
-		metrics:  metrics.New(),
-		state:    st,
-		release:  release,
+		history:        newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
+		applyNow:       make(chan applyRequest),
+		lastConfigured: map[string]int{},
+		expected:       map[string]int{},
+		cfg:            cfg,
+		log:            log,
+		metrics:        metrics.New(),
+		state:          st,
+		release:        release,
 	}, nil
 }
 
@@ -380,6 +386,9 @@ func (l *Loop) Run(ctx context.Context) error {
 			// done. An apply-mode daemon keeps it, as it always has.
 			if !l.cfg.Apply {
 				l.releaseResource()
+				// A refusal this round (lock, budget) is this round's; a
+				// watching daemon is not blocked from applying, it does not.
+				l.metrics.SetApplyBlocked("")
 			}
 			req.reply <- l.outcome
 		}
@@ -758,11 +767,14 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// unread. holdResource clears the reconciled flag when the directory
 	// changes, which sends the next round through recovery first.
 	if !l.holdResource(master.DropInDir) {
+		l.outcome = ApplyOutcome{Error: "cannot take the pool-directory lock: another fpm-tune is writing to " + master.DropInDir}
+
 		return
 	}
 	if !l.reconciled {
 		l.log.Warn("The pool directory changed under this process; reconciling before "+
 			"writing to it", "dir", master.DropInDir)
+		l.outcome = ApplyOutcome{Message: "nothing was applied: the pool directory changed under the daemon, which reconciles it first; ask again"}
 
 		return
 	}
@@ -778,6 +790,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		// one-shot apply, which the lock would refuse. A daemon that blocks the
 		// remedy it recommends is worse than one that simply stops.
 		l.releaseResource()
+		l.outcome = ApplyOutcome{Error: "php-fpm's own memory limit could not be read, so there is no confirmed budget to apply from: " + result.Budget.LookupErr.Error()}
 
 		l.log.Error("Not applying: php-fpm's own memory limit could not be read, so the "+
 			"only budget available is the machine's — and if php-fpm is capped below "+
@@ -834,7 +847,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 			// is the difference between restarting php-fpm now and finding out
 			// in the morning. The CLI had the same sentence and the same fault.
 			if errors.Is(err, apply.ErrMasterDidNotSurvive) {
-				l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: err.Error()})
+				l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: firstLine(err)})
 				l.log.Error("PHP-FPM IS DOWN AND COULD NOT BE PUT BACK. The master did "+
 					"not survive the reload, and the configuration that killed it could "+
 					"not be removed. Remove these by hand, then reset-failed and start "+
@@ -849,7 +862,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 				"the next reload from any source will adopt it, and a master that fails "+
 				"to start does not come back. Remove these by hand.",
 				"paths", applied.RollbackFailed, "error", err)
-			l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: err.Error()})
+			l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: firstLine(err)})
 
 			return
 		}
@@ -859,7 +872,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		if applied.RolledBack {
 			kind = EventRolledBack
 		}
-		l.history.event(HistoryEvent{At: now, Kind: kind, Detail: err.Error()})
+		l.history.event(HistoryEvent{At: now, Kind: kind, Detail: firstLine(err)})
 		l.outcome = ApplyOutcome{Error: err.Error()}
 
 		return
@@ -873,9 +886,6 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 			l.history.event(ev)
 			l.outcome.Changed = append(l.outcome.Changed, ev)
 			l.outcome.Message = ""
-			if l.expected == nil {
-				l.expected = map[string]int{}
-			}
 			l.expected[o.Pool] = o.To
 		}
 		// The applied values are the hysteresis baseline for the next round, so
@@ -945,6 +955,10 @@ func (l *Loop) reconcile(ctx context.Context) {
 		// the opposite of what the name says.
 		l.metrics.RecordRepair()
 		l.history.event(HistoryEvent{At: time.Now(), Kind: EventRepaired})
+		// The repair moved ceilings this process did not resize; the scrape
+		// that follows starts its comparison afresh rather than calling them
+		// an outside change.
+		clear(l.lastConfigured)
 	}
 	if err != nil {
 		// Released, so the operator's own `fpm-tune apply` is not refused by a
@@ -980,6 +994,7 @@ func (l *Loop) reconcile(ctx context.Context) {
 	}
 
 	l.reconciled = true
+	l.reconciledDir = master.DropInDir
 }
 
 // save writes state, either because enough time has passed or because something
@@ -1097,7 +1112,12 @@ func (l *Loop) holdResource(dropInDir string) bool {
 		l.resource()
 		l.resource = nil
 	}
-	l.reconciled = false
+	// A directory this process has reconciled is not new to it, however the
+	// lock came to be released: a watching daemon gives it back after every
+	// apply-now, and re-taking it must not cost a round of recovery.
+	if dropInDir != l.reconciledDir {
+		l.reconciled = false
+	}
 
 	release, err := lock.Acquire(lock.ResourcePath(dropInDir))
 	if err != nil {

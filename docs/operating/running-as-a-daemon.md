@@ -67,10 +67,11 @@ Each interval, in order:
 8. **Publish** the plan as metrics, and (with `--recommend`) write it as
    configuration.
 
-## A day of rounds, for drawing
+## History: a day of rounds
 
-Every round leaves one sample in a ring in the daemon's memory, and every apply
-leaves an event, and the metrics address serves them as JSON:
+Every round leaves one sample in a ring in the daemon's memory, every apply and
+every change the daemon notices leaves an event, and the metrics address serves
+them as JSON:
 
 ```
 curl -s 127.0.0.1:9110/history.json | jq '.rounds[-1]'
@@ -79,17 +80,27 @@ curl -s '127.0.0.1:9110/history.json?last=120' | jq '.rounds[].pools[] | select(
 
 A round carries, per pool, what was observed (busy workers, listen queue, the
 configured ceiling), what was planned (the recommended ceiling, whether demand
-went unmet, the per-worker cost sized on) and the CPU side (median share,
-readings, fill count, ceiling, whether the pool is CPU-limited and whether it
-was held at the CPU ceiling), plus how busy the box's CPU was over the interval.
-Events are resizes (pool, from, to, reason), failed applies, rollbacks, and
-repairs.
+went unmet, the per-worker cost sized on, what memory alone would have set, so
+a CPU-capped pool shows the gap) and the CPU side (median share, readings, fill
+count, ceiling, whether the pool is CPU-limited and whether it was held at the
+CPU ceiling), plus how busy the box's CPU was over the interval. A `host`
+object carries the hostname, the version, the mode, whether the CPU ceiling is
+on and where the budget came from; that is what `top`'s title bar reads.
+Events are resizes (pool, from, to, reason), failed applies, rollbacks,
+repairs, and `changed`: a ceiling that moved without the daemon moving it, a
+hand edit, a deploy, or an `fpm-tune apply` run beside it.
 
 `--history` sets how far back it reaches (a day by default; the ring holds
 history ÷ interval rounds and a thousand events). It starts empty at every
 daemon start and is never written to disk: it is for a dashboard or a terminal
 UI to draw a line from, not a store. Prometheus is the place for anything that
 must outlive a restart.
+
+It is served on the same address as `/metrics`, with the same absence of
+authentication, and it says more than the metrics do: pool names, hostname,
+version, and a day of per-pool load. Bind the address to loopback (the
+installed service does) or a private network, and reach it from elsewhere over
+an SSH tunnel.
 
 ## Watching it: `fpm-tune top`
 
@@ -100,15 +111,19 @@ fpm-tune top --addr 10.0.0.5:9110  # another host's daemon
 
 A terminal view of that history: the box's CPU over time, every pool with its
 busy workers, queue, ceiling now and planned, CPU share, fill count and which
-resource limits it, the selected pool's charts, and every resize and failed
-apply since the daemon started. Arrow keys pick a pool, `1`/`2`/`3` set the
-span (an hour, six, everything), `q` quits.
+resource limits it, the selected pool's charts, and every event (resizes,
+outside changes, failed applies, rollbacks, repairs) since the daemon started.
+Arrow keys (or `j`/`k`) pick a pool, `1`/`2`/`3` set the span (an hour, six,
+everything), `r` refreshes, `a` applies, `q` quits.
 
 It reads and changes nothing on its own. `a` opens the plan's pending changes,
-pool by pool, and Enter runs `fpm-tune apply-now` in the terminal, which asks
-the daemon to apply the plan it showed. The daemon does the writing, with its
-own state, lock and flags, so what you saw is what gets applied, and it records
-the resize as an event. It stays in whatever mode it is in.
+pool by pool, and Enter runs `fpm-tune apply-now` in the terminal (through
+`sudo`, unless you are root), which asks the daemon to apply the plan it
+showed. The daemon does the writing, with its own state, lock and flags, so
+what you saw is what gets applied, and it records the resize as an event. It
+stays in whatever mode it is in. `--addr` reads another host's history over
+plain HTTP, for looking; `a` is refused there, because `apply-now` reaches only
+the daemon on the box it runs on.
 
 ## Applying once: `fpm-tune apply-now`
 
@@ -117,13 +132,20 @@ sudo fpm-tune apply-now
 ```
 
 The daemon holds the state lock for as long as it runs, so `fpm-tune apply`
-beside it is refused, and rightly: two writers of one state file is how an hour
-of learning gets discarded. `apply-now` is the way to act on a watching daemon's
-plan without switching it to apply mode: it asks the daemon, over a root-only
-control socket beside the state file, to run one round with applying forced on
-and the reload damping waived, and prints what changed. The daemon stays
-advisory afterwards. This is the two-part way to run it: the daemon watches and
-plans, a person applies, from the terminal or from `top`.
+beside it is refused: two writers of one state file is how an hour of learning
+gets discarded. `apply-now` is the way to act on a watching daemon's plan
+without switching it to apply mode: it asks the daemon, over a control socket,
+to run one round with applying forced on and the
+[hysteresis](../how-it-decides/hysteresis.md) waived (you have read the plan
+and asked for it), and prints what changed. The daemon stays in the mode it
+was in; on an apply-mode daemon, `apply-now` is a way to skip the damping for a
+change you have already read. This is the two-part way to run it: the daemon
+watches and plans, a person applies, from the terminal or from `top`.
+
+The socket is `/var/lib/fpm-tune/control.sock` (`--control` on both `serve` and
+`apply-now` moves it), created mode 0600 and owned by the daemon's user, so
+`apply-now` needs root. Each call is one full round with the damping off, so
+do not script it in a loop: that is `--apply` with the safeguards removed.
 
 ## The self-repair is part of applying
 

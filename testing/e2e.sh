@@ -303,6 +303,14 @@ grep -qE "→|nothing to change" "$ROOT/applynow.out" || { kill $SERVE 2>/dev/nu
 if grep -q "→" "$ROOT/applynow.out" && [ "$(fingerprint)" = "$BEFORE" ]; then
   kill $SERVE 2>/dev/null || true; fail "apply-now reported a change but the pool directory is unchanged"
 fi
+# Asked a second time, it applies again: taking the lock back on a directory it
+# has already reconciled must not send it through a round of recovery, which
+# refused every second apply-now.
+if ! "$BIN" apply-now --control "$CONTROL" > "$ROOT/applynow2.out" 2>&1; then
+  kill $SERVE 2>/dev/null || true; fail "the second apply-now failed:$(printf '\n')$(cat "$ROOT/applynow2.out")$(printf '\n')$(cat "$ROOT/serve-adv.out")"
+fi
+grep -qE "→|nothing to change" "$ROOT/applynow2.out" \
+  || { kill $SERVE 2>/dev/null || true; fail "the second apply-now did not reach the plan:$(printf '\n')$(cat "$ROOT/applynow2.out")"; }
 # And the daemon let go of the pool directory afterwards: a second writer is
 # not refused while the watching daemon is still up. (Its own state dir, so
 # the state lock is not what is being tested.)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -51,17 +52,31 @@ func controlPathFor(statePath string) string {
 }
 
 // startControl listens on the control socket. A stale socket file from a
-// daemon that died is removed first; the new one is made root-only, because
-// whoever can write to it can reconfigure php-fpm.
+// daemon that died is removed first, and only a socket is: a --control that
+// names some other file by mistake must not delete it. The new socket is
+// root-only from the moment it exists, because whoever can write to it can
+// reconfigure php-fpm: it is created under a umask that leaves no permission
+// to anyone else, and then narrowed to the owner outright.
 func (l *Loop) startControl() (*http.Server, error) {
 	path := l.cfg.ControlPath
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create the control socket's directory: %w", err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("cannot replace a stale control socket at %s: %w", path, err)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("%s exists and is not a socket; refusing to replace it", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("cannot replace a stale control socket at %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("cannot inspect the control socket path %s: %w", path, err)
 	}
+	// Process-wide, so restored at once; startup is the one goroutine that
+	// creates files at this point.
+	old := syscall.Umask(0o077)
 	ln, err := net.Listen("unix", path)
+	syscall.Umask(old)
 	if err != nil {
 		return nil, fmt.Errorf("cannot listen on the control socket %s: %w", path, err)
 	}

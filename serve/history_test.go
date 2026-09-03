@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -138,7 +139,7 @@ func TestHostBusyRatioIsADifference(t *testing.T) {
 // rounds is recorded as changed outside, unless it is the daemon's own
 // resize showing up the round after.
 func TestAChangeTheDaemonDidNotMakeIsAnEvent(t *testing.T) {
-	l := &Loop{history: newHistory(10, 30*time.Second)}
+	l := &Loop{history: newHistory(10, 30*time.Second), lastConfigured: map[string]int{}, expected: map[string]int{}}
 	t0 := time.Unix(1_700_000_000, 0)
 	views := func(www, shop int) []observe.PoolView {
 		return []observe.PoolView{
@@ -169,6 +170,64 @@ func TestAChangeTheDaemonDidNotMakeIsAnEvent(t *testing.T) {
 	l.noteExternalChanges(views(8, 30), t0.Add(120*time.Second))
 	if _, events := l.history.snapshot(0); len(events) != 2 || events[1].From != 25 || events[1].To != 30 {
 		t.Errorf("a later outside change was missed: %+v", events)
+	}
+
+	// An expectation is spent on the round after the write, whatever that
+	// round found: a hand edit that lands first is an outside change, and
+	// so is a later edit to the very number the daemon once wrote.
+	l.expected = map[string]int{"shop": 35}
+	l.noteExternalChanges(views(8, 40), t0.Add(150*time.Second))
+	l.noteExternalChanges(views(8, 35), t0.Add(180*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 4 || events[2].To != 40 || events[3].To != 35 {
+		t.Errorf("a stale expectation excused an outside change: %+v", events)
+	}
+}
+
+// TestTheLockComesBackWithoutARoundOfRecovery: a watching daemon releases
+// the pool-directory lock after every apply-now, and taking it again on the
+// directory it has already reconciled must not clear the reconciled flag,
+// or every second apply-now is refused. A different directory still does.
+func TestTheLockComesBackWithoutARoundOfRecovery(t *testing.T) {
+	dir, other := t.TempDir(), t.TempDir()
+	l := &Loop{reconciled: true, reconciledDir: dir, log: discardLogger()}
+	defer l.releaseResource()
+	for i := 0; i < 2; i++ {
+		if !l.holdResource(dir) || !l.reconciled {
+			t.Fatalf("take %d: held=%v reconciled=%v", i, l.resource != nil, l.reconciled)
+		}
+		l.releaseResource()
+	}
+	if !l.holdResource(other) || l.reconciled {
+		t.Errorf("a directory never reconciled: held=%v reconciled=%v", l.resource != nil, l.reconciled)
+	}
+}
+
+// TestTheControlSocketReplacesOnlyASocket: a --control naming some other
+// file is refused rather than deleted; and an error's first line is what
+// the history keeps of php-fpm's rejection.
+func TestTheControlSocketReplacesOnlyASocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "fpmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := dir + "/not-a-socket"
+	if err := os.WriteFile(path, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loop{cfg: Config{ControlPath: path}, log: discardLogger()}
+	if srv, err := l.startControl(); err == nil || !strings.Contains(err.Error(), "not a socket") {
+		if srv != nil {
+			_ = srv.Close()
+		}
+		t.Errorf("a regular file at the control path gave %v", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "keep me" {
+		t.Errorf("the file was touched: %q, %v", b, err)
+	}
+
+	if got := firstLine(errors.New("php-fpm rejected the configuration\n[pool www] unknown entry 'pm.max_childre'")); got != "php-fpm rejected the configuration" {
+		t.Errorf("firstLine = %q", got)
 	}
 }
 

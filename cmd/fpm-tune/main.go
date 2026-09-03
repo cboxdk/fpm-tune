@@ -104,7 +104,7 @@ func usage() {
   fpm-tune top      watch the running service: busy workers, queues, the CPU
                     side and every resize, drawn from a day of rounds.
   fpm-tune apply-now
-                    ask the running service to apply its plan once, now.
+                    ask the running service to apply its plan once, now (root).
   fpm-tune version
 
 `, version)

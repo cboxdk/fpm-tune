@@ -3,6 +3,7 @@ package top
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +163,8 @@ func TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags(t *testing.T) {
 	resp := fixture()
 	resp.Host.Apply = false
 	resp.Host.CPUHeadroom = 1.5
+	here, _ := os.Hostname()
+	resp.Host.Hostname = here
 	for i := range resp.Rounds[len(resp.Rounds)-1].Pools {
 		if resp.Rounds[len(resp.Rounds)-1].Pools[i].Pool == "www-forge" {
 			resp.Rounds[len(resp.Rounds)-1].Pools[i].Configured = 22
@@ -180,6 +183,20 @@ func TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags(t *testing.T) {
 	if !m.confirm {
 		t.Fatal("a did not open the apply panel")
 	}
+
+	// Another host's history: the panel does not open, because apply-now
+	// would reach the daemon on THIS box and apply its plan, not the one
+	// on the screen.
+	away := m
+	away.confirm = false
+	awayResp := *m.resp
+	awayResp.Host.Hostname = "elsewhere"
+	away.resp = &awayResp
+	next, _ = away.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	away = next.(model)
+	if away.confirm || !strings.Contains(away.notice, "elsewhere") {
+		t.Errorf("a on another host's history: confirm=%v notice=%q", away.confirm, away.notice)
+	}
 	out := m.View()
 	for _, want := range []string{"APPLY THE PLAN?", "www-forge", "22 → 10", "apply-now"} {
 		if !strings.Contains(out, want) {
@@ -196,8 +213,11 @@ func TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags(t *testing.T) {
 
 	// The daemon does the applying: the view only asks it to, through the
 	// control socket, with no flags of its own to get wrong.
-	if args := applyArgs(serve.HostInfo{CPUCeiling: true, CPUHeadroom: 2}, "/usr/local/bin/fpm-tune"); strings.Join(args, " ") != "sudo /usr/local/bin/fpm-tune apply-now" {
+	if args := applyArgs("/usr/local/bin/fpm-tune", false); strings.Join(args, " ") != "sudo /usr/local/bin/fpm-tune apply-now" {
 		t.Errorf("args = %v", args)
+	}
+	if args := applyArgs("/usr/local/bin/fpm-tune", true); strings.Join(args, " ") != "/usr/local/bin/fpm-tune apply-now" {
+		t.Errorf("root args = %v", args)
 	}
 
 	// In apply mode the panel says the daemon would get there on its own,

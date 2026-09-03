@@ -226,6 +226,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.notice = ""
+			if other := m.otherHost(); other != "" {
+				m.notice = sWarn.Render("this is " + other + "'s history; apply-now reaches only the daemon on this box, so run top there")
+
+				return m, nil
+			}
 			m.confirm = true
 		case "up", "k":
 			if m.selected > 0 {
@@ -270,20 +275,47 @@ func (m model) pending() []serve.PoolSample {
 
 // applyArgs is the command an apply from the view runs: this binary's own
 // apply-now, which asks the daemon to act on the plan it showed. The daemon
-// has the state, the plan and the lock; the view only asks. sudo, because
-// the control socket is root's; the terminal is handed over so a password
-// prompt can appear.
-func applyArgs(_ serve.HostInfo, self string) []string {
+// has the state, the plan and the lock; the view only asks. Through sudo
+// unless this is root already, because the control socket is root's; the
+// terminal is handed over so a password prompt can appear.
+func applyArgs(self string, root bool) []string {
+	if root {
+		return []string{self, "apply-now"}
+	}
+
 	return []string{"sudo", self, "apply-now"}
 }
 
-// apply runs fpm-tune apply in the terminal and comes back with the outcome.
-func (m model) apply() tea.Cmd {
-	self, err := os.Executable()
+// self is this binary, for running its own apply-now: by path when the path
+// still exists (an upgrade under a running top leaves "(deleted)" on it), by
+// name from PATH otherwise.
+func self() string {
+	path, err := os.Executable()
 	if err != nil {
-		self = "fpm-tune"
+		return "fpm-tune"
 	}
-	args := applyArgs(m.resp.Host, self)
+	if _, err := os.Stat(path); err != nil {
+		return "fpm-tune"
+	}
+
+	return path
+}
+
+// otherHost names the daemon's host when it is not this one, and is empty
+// when it is (or when either side is unknown). The history can come from any
+// address; apply-now can only reach the daemon on the box it runs on.
+func (m model) otherHost() string {
+	here, err := os.Hostname()
+	if err != nil || m.resp == nil || m.resp.Host.Hostname == "" || m.resp.Host.Hostname == here {
+		return ""
+	}
+
+	return m.resp.Host.Hostname
+}
+
+// apply runs fpm-tune apply-now in the terminal and comes back with the outcome.
+func (m model) apply() tea.Cmd {
+	args := applyArgs(self(), os.Geteuid() == 0)
 	cmd := exec.Command(args[0], args[1:]...) //nolint:gosec // the operator asked for exactly this
 
 	return tea.ExecProcess(cmd, func(err error) tea.Msg { return appliedMsg{err: err} })
@@ -455,7 +487,6 @@ func (m model) chart(width, height int, yMax float64, yLabel func(float64) strin
 		timeserieslinechart.WithYRange(0, yMax),
 		timeserieslinechart.WithTimeRange(from, to),
 	)
-	c.SetViewTimeAndYRange(from, to, 0, yMax)
 
 	return c
 }
@@ -542,10 +573,7 @@ func (m model) poolsPanel(width int) string {
 	lines := []string{sHeader.Render(header)}
 	for i, name := range m.pools {
 		p := byName[name]
-		series := make([]float64, 0, len(rounds))
-		for _, r := range rounds {
-			series = append(series, poolValue(r, name, func(s serve.PoolSample) float64 { return float64(s.Active) }))
-		}
+		series := seriesOf(rounds, name, func(s serve.PoolSample) float64 { return float64(s.Active) })
 		ceiling := float64(p.Configured)
 		if ceiling <= 0 {
 			ceiling = 1
@@ -698,7 +726,10 @@ func (m model) detailPanel(width, height int) string {
 	if sparkW < 10 {
 		sparkW = 10
 	}
-	tail := sHeader.Render("queue   ") + pad(queueVal, labelW) + "  " + colorSpark(queue, sparkW, maxOf(queue)) + "\n" +
+	// The queue against the pool's ceiling, like the busy workers: a queue
+	// as long as the pool is the pool a second time over, which is where
+	// red belongs. Scaled to its own peak, one waiting request would be red.
+	tail := sHeader.Render("queue   ") + pad(queueVal, labelW) + "  " + colorSpark(queue, sparkW, float64(max(last.Configured, 1))) + "\n" +
 		sHeader.Render("cpu     ") + pad(cpuVal, labelW) + "  " + colorSpark(cpu, sparkW, 1)
 
 	return head + "\n" + strings.Join(legend, "   ") + "\n" + c.View() + "\n" + tail
@@ -746,7 +777,7 @@ func (m model) eventsPanel(width int) string {
 	events := m.resp.Events
 	lines := []string{sHeader.Render("EVENTS")}
 	if len(events) == 0 {
-		lines = append(lines, sDim.Render("nothing applied since the daemon started"))
+		lines = append(lines, sDim.Render("no events since the daemon started"))
 	}
 	max := 6
 	if m.height > 44 {
@@ -787,10 +818,6 @@ func (m model) eventsPanel(width int) string {
 // confirmPanel is what Enter would do: the plan's changes, pool by pool,
 // and the command that makes them.
 func (m model) confirmPanel(width int) string {
-	self, err := os.Executable()
-	if err != nil {
-		self = "fpm-tune"
-	}
 	lines := []string{sAccent.Render("APPLY THE PLAN?") + sDim.Render("  Enter asks the daemon to apply it now, Esc cancels")}
 	if m.resp.Host.Apply {
 		lines = append(lines, sDim.Render("the daemon is in apply mode and would get to this on its own; Enter skips its reload damping"))
@@ -812,7 +839,7 @@ func (m model) confirmPanel(width int) string {
 	}
 	// The command by its base name: the path is this binary's own and adds
 	// nothing but length.
-	shown := applyArgs(m.resp.Host, filepath.Base(self))
+	shown := applyArgs(filepath.Base(self()), os.Geteuid() == 0)
 	lines = append(lines, sDim.Render(trunc("runs: "+strings.Join(shown, " "), width)))
 
 	return strings.Join(lines, "\n")
@@ -910,20 +937,6 @@ func colorSpark(series []float64, width int, scale float64) string {
 	}
 
 	return b.String()
-}
-
-func maxOf(s []float64) float64 {
-	m := 0.0
-	for _, v := range s {
-		if v > m {
-			m = v
-		}
-	}
-	if m <= 0 {
-		return 1
-	}
-
-	return m
 }
 
 func trunc(s string, n int) string {

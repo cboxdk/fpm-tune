@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
+	"github.com/cboxdk/fpm-tune/state"
 )
 
 // A day of rounds, in memory, for anything that wants to draw a line.
@@ -257,24 +259,22 @@ func (h *history) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // moving them. The daemon's own resizes are expected on the following round
 // and are not events twice.
 func (l *Loop) noteExternalChanges(views []observe.PoolView, now time.Time) {
-	if l.lastConfigured == nil {
-		l.lastConfigured = map[string]int{}
-	}
-	if l.expected == nil {
-		l.expected = map[string]int{}
-	}
 	for _, v := range views {
 		if v.Err != nil || !v.MaxChildrenKnown {
 			continue
 		}
 		prev, seen := l.lastConfigured[v.Name]
 		l.lastConfigured[v.Name] = v.CurrentMaxChildren
+		// The daemon's own resize is expected on exactly this round, the one
+		// after it wrote, and the expectation is spent here whatever the
+		// scrape found: kept longer, it would excuse a later hand edit to the
+		// same number, or one after a resize the reconcile rolled back.
+		want, ours := l.expected[v.Name]
+		delete(l.expected, v.Name)
 		if !seen || prev == v.CurrentMaxChildren {
 			continue
 		}
-		if want, ours := l.expected[v.Name]; ours && want == v.CurrentMaxChildren {
-			delete(l.expected, v.Name)
-
+		if ours && want == v.CurrentMaxChildren {
 			continue
 		}
 		l.history.event(HistoryEvent{
@@ -288,30 +288,33 @@ func (l *Loop) noteExternalChanges(views []observe.PoolView, now time.Time) {
 // was in between, as a fraction of the CPU it has. Unknown on the first round,
 // where the box could not be read, across a hole longer than five minutes, and
 // when the counter went backwards.
+//
+// Kept beside the state's own reading of the same counters because a --no-learn
+// daemon records nothing in the state and the history wants the ratio anyway;
+// the arithmetic and its gates are the state's, in one place.
 func (l *Loop) hostBusyRatio(now budget.HostCPU, ok bool, millicores int) (float64, bool) {
 	prev, had := l.lastHostCPU, l.hasHostCPU
 	l.lastHostCPU, l.hasHostCPU = now, ok
-	if !ok || !had || millicores <= 0 {
+	if !ok || !had {
 		return 0, false
 	}
-	wall := now.At.Sub(prev.At)
-	busy := now.BusyMicros - prev.BusyMicros
-	if wall < 5*time.Second || wall > 5*time.Minute || busy < 0 {
-		return 0, false
-	}
-	ratio := float64(busy) / float64(wall.Microseconds()) / (float64(millicores) / 1000)
-	if ratio > 1 {
-		ratio = 1
-	}
+	_, ratio, known := state.HostBusy(
+		state.HostCPUSeen{BusyMicros: prev.BusyMicros, At: prev.At},
+		state.HostCPUSeen{BusyMicros: now.BusyMicros, At: now.At}, millicores)
 
-	return ratio, true
+	return ratio, known
 }
 
-// observedPool is the part of a round the history keeps from the scrape.
-type observedPool struct {
-	active     int
-	queue      int64
-	configured int
+// firstLine is an error's first line: php-fpm's rejection carries its whole
+// stderr, which echoes the offending configuration, and the history is
+// served to whoever can reach the metrics address. The log keeps the rest.
+func firstLine(err error) string {
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+
+	return s
 }
 
 // historySampleOf flattens a round into what the history keeps of it.
@@ -320,9 +323,9 @@ func historySampleOf(result plan.Result, at time.Time, hostBusy float64, hostBus
 	for _, c := range result.CPU {
 		cpu[c.Name] = c
 	}
-	observed := make(map[string]observedPool, len(result.Views))
+	observed := make(map[string]observe.PoolView, len(result.Views))
 	for _, v := range result.Views {
-		observed[v.Name] = observedPool{v.ActiveNow, v.QueueDepth, v.CurrentMaxChildren}
+		observed[v.Name] = v
 	}
 
 	sample := HistorySample{At: at, HostBusyRatio: hostBusy, HostBusyKnown: hostBusyKnown}
@@ -331,9 +334,9 @@ func historySampleOf(result plan.Result, at time.Time, hostBusy float64, hostBus
 		c := cpu[p.Name]
 		sample.Pools = append(sample.Pools, PoolSample{
 			Pool:          p.Name,
-			Active:        o.active,
-			Queue:         o.queue,
-			Configured:    o.configured,
+			Active:        o.ActiveNow,
+			Queue:         o.QueueDepth,
+			Configured:    o.CurrentMaxChildren,
 			Recommended:   p.MaxChildren,
 			DemandUnmet:   p.DemandUnmet,
 			Unknown:       p.Unknown,

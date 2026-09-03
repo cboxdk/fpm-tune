@@ -70,6 +70,7 @@ systemd:
 sudo fpm-tune install-service   # advisory by default
 sudo fpm-tune mode apply        # let it act, when you trust it
 fpm-tune top                    # watch it: workers, queues, CPU, every resize
+sudo fpm-tune apply-now         # apply what it showed, once; it stays advisory
 ```
 
 ## Why this beats a fixed number

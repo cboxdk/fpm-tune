@@ -413,6 +413,13 @@ metrics = %s
 # manage. Unset is correct for a single master.
 # drop-in-dir =
 
+# How far back /history.json (what fpm-tune top draws) reaches. In memory only.
+# history = 24h
+
+# The unix socket fpm-tune apply-now (and top's a key) asks this daemon on.
+# Root-only. Default: beside the state file.
+# control = /var/lib/fpm-tune/control.sock
+
 # In advisory mode, the recommendation is written here for you to read and paste.
 # recommend = %s
 `, defaultConfigPath, mode, metrics, cpuLine, defaultRecommendPath)
