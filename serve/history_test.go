@@ -1,9 +1,14 @@
 package serve
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,3 +171,45 @@ func TestAChangeTheDaemonDidNotMakeIsAnEvent(t *testing.T) {
 		t.Errorf("a later outside change was missed: %+v", events)
 	}
 }
+
+// TestApplyNowGoesThroughTheDaemon: the client posts to the socket, the
+// handler hands the request to the loop and answers with what the round did;
+// the socket is root-only by its mode.
+func TestApplyNowGoesThroughTheDaemon(t *testing.T) {
+	// A short directory: a unix socket path is limited to about a hundred
+	// characters, and macOS's t.TempDir is longer than that.
+	dir, err := os.MkdirTemp("/tmp", "fpmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	l := &Loop{cfg: Config{ControlPath: dir + "/control.sock"}, applyNow: make(chan applyRequest), log: discardLogger()}
+	srv, err := l.startControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	if info, err := os.Stat(l.cfg.ControlPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("socket mode = %v, err %v; want 0600", info.Mode(), err)
+	}
+
+	// The loop's side: one request answered with a resize.
+	go func() {
+		req := <-l.applyNow
+		req.reply <- ApplyOutcome{Changed: []HistoryEvent{{Kind: EventResized, Pool: "www", From: 22, To: 10, Detail: "22 to 10"}}}
+	}()
+	out, err := ApplyNow(context.Background(), l.cfg.ControlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Changed) != 1 || out.Changed[0].Pool != "www" || out.Changed[0].To != 10 {
+		t.Errorf("outcome = %+v", out)
+	}
+
+	// A daemon that is not there is an error that names the socket.
+	if _, err := ApplyNow(context.Background(), dir+"/nobody.sock"); err == nil || !strings.Contains(err.Error(), "nobody.sock") {
+		t.Errorf("a missing daemon gave %v", err)
+	}
+}
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

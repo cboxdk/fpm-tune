@@ -181,7 +181,7 @@ func TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags(t *testing.T) {
 		t.Fatal("a did not open the apply panel")
 	}
 	out := m.View()
-	for _, want := range []string{"APPLY THE PLAN?", "www-forge", "22 → 10", "apply --cpu --cpu-headroom 1.5"} {
+	for _, want := range []string{"APPLY THE PLAN?", "www-forge", "22 → 10", "apply-now"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("panel lacks %q:\n%s", want, out)
 		}
@@ -194,21 +194,19 @@ func TestApplyFromTheViewIsTwoKeysAndTheDaemonsOwnFlags(t *testing.T) {
 		t.Error("Esc did not close the panel")
 	}
 
-	args := applyArgs(serve.HostInfo{CPUCeiling: true, CPUHeadroom: 2}, "/usr/local/bin/fpm-tune")
-	if strings.Join(args, " ") != "sudo /usr/local/bin/fpm-tune apply --cpu --cpu-headroom 2" {
+	// The daemon does the applying: the view only asks it to, through the
+	// control socket, with no flags of its own to get wrong.
+	if args := applyArgs(serve.HostInfo{CPUCeiling: true, CPUHeadroom: 2}, "/usr/local/bin/fpm-tune"); strings.Join(args, " ") != "sudo /usr/local/bin/fpm-tune apply-now" {
 		t.Errorf("args = %v", args)
 	}
-	if args := applyArgs(serve.HostInfo{}, "fpm-tune"); strings.Join(args, " ") != "sudo fpm-tune apply" {
-		t.Errorf("args without cpu = %v", args)
-	}
 
-	// In apply mode the daemon holds the pool directory and applies on its
-	// own; a from the view says so instead of racing it.
+	// In apply mode the panel says the daemon would get there on its own,
+	// and still offers the immediate apply.
 	resp.Host.Apply = true
 	next, _ = m.Update(fetchedMsg{resp: resp, at: time.Now()})
 	m = next.(model)
 	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	if m.confirm || !strings.Contains(m.notice, "apply mode") {
-		t.Errorf("in apply mode: confirm=%v notice=%q", m.confirm, m.notice)
+	if !m.confirm || !strings.Contains(m.View(), "apply mode") {
+		t.Errorf("in apply mode: confirm=%v", m.confirm)
 	}
 }

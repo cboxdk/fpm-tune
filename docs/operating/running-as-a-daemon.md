@@ -104,11 +104,26 @@ resource limits it, the selected pool's charts, and every resize and failed
 apply since the daemon started. Arrow keys pick a pool, `1`/`2`/`3` set the
 span (an hour, six, everything), `q` quits.
 
-It reads and changes nothing on its own. With the daemon in advisory mode, `a`
-opens the plan's pending changes, pool by pool, and Enter runs `fpm-tune apply`
-in the terminal with the daemon's own CPU flags, so what you saw is what gets
-applied; the daemon then records the change as an event. In apply mode the
-daemon applies on its own and `a` says so.
+It reads and changes nothing on its own. `a` opens the plan's pending changes,
+pool by pool, and Enter runs `fpm-tune apply-now` in the terminal, which asks
+the daemon to apply the plan it showed. The daemon does the writing, with its
+own state, lock and flags, so what you saw is what gets applied, and it records
+the resize as an event. It stays in whatever mode it is in.
+
+## Applying once: `fpm-tune apply-now`
+
+```bash
+sudo fpm-tune apply-now
+```
+
+The daemon holds the state lock for as long as it runs, so `fpm-tune apply`
+beside it is refused, and rightly: two writers of one state file is how an hour
+of learning gets discarded. `apply-now` is the way to act on a watching daemon's
+plan without switching it to apply mode: it asks the daemon, over a root-only
+control socket beside the state file, to run one round with applying forced on
+and the reload damping waived, and prints what changed. The daemon stays
+advisory afterwards. This is the two-part way to run it: the daemon watches and
+plans, a person applies, from the terminal or from `top`.
 
 ## The self-repair is part of applying
 

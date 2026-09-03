@@ -18,7 +18,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -226,11 +225,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.resp == nil {
 				return m, nil
 			}
-			if m.resp.Host.Apply {
-				m.notice = sWarn.Render("the daemon is in apply mode and applies on its own; `fpm-tune mode advisory` hands that to you")
-
-				return m, nil
-			}
 			m.notice = ""
 			m.confirm = true
 		case "up", "k":
@@ -275,19 +269,12 @@ func (m model) pending() []serve.PoolSample {
 }
 
 // applyArgs is the command an apply from the view runs: this binary's own
-// apply, with the CPU flags the daemon runs with, so the two agree on what
-// the plan is. sudo, because the pool directory is root's; the terminal is
-// handed over so a password prompt can appear.
-func applyArgs(host serve.HostInfo, self string) []string {
-	args := []string{"sudo", self, "apply"}
-	if host.CPUCeiling {
-		args = append(args, "--cpu")
-		if host.CPUHeadroom > 0 {
-			args = append(args, "--cpu-headroom", strconv.FormatFloat(host.CPUHeadroom, 'g', -1, 64))
-		}
-	}
-
-	return args
+// apply-now, which asks the daemon to act on the plan it showed. The daemon
+// has the state, the plan and the lock; the view only asks. sudo, because
+// the control socket is root's; the terminal is handed over so a password
+// prompt can appear.
+func applyArgs(_ serve.HostInfo, self string) []string {
+	return []string{"sudo", self, "apply-now"}
 }
 
 // apply runs fpm-tune apply in the terminal and comes back with the outcome.
@@ -804,7 +791,10 @@ func (m model) confirmPanel(width int) string {
 	if err != nil {
 		self = "fpm-tune"
 	}
-	lines := []string{sAccent.Render("APPLY THE PLAN?") + sDim.Render("  Enter applies, Esc cancels")}
+	lines := []string{sAccent.Render("APPLY THE PLAN?") + sDim.Render("  Enter asks the daemon to apply it now, Esc cancels")}
+	if m.resp.Host.Apply {
+		lines = append(lines, sDim.Render("the daemon is in apply mode and would get to this on its own; Enter skips its reload damping"))
+	}
 	pending := m.pending()
 	if len(pending) == 0 {
 		lines = append(lines, sDim.Render("nothing to change: every pool is already at its planned ceiling"))

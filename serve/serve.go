@@ -123,6 +123,11 @@ type Config struct {
 	// Version is the binary's version, for /history.json to report.
 	Version string
 
+	// ControlPath is the unix socket on which an operator asks the daemon to
+	// apply once (fpm-tune apply-now). Empty means beside the state file.
+	// See control.go.
+	ControlPath string
+
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
@@ -146,6 +151,9 @@ func (c Config) Defaults() Config {
 	}
 	if c.StatePath == "" {
 		c.StatePath = state.DefaultPath
+	}
+	if c.ControlPath == "" {
+		c.ControlPath = controlPathFor(c.StatePath)
 	}
 	if c.SaveEvery <= 0 {
 		c.SaveEvery = 5 * time.Minute
@@ -184,6 +192,13 @@ type Loop struct {
 
 	// history is the ring of rounds and events behind /history.json.
 	history *history
+
+	// applyNow carries "apply once" requests from the control socket to the
+	// loop; forceApply is on for the round that serves one, and outcome is
+	// what that round did, for the answer. See control.go.
+	applyNow   chan applyRequest
+	forceApply bool
+	outcome    ApplyOutcome
 
 	// lastHostCPU is the box's CPU reading from the previous round, so this
 	// round's busy ratio can be recorded in the history.
@@ -270,12 +285,13 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 	}
 
 	return &Loop{
-		history: newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
-		cfg:     cfg,
-		log:     log,
-		metrics: metrics.New(),
-		state:   st,
-		release: release,
+		history:  newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
+		applyNow: make(chan applyRequest),
+		cfg:      cfg,
+		log:      log,
+		metrics:  metrics.New(),
+		state:    st,
+		release:  release,
 	}, nil
 }
 
@@ -312,6 +328,17 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 
+	var control *http.Server
+	if l.cfg.ControlPath != "" {
+		var err error
+		if control, err = l.startControl(); err != nil {
+			// Not fatal: the daemon can watch and act on its own without an
+			// operator being able to ask it to. Said loudly, because apply-now
+			// and top's a key will not work until it is fixed.
+			l.log.Warn("No control socket; fpm-tune apply-now will not reach this daemon", "error", err)
+		}
+	}
+
 	l.metrics.SetApplyEnabled(l.cfg.Apply)
 
 	l.log.Info("fpm-tune running",
@@ -332,13 +359,29 @@ func (l *Loop) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			l.shutdown(srv)
+			if control != nil {
+				_ = control.Close()
+				_ = os.Remove(l.cfg.ControlPath)
+			}
 
 			return nil
 		case <-ticker.C:
 			l.round(ctx)
+		case req := <-l.applyNow:
+			// One round with applying forced on, whatever the mode, and the
+			// answer is what it did. The mode itself does not change.
+			l.forceApply = true
+			l.outcome = ApplyOutcome{Message: "nothing was applied: the round did not reach the plan"}
+			l.round(ctx)
+			l.forceApply = false
+			req.reply <- l.outcome
 		}
 	}
 }
+
+// applying reports whether this round may write: the daemon is in apply
+// mode, or an operator asked for one round of it.
+func (l *Loop) applying() bool { return l.cfg.Apply || l.forceApply }
 
 // round is one full pass. Failures are logged and the loop continues: a pool
 // that is restarting, or a host whose php-fpm is briefly down, must not end the
@@ -351,7 +394,7 @@ func (l *Loop) round(ctx context.Context) {
 	// php-fpm will not accept, and discovery parses the effective config to find
 	// pools — so from that point on nothing is discoverable and the recovery
 	// path cannot reach the master it exists to recover.
-	if l.cfg.Apply && !l.reconciled {
+	if l.applying() && !l.reconciled {
 		l.reconcile(roundCtx)
 	}
 
@@ -515,8 +558,10 @@ func (l *Loop) round(ctx context.Context) {
 		}
 	}
 
-	if l.cfg.Apply && l.reconciled {
+	if l.applying() && l.reconciled {
 		l.applyPlan(roundCtx, result, now)
+	} else if l.forceApply {
+		l.outcome = ApplyOutcome{Message: "nothing was applied: the host is not reconciled, so writing to it is refused this round"}
 	}
 
 	l.save(now, false)
@@ -690,6 +735,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	if err != nil {
 		l.metrics.SetApplyBlocked("no_master")
 		l.log.Warn("Cannot apply", "error", err)
+		l.outcome = ApplyOutcome{Error: err.Error()}
 
 		return
 	}
@@ -741,6 +787,13 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
+	if l.forceApply {
+		// The operator saw the plan and asked for it: the damping that keeps
+		// the daemon from reloading on every wobble does not apply to a
+		// change a person chose.
+		opts.MinChange, opts.MinInterval = 0.0001, time.Second
+		opts.ShrinkMinChange, opts.ShrinkMinInterval = 0.0001, time.Second
+	}
 
 	applied, err := apply.Apply(ctx, result.Plan, master, l.state, opts, l.log)
 	// Wrote, not Changed(): a run that only removes the section of a site that no
@@ -800,14 +853,19 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 			kind = EventRolledBack
 		}
 		l.history.event(HistoryEvent{At: now, Kind: kind, Detail: err.Error()})
+		l.outcome = ApplyOutcome{Error: err.Error()}
 
 		return
 	}
+	l.outcome = ApplyOutcome{Message: "nothing to change: every pool is at its planned ceiling"}
 
 	if changed := applied.Changed(); len(changed) > 0 {
 		for _, o := range changed {
 			l.log.Info("Pool resized", "pool", o.Pool, "from", o.From, "to", o.To, "reason", o.Reason)
-			l.history.event(HistoryEvent{At: now, Kind: EventResized, Pool: o.Pool, From: o.From, To: o.To, Detail: o.Reason})
+			ev := HistoryEvent{At: now, Kind: EventResized, Pool: o.Pool, From: o.From, To: o.To, Detail: o.Reason}
+			l.history.event(ev)
+			l.outcome.Changed = append(l.outcome.Changed, ev)
+			l.outcome.Message = ""
 			if l.expected == nil {
 				l.expected = map[string]int{}
 			}

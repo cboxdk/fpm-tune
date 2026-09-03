@@ -280,6 +280,34 @@ kill $SERVE 2>/dev/null || true
 wait $SERVE 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+echo "--- a watching daemon applies once when asked through its control socket"
+# Advisory: the daemon plans and writes nothing. apply-now asks it to act on
+# that plan once, over the root-only socket beside its state file, and the
+# pool directory changes while the daemon stays advisory.
+# A short socket path: unix sockets are limited to about a hundred characters
+# and mktemp's directory on macOS is longer than that.
+CONTROL="/tmp/fpm-tune-e2e-$$.sock"
+"$BIN" serve --state "$STATE/state.json" --interval 60s --metrics "" --control "$CONTROL" \
+  --backup-dir "$ROOT/backup" "${SCOPE[@]}" > "$ROOT/serve-adv.out" 2>&1 &
+SERVE=$!
+sleep 3
+[ -S "$CONTROL" ] || { kill $SERVE 2>/dev/null || true; fail "the daemon opened no control socket:$(printf '\n')$(cat "$ROOT/serve-adv.out")"; }
+# The pools are at their plan after the applies above, so the honest answer
+# here is "nothing to change"; a resize through this path is covered in Go.
+BEFORE="$(fingerprint)"
+if ! "$BIN" apply-now --control "$CONTROL" > "$ROOT/applynow.out" 2>&1; then
+  kill $SERVE 2>/dev/null || true; fail "apply-now failed:$(printf '\n')$(cat "$ROOT/applynow.out")$(printf '\n')$(cat "$ROOT/serve-adv.out")"
+fi
+cat "$ROOT/applynow.out"
+grep -qE "→|nothing to change" "$ROOT/applynow.out" || { kill $SERVE 2>/dev/null || true; fail "apply-now said neither what changed nor that nothing did"; }
+if grep -q "→" "$ROOT/applynow.out" && [ "$(fingerprint)" = "$BEFORE" ]; then
+  kill $SERVE 2>/dev/null || true; fail "apply-now reported a change but the pool directory is unchanged"
+fi
+kill $SERVE 2>/dev/null || true; wait $SERVE 2>/dev/null || true
+[ -S "$CONTROL" ] && fail "the control socket was left behind after the daemon stopped"
+echo "  confirmed: the watching daemon applied once, on request, and cleaned up its socket"
+
+# ---------------------------------------------------------------------------
 echo "--- the CPU dimension is always reported, and --cpu only changes what may bind"
 # Real requests through www, each computing for ~100ms: past the 50ms floor,
 # and not this tool's own traffic, so they count. The script has to be

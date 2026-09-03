@@ -69,6 +69,8 @@ func run(args []string) error {
 		return runMode(args[1:])
 	case "top":
 		return runTop(args[1:])
+	case "apply-now":
+		return runApplyNow(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 
@@ -101,6 +103,8 @@ func usage() {
   fpm-tune mode     switch the running service between advisory and apply.
   fpm-tune top      watch the running service: busy workers, queues, the CPU
                     side and every resize, drawn from a day of rounds.
+  fpm-tune apply-now
+                    ask the running service to apply its plan once, now.
   fpm-tune version
 
 `, version)
@@ -1033,6 +1037,7 @@ func runServe(args []string) error {
 	c := registerCommon(fs)
 	var (
 		interval    = fs.Duration("interval", 30*time.Second, "how often to sample the pools")
+		control     = fs.String("control", "", "the unix socket on which apply-now asks this daemon to apply once (default: control.sock beside the state file)")
 		history     = fs.Duration("history", 24*time.Hour, "how far back /history.json reaches, in memory: the ring holds history/interval rounds and the daemon's apply events, for a dashboard or a terminal UI to draw from. Nothing is written to disk; Prometheus is the place for anything that must outlive a restart")
 		metricsAddr = fs.String("metrics", ":9110", "address for /metrics (empty disables it)")
 		doApply     = fs.Bool("apply", false,
@@ -1135,6 +1140,7 @@ func runServe(args []string) error {
 		CPUCeiling:      *c.cpu,
 		CPUHeadroom:     *c.cpuHeadroom,
 		History:         *history,
+		ControlPath:     *control,
 		Version:         version,
 		ScrapeTimeout:   *c.timeout,
 		HeartbeatEvery:  *heartbeat,
