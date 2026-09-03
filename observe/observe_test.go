@@ -259,3 +259,19 @@ func TestOwnRequestIsTheStatusPathOrTheProbe(t *testing.T) {
 		t.Error("an empty status path matched the site's root")
 	}
 }
+
+// TestStatCPUTicksAreCountedFromTheCommandName: the command in /proc/<pid>/stat
+// is in parentheses and may contain spaces, so the fields are found from the
+// last ')', not the first space. utime + stime + cutime + cstime.
+func TestStatCPUTicksAreCountedFromTheCommandName(t *testing.T) {
+	stat := "1234 (php-fpm: pool www forge) S 1 1234 1234 0 -1 4194624 500 0 0 0 120 30 7 3 20 0 1 0 100 1000 200 18446744073709551615"
+	if got := parseStatCPUTicks(stat); got != 120+30+7+3 {
+		t.Errorf("ticks = %d, want 160", got)
+	}
+	if got := parseStatCPUTicks("garbage"); got != 0 {
+		t.Errorf("garbage gave %d", got)
+	}
+	if got := workerCPUTicks(0); got != 0 {
+		t.Errorf("pid 0 gave %d", got)
+	}
+}

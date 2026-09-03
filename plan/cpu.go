@@ -38,12 +38,35 @@ type PoolCPU struct {
 	// The CPU twin of a worker's bytes. Zero until the shape is known.
 	MillicoresPerWorker int
 
+	// BoxMillicoresPerWorker is what one busy worker costs the whole box —
+	// MySQL, nginx and the kernel included — once the box-cost fit has enough
+	// spread to say (BoxMeasured); until then it equals MillicoresPerWorker
+	// and the report says the rest of the box is not measured yet. Overhead
+	// is the ratio between the two: 2.1 for a pool that spends as much again
+	// outside PHP as in it.
+	BoxMillicoresPerWorker int
+	BoxMeasured            bool
+	Overhead               float64
+
 	// FillWorkers is how many of this pool's workers, all busy at once, fill
-	// the host's CPU: the host's millicores over MillicoresPerWorker, rounded
-	// up. It is a per-pool bound, not a share — every pool is measured against
-	// the whole host, and the host line below is where they add up. Zero
-	// until the shape is known.
+	// the host's CPU: the host's millicores over BoxMillicoresPerWorker,
+	// rounded up. It is a per-pool bound, not a share — every pool is measured
+	// against the whole host, and the host line below is where they add up.
+	// Zero until the shape is known.
 	FillWorkers int
+
+	// Ceiling is the number --cpu holds the pool at: FillWorkers with Headroom
+	// on top, never below one worker per core plus one. The headroom is the
+	// one figure here that is a judgement rather than a measurement: it is
+	// how many workers may sit waiting on I/O or absorbing a burst past the
+	// point where the CPU is full. Zero until the shape is known.
+	Ceiling  int
+	Headroom float64
+
+	// StarvedRounds is how many scrapes found requests queued while the box
+	// was full: the direct observation that another worker would not have
+	// helped.
+	StarvedRounds int
 
 	// Current is the pm.max_children in effect now, and Allowed the one this
 	// plan gives the pool. Zero when the pool is not written.
@@ -108,18 +131,56 @@ func fillWorkers(perWorker, hostMillicores int) int {
 	return int(math.Ceil(float64(hostMillicores) / float64(perWorker)))
 }
 
-// cpuCeilingFor is the ceiling plan hands the allocator for one pool: its
-// fill count, but only for a pool that has been watched long enough to be CUT
-// on memory evidence too. Twenty readings say what shape a pool's requests
-// have; they are not permission to take workers away. See cpu.md, "What
-// --cpu does".
-func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int) int {
+// DefaultCPUHeadroom is the factor on the fill count a pool is held at with
+// --cpu. Two, because the fill count is the throughput optimum and nothing
+// more: past it another worker serves no more requests, but a pool held at
+// exactly it has no worker to spare for a request stuck on an upstream, and
+// short requests wait behind long ones in the listen queue rather than sharing
+// the CPU. Operators who size cpu-bound PHP by hand land between one and a half
+// and two workers per core; two is the generous end.
+const DefaultCPUHeadroom = 2.0
+
+// cpuCeiling is the number --cpu holds a pool at: the fill count with headroom
+// on top, never below one worker per core plus one — a cap that leaves a box
+// fewer workers than cores is not a cap on concurrency, it is a fault.
+func cpuCeiling(fill, hostMillicores int, headroom float64) int {
+	if fill <= 0 {
+		return 0
+	}
+	if headroom < 1 {
+		headroom = 1
+	}
+	ceiling := int(math.Ceil(float64(fill) * headroom))
+	if floor := (hostMillicores+999)/1000 + 1; ceiling < floor {
+		ceiling = floor
+	}
+
+	return ceiling
+}
+
+// boxCost prices a busy worker for the whole box: PHP's own millicores times
+// the measured overhead when the fit can be believed, PHP's own alone
+// otherwise.
+func boxCost(ps *state.PoolState, opts state.Options, phpMillicores int) (millicores int, overhead float64, measured bool) {
+	if a, ok := ps.BoxOverhead(opts); ok {
+		return int(math.Round(float64(phpMillicores) * a)), a, true
+	}
+
+	return phpMillicores, 0, false
+}
+
+// cpuCeilingFor is the ceiling plan hands the allocator for one pool, but only
+// for a pool that has been watched long enough to be CUT on memory evidence
+// too. Twenty readings say what shape a pool's requests have; they are not
+// permission to take workers away. See cpu.md, "What --cpu does".
+func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, headroom float64) int {
 	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {
 		return 0
 	}
-	_, perWorker := cpuShape(ps.CPUShare(0.50))
+	_, php := cpuShape(ps.CPUShare(0.50))
+	box, _, _ := boxCost(ps, opts, php)
 
-	return fillWorkers(perWorker, hostMillicores)
+	return cpuCeiling(fillWorkers(box, hostMillicores), hostMillicores, headroom)
 }
 
 // Percent prints a share as a whole percentage, or a dash until there are
@@ -164,6 +225,14 @@ func (c PoolCPU) Why(hostMillicores int) string {
 		workers = "worker"
 	}
 	line := fmt.Sprintf("%s; ~%d busy %s fill %s", c.Shape, c.FillWorkers, workers, budget.HumanMillicores(hostMillicores))
+	if c.BoxMeasured {
+		line += fmt.Sprintf(" with MySQL, nginx and the kernel counted (%.1f× PHP's own)", c.Overhead)
+	} else {
+		line += " by PHP's own CPU (the rest of the box not measured yet)"
+	}
+	if c.Ceiling > 0 {
+		line += fmt.Sprintf("; ceiling %d at %.2g× headroom", c.Ceiling, c.Headroom)
+	}
 	switch {
 	case c.CPUBound:
 		line += fmt.Sprintf("; held there (now %d)", c.Current)
@@ -172,8 +241,21 @@ func (c PoolCPU) Why(hostMillicores int) string {
 	case c.Current > 0:
 		line += fmt.Sprintf("; now %d", c.Current)
 	}
+	if c.StarvedRounds > 0 {
+		line += fmt.Sprintf("; queued in %d rounds while the box was full", c.StarvedRounds)
+	}
 
 	return line
+}
+
+// BoxPerWorker prints the all-in per-worker cost, or a dash until the box-cost
+// fit can say.
+func (c PoolCPU) BoxPerWorker() string {
+	if !c.BoxMeasured {
+		return "-"
+	}
+
+	return fmt.Sprintf("%dm", c.BoxMillicoresPerWorker)
 }
 
 // cpuOf builds the CPU report: one row for every pool this round, whether or
@@ -186,6 +268,7 @@ func cpuOf(
 	st *state.State,
 	opts state.Options,
 	hostMillicores int,
+	headroom float64,
 	allocation allocate.Plan,
 	ambiguous map[string]bool,
 ) ([]PoolCPU, HostCPU) {
@@ -227,19 +310,23 @@ func cpuOf(
 			row.P50 = ps.CPUShare(0.50)
 			row.P90 = ps.CPUShare(0.90)
 			row.Samples = ps.CPUSamples
+			row.StarvedRounds = ps.CPUStarvedRounds
 			if ps.CPUShapeKnown(opts) {
 				row.Shape, row.MillicoresPerWorker = cpuShape(row.P50)
-				row.FillWorkers = fillWorkers(row.MillicoresPerWorker, hostMillicores)
+				row.BoxMillicoresPerWorker, row.Overhead, row.BoxMeasured = boxCost(ps, opts, row.MillicoresPerWorker)
+				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)
+				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, headroom)
+				row.Headroom = headroom
 			}
 		}
 		if row.Shape != "" {
 			row.Limit = "memory"
-			if row.CPUBound || (row.FillWorkers > 0 && atPlan > row.FillWorkers) {
+			if row.CPUBound || (row.Ceiling > 0 && atPlan > row.Ceiling) {
 				row.Limit = "cpu"
 			}
 
-			host.NeededAtPlan += atPlan * row.MillicoresPerWorker
-			host.NeededNow += row.Current * row.MillicoresPerWorker
+			host.NeededAtPlan += atPlan * row.BoxMillicoresPerWorker
+			host.NeededNow += row.Current * row.BoxMillicoresPerWorker
 		}
 
 		out = append(out, row)

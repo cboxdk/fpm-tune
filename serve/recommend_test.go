@@ -157,7 +157,7 @@ func TestRecommendationShowsChildrenWhenAPoolSpawnsThem(t *testing.T) {
 			},
 		},
 		CPU: []plan.PoolCPU{
-			{Name: "media", P50: 0.7, P90: 0.75, Samples: 50, Shape: "cpu-bound", MillicoresPerWorker: 700, FillWorkers: 6, Limit: "cpu", Allowed: 4},
+			{Name: "media", P50: 0.7, P90: 0.75, Samples: 50, Shape: "cpu-bound", MillicoresPerWorker: 700, BoxMillicoresPerWorker: 700, FillWorkers: 6, Ceiling: 12, Headroom: 2, Limit: "cpu", Allowed: 4},
 			{Name: "web", Samples: 2}, // too few readings: no line
 		},
 		HostCPU: plan.HostCPU{Millicores: 4000},
@@ -167,7 +167,7 @@ func TestRecommendationShowsChildrenWhenAPoolSpawnsThem(t *testing.T) {
 
 	// The CPU dimension, in the same words the plan uses, and only for a pool
 	// whose shape is known.
-	if !strings.Contains(file, "cpu per request: median 70%, p90 75% (50 readings); 700m per busy worker; cpu-bound; ~6 busy workers fill 4 core(s); plan allows 4 (now 0); limit: cpu") {
+	if !strings.Contains(file, "cpu per request: median 70%, p90 75% (50 readings); 700m per busy worker; cpu-bound; ~6 busy workers fill 4 core(s) by PHP's own CPU (the rest of the box not measured yet); ceiling 12 at 2× headroom; plan allows 4 (now 0); limit: cpu") {
 		t.Errorf("the media pool's CPU shape is not in the recommendation:\n%s", file)
 	}
 	if n := strings.Count(file, "cpu per request"); n != 1 {

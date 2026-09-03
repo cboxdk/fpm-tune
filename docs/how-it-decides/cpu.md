@@ -72,18 +72,44 @@ Three filters decide which readings count:
   computes for well over 50ms; without the filter, a staging pool reads as
   cpu-bound from being watched.
 
+## What a busy worker costs the box
+
+php-fpm's figure is what a request costs inside its worker. It says nothing
+about the MySQL query the request waited on, the nginx that proxied it, or the
+kernel work outside the worker. How much that is depends on the host: on a
+four-core box serving a Laravel site with MySQL alongside it measured a tenth
+again; a host whose pages lean on the database will measure more. The plan
+should not guess at it, so it measures it.
+
+So each scrape also reads the box's total CPU time (`/proc/stat`, or php-fpm's
+cgroup where a CPU quota bounds it) and each pool's workers' own CPU time, and
+fits the one to the other over the natural spread of traffic: box busy cores ≈
+base + overhead × pool cores. The slope is how much of the box one PHP core
+drags along with it. It is fitted per pool, on the scrapes where that pool did
+most of the PHP work, so a quiet neighbour is not charged for a busy one, and
+it forgets slowly, so a pool redeployed last month is not described by the
+application it used to run.
+
+The fit is believed once it has thirty points and the pool's own CPU has varied
+by a fifth of a core across them. A week of ordinary traffic has peaks and
+troughs; no load test is needed. Until then the report prices a worker at PHP's
+own figure and says the rest of the box is not measured yet.
+
+A busy worker's cost to the box is its PHP share times that overhead: 850m in
+PHP at 1.1× is 935m on the box, and four cores fill at five such workers.
+
 ## What it reports
 
 ```
 CPU per request, as measured:
-  POOL  TYPICAL  P90  READINGS  PER WORKER  LIMIT   WHY
-  shop  70%      90%  1204      700m        cpu     cpu-bound; ~6 busy workers fill 4 core(s); plan allows 14 (now 40)
-  api   10%      20%  3310      100m        memory  i/o-bound; ~40 busy workers fill 4 core(s); plan allows 30 (now 30)
-  blog  -        -    7         -           -       too few readings yet
-  If every measured pool ran its ceiling busy at once: 31 core(s) now, 12800m at this
+  POOL  TYPICAL  P90  READINGS  PHP/WORKER  BOX/WORKER  LIMIT   WHY
+  shop  70%      90%  1204      700m        1470m       cpu     cpu-bound; ~3 busy workers fill 4 core(s) with MySQL, nginx and the kernel counted (2.1× PHP's own); ceiling 6 at 2× headroom; plan allows 14 (now 40)
+  api   10%      20%  3310      100m        -           memory  i/o-bound; ~40 busy workers fill 4 core(s) by PHP's own CPU (the rest of the box not measured yet); ceiling 80 at 2× headroom; plan allows 30 (now 30)
+  blog  -        -    7         -           -           -       too few readings yet
+  If every measured pool ran its ceiling busy at once: 61800m now, 23580m at this
   plan, against 4 core(s).
   Sizing uses memory. A cpu-limited pool only gets slower past the workers
-  that fill the CPU; pass --cpu to hold it there.
+  that fill the CPU; pass --cpu to hold it at the ceiling shown.
 ```
 
 `TYPICAL` is the median share; `P90` says how much heavier the heavy requests
@@ -92,24 +118,43 @@ is read as "at least this much", and arithmetic built on a share should err
 toward calling a pool less CPU-bound rather than more. The first bucket prints
 as `<5%`, because `0%` would claim a measurement of nothing.
 
-`PER WORKER` is the same median in millicores, the unit a container quota is
+`PHP/WORKER` is the same median in millicores, the unit a container quota is
 written in: a 70% request costs 700m of CPU for as long as a worker is busy
-with it. It is the CPU twin of the per-worker memory the rest of the plan is
-built on.
+with it. `BOX/WORKER` is what that worker costs the whole box once the fit
+above can say, and a dash until it can. Both are the CPU twin of the per-worker
+memory the rest of the plan is built on.
 
 The `WHY` column does the arithmetic. The host's CPU, in millicores, divided by
 the per-worker cost is how many of this pool's workers, all busy at once, fill
-it. On a four-core host a pool at 700m per worker fills the CPU with about six
-workers. Past that, concurrency stops buying throughput and starts costing
-latency. The plan's ceiling and the one in effect now are printed beside it,
-because the gap between them and the fill count is the whole reason to look: a
-pool allowed 14, running 40, that fills the CPU at 6 will queue under load
-however much RAM it has.
+it: the fill count. Past it, concurrency stops buying throughput and starts
+costing latency. The ceiling is the fill count with headroom on top (see
+below). The plan's ceiling and the one in effect now are printed beside it,
+because the gap between them and the ceiling is the whole reason to look: a
+pool allowed 14, running 40, that fills the CPU at 3 will queue under load
+however much RAM it has. A pool that has had requests queued while the box was
+full says so too; that is the direct observation that another worker would not
+have helped.
 
 `LIMIT` is that comparison made for you. `cpu` when the ceiling memory allows is
-above the fill count; `memory` when it is not. A pool with fewer than twenty
+above the CPU ceiling; `memory` when it is not. A pool with fewer than twenty
 readings gets no verdict, because twenty is a few minutes on a busy pool and a
 fair "not yet" on a quiet one.
+
+## Headroom
+
+The fill count is the throughput optimum and nothing more. Past it another
+worker serves no more requests; but a pool held at exactly it has no worker to
+spare for a request stuck on an upstream, and short requests wait behind long
+ones in the listen queue rather than sharing the CPU. So the ceiling is the fill
+count times a headroom, two by default (`--cpu-headroom`, or `cpu-headroom` in
+the service config), and never fewer workers than cores plus one. Operators
+who size cpu-bound PHP by hand land between one and a half and two workers per
+core; two is the generous end, chosen because the cost of a worker too many is
+a little load average and the cost of one too few is a stalled site.
+
+The headroom is the one figure on this page that is a judgement rather than a
+measurement, and the report prints it beside the ceiling so it is never
+mistaken for one.
 
 Every pool is measured against the whole host, so the fill counts do not add up
 across pools. The line under the table is where they do: what every measured
@@ -126,19 +171,19 @@ workers compute from one whose workers wait.
 Without it, the report is all this does. Sizing stays on memory, and the plan
 tells you where that is the wrong answer.
 
-With `--cpu`, the fill count is allowed to bind: a cpu-limited pool is held at
-the busy workers that fill the CPU instead of the number memory allows, and its
-row in the plan table says so:
+With `--cpu`, the ceiling is allowed to bind: a cpu-limited pool is held at
+the workers that fill the CPU plus headroom instead of the number memory
+allows, and its row in the plan table says so:
 
 ```
 POOL  MODE     NOW  PLAN  MEMORY    WHY
 shop  dynamic  40   6     600.0MiB  cpu-bound; 6 busy workers fill the CPU, so held there rather than the 14 memory allows, measured 100.0MiB/worker
 ```
 
-In the CPU table the same pool's WHY reads `cpu-bound; ~6 busy workers fill 4
-core(s); held there (now 40)`, and the line under the table becomes `--cpu is
-on: a cpu-limited pool is held at the busy workers that fill the CPU, and its
-row in the plan table says so.`
+In the CPU table the same pool's WHY ends `; ceiling 6 at 2× headroom; held
+there (now 40)`, and the line under the table becomes `--cpu is on: a
+cpu-limited pool is held at its ceiling, the workers that fill the CPU plus
+headroom, and its row in the plan table says so.`
 
 The cap has two limits.
 
@@ -166,7 +211,8 @@ sudo fpm-tune install-service --cpu    # the same for the installed service; re-
 ```
 
 Or `cpu = true` in the service config, which is what `install-service --cpu`
-writes. The measurement, the report, the
+writes. `--cpu-headroom 1.5` (or `cpu-headroom = 1.5`) tightens the ceiling;
+the floor of cores plus one holds either way. The measurement, the report, the
 `/metrics` series (`fpm_tune_pool_cpu_ratio`,
 `fpm_tune_pool_cpu_readings`, `fpm_tune_pool_cpu_fill_workers`,
 `fpm_tune_pool_cpu_limited`; see [Alerting](../operating/alerting.md)) and the

@@ -718,3 +718,22 @@ func TestAHostWithNoProcIsNotAFailedLookup(t *testing.T) {
 			got.LookupErr)
 	}
 }
+
+// TestProcStatBusyCountsWorkNotWaiting: the aggregate cpu line, everything but
+// idle and iowait, in USER_HZ ticks turned into microseconds.
+func TestProcStatBusyCountsWorkNotWaiting(t *testing.T) {
+	//                 user  nice system idle   iowait irq softirq steal guest gnice
+	line := "cpu  1000 10   500    90000  400    5   15      20    0     0"
+	got, ok := parseProcStatBusy(line)
+	if !ok {
+		t.Fatal("a well-formed cpu line was refused")
+	}
+	if want := int64(1000+10+500+5+15+20) * 10_000; got != want {
+		t.Errorf("busy = %d µs, want %d: user+nice+system+irq+softirq+steal", got, want)
+	}
+	for _, bad := range []string{"", "cpu0 1 2 3 4 5 6 7 8", "cpu 1 2 3", "cpu a b c d e f g h"} {
+		if _, ok := parseProcStatBusy(bad); ok {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}

@@ -124,11 +124,11 @@ func (r Result) Render(w io.Writer) error {
 		fmt.Fprintf(&b, "\nCPU per request, as measured:\n")
 
 		ct := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(ct, "  POOL\tTYPICAL\tP90\tREADINGS\tPER WORKER\tLIMIT\tWHY")
+		_, _ = fmt.Fprintln(ct, "  POOL\tTYPICAL\tP90\tREADINGS\tPHP/WORKER\tBOX/WORKER\tLIMIT\tWHY")
 		for _, c := range r.CPU {
-			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 				c.Name, c.Percent(c.P50), c.Percent(c.P90), c.Samples,
-				c.PerWorker(), cmp.Or(c.Limit, "-"), c.Why(r.HostCPU.Millicores))
+				c.PerWorker(), c.BoxPerWorker(), cmp.Or(c.Limit, "-"), c.Why(r.HostCPU.Millicores))
 		}
 		if err := ct.Flush(); err != nil {
 			return err
@@ -141,11 +141,11 @@ func (r Result) Render(w io.Writer) error {
 				budget.HumanMillicores(h.Millicores))
 		}
 		if r.CPUCeiling {
-			fmt.Fprintf(&b, "  --cpu is on: a cpu-limited pool is held at the busy workers that fill the\n"+
-				"  CPU, and its row in the plan table says so.\n")
+			fmt.Fprintf(&b, "  --cpu is on: a cpu-limited pool is held at its ceiling, the workers that\n"+
+				"  fill the CPU plus headroom, and its row in the plan table says so.\n")
 		} else {
 			fmt.Fprintf(&b, "  Sizing uses memory. A cpu-limited pool only gets slower past the workers\n"+
-				"  that fill the CPU; pass --cpu to hold it there.\n")
+				"  that fill the CPU; pass --cpu to hold it at the ceiling shown.\n")
 		}
 	}
 

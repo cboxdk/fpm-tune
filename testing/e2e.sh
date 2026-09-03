@@ -315,7 +315,7 @@ readings=$(cpu_readings www)
 [ "${readings:-0}" -gt 0 ] || fail "www served real requests but plan shows ${readings:-0} CPU readings:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
 readings=$(cpu_readings shop)
 [ "${readings:-0}" -eq 0 ] || fail "shop served only this tool's probes but plan shows $readings CPU readings"
-grep -q "pass --cpu to hold it there" "$ROOT/plan-cpu.out" \
+grep -q "pass --cpu to hold it at the ceiling shown" "$ROOT/plan-cpu.out" \
   || fail "plan did not say the ceiling is off:$(printf '\n')$(cat "$ROOT/plan-cpu.out")"
 # The rows are there on a run that learned nothing, against a state file that
 # has never seen these pools: the case where the section used to vanish.

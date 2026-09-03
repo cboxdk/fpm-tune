@@ -111,6 +111,10 @@ type Config struct {
 	// measurement is taken and published but sizes nothing. See plan.Input.
 	CPUCeiling bool
 
+	// CPUHeadroom is the factor on the fill count a pool is held at with
+	// CPUCeiling. Zero means plan.DefaultCPUHeadroom.
+	CPUHeadroom float64
+
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
@@ -401,6 +405,13 @@ func (l *Loop) round(ctx context.Context) {
 	// sample can miss — and it is absent on a bare VM, where subtree RSS is the
 	// only view. The peak is kept as a running high-water so an older kernel with
 	// no memory.peak still accumulates one, and a momentary dip cannot lower it.
+	// The box's CPU beside the pools' own, for what a busy worker costs the
+	// host as a whole. After the limits, which say how much CPU the box has.
+	if !l.cfg.NoLearn {
+		hostCPU, hostOK := budget.HostCPUOf(masterPID)
+		plan.LearnCPULoad(l.state, views, hostCPU, hostOK, limits.Millicores(), now)
+	}
+
 	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 	if hasCgroup {
 		if usage.CurrentBytes > l.cgroupPeak {
@@ -422,6 +433,7 @@ func (l *Loop) round(ctx context.Context) {
 		StateOptions:    l.cfg.StateOptions,
 		Workload:        l.cfg.Workload,
 		CPUCeiling:      l.cfg.CPUCeiling,
+		CPUHeadroom:     l.cfg.CPUHeadroom,
 		CgroupUsage:     usage,
 		HasCgroupUsage:  hasCgroup,
 	})

@@ -85,6 +85,11 @@ type Input struct {
 	// The --cpu flag.
 	CPUCeiling bool
 
+	// CPUHeadroom is the factor on the fill count a pool is held at with
+	// CPUCeiling, and the number the report shows either way. Zero means
+	// DefaultCPUHeadroom.
+	CPUHeadroom float64
+
 	// ReserveBytes overrides the profile's reserve when non-zero.
 	ReserveBytes int64
 
@@ -241,8 +246,13 @@ func Build(in Input) (Result, error) {
 	// old record.
 	ambiguous := ambiguousNames(in.Views)
 
-	// The CPU to divide by, read once for the round.
+	// The CPU to divide by, read once for the round, and the headroom the
+	// ceiling carries on top of the fill count.
 	hostCPU := in.Limits.Millicores()
+	headroom := in.CPUHeadroom
+	if headroom <= 0 {
+		headroom = DefaultCPUHeadroom
+	}
 
 	// The child cost is folded into each pool's per-worker cost, not held back as
 	// a host-wide reserve. That is what keeps it safe: the allocator sizes every
@@ -260,7 +270,7 @@ func Build(in Input) (Result, error) {
 		}
 
 		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name],
-			in.CPUCeiling, hostCPU)
+			in.CPUCeiling, hostCPU, headroom)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -316,7 +326,7 @@ func Build(in Input) (Result, error) {
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
 	result.Advice = adviceFor(in.Views, in.State, allocation)
-	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, allocation, ambiguous)
+	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, headroom, allocation, ambiguous)
 	result.CPUCeiling = in.CPUCeiling
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage
@@ -521,6 +531,7 @@ func poolFor(
 	ambiguous bool,
 	cpuCeiling bool,
 	hostMillicores int,
+	headroom float64,
 ) (allocate.Pool, bool) {
 	pool := allocate.Pool{
 		Name:               view.Name,
@@ -620,7 +631,7 @@ func poolFor(
 	// for a pool trusted enough to be cut on memory evidence — the same gate,
 	// because a cap below the configured ceiling IS a cut.
 	if cpuCeiling {
-		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)
+		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom)
 	}
 
 	// A pool whose configured ceiling could not be read is in the same position
@@ -787,6 +798,27 @@ func LearnFrom(st *state.State, views []observe.PoolView, at time.Time, opts sta
 		obs.MasterConfig = view.Target.ConfigPath
 		st.Learn(obs, opts)
 	}
+}
+
+// LearnCPULoad folds the box's CPU reading and the pools' own into the
+// box-cost fits. Skipped, and harmlessly so, where the box could not be read:
+// the plan then sizes on PHP's own figure and says the rest of the box is not
+// measured.
+func LearnCPULoad(st *state.State, views []observe.PoolView, host budget.HostCPU, ok bool, millicores int, at time.Time) {
+	if !ok || st == nil {
+		return
+	}
+	obs := make([]state.Observation, 0, len(views))
+	for _, view := range views {
+		if view.Err != nil {
+			continue
+		}
+		o := view.Observation()
+		o.At = at
+		o.MasterConfig = view.Target.ConfigPath
+		obs = append(obs, o)
+	}
+	st.LearnCPULoad(obs, state.CPULoadSample{BusyMicros: host.BusyMicros, Millicores: millicores, At: at})
 }
 
 // RecordCounters stores the ceiling counters for the NEXT round to compare

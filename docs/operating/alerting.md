@@ -68,13 +68,18 @@ when a host misbehaves at its busiest minute rather than on average.
 fpm_tune_pool_cpu_ratio{pool,estimate}   # p50, p90: CPU seconds over wall seconds per request; above 1 when its children computed alongside
 fpm_tune_pool_cpu_readings{pool}         # how many requests that is built on; under 20, no verdict
 fpm_tune_pool_cpu_fill_workers{pool}             # busy workers that fill the host's CPU
+fpm_tune_pool_cpu_box_millicores_per_worker{pool} # what a busy worker costs the whole box, once the fit can say
+fpm_tune_pool_cpu_ceiling{pool}                  # the workers --cpu holds the pool at: fill count plus headroom
+fpm_tune_pool_cpu_starved_rounds{pool}           # scrapes that found requests queued while the box was full
 fpm_tune_pool_cpu_limited{pool}                  # 1 when the pool hits the CPU before its memory ceiling
 ```
 
-`cpu_limited` at 1 means the pool's ceiling is above the workers that fill the
-CPU. Compare `cpu_fill_workers` with `workers_recommended`; the gap is what
-`--cpu` would take away, once the pool has been watched long enough to be cut
-on memory evidence. See [CPU per request](../how-it-decides/cpu.md).
+`cpu_limited` at 1 means the pool's memory ceiling is above its CPU ceiling.
+Compare `cpu_ceiling` with `workers_recommended`; the gap is what `--cpu` would
+take away, once the pool has been watched long enough to be cut on memory
+evidence. `cpu_starved_rounds` climbing is the same news from the other side:
+requests waited while the CPU was full. See
+[CPU per request](../how-it-decides/cpu.md).
 
 ## Two you should not see above zero
 

@@ -33,6 +33,9 @@ type Collectors struct {
 	cpuReadings        *prometheus.GaugeVec
 	cpuFillWorkers     *prometheus.GaugeVec
 	cpuLimited         *prometheus.GaugeVec
+	cpuBoxMillicores   *prometheus.GaugeVec
+	cpuCeiling         *prometheus.GaugeVec
+	cpuStarvedRounds   *prometheus.GaugeVec
 
 	poolsAmbiguous    prometheus.Gauge
 	budgetBytes       *prometheus.GaugeVec
@@ -88,6 +91,12 @@ func New() *Collectors {
 			"How many requests the CPU share is built on. Below the threshold (20 by default) the shape is not called and the share series are absent.", "pool"),
 		cpuFillWorkers: gaugeVec(reg, "fpm_tune_pool_cpu_fill_workers",
 			"How many of this pool's workers, all busy at once, fill the host's CPU: the host's millicores over the pool's median per-request CPU. Compare with fpm_tune_pool_workers_recommended: a ceiling above this number is workers that make every request slower rather than serving more. Every pool is measured against the whole host; the figures do not add up across pools. Absent until the shape is known, and for a pool whose median is under 5%, which has no fill count to give.", "pool"),
+		cpuBoxMillicores: gaugeVec(reg, "fpm_tune_pool_cpu_box_millicores_per_worker",
+			"What one busy worker of this pool costs the whole box in millicores, MySQL, nginx and the kernel included, from the fit of the box's CPU on the pool's own. Absent until the fit has seen enough spread; compare with the pool's own median share to see how much of a request is spent outside PHP.", "pool"),
+		cpuCeiling: gaugeVec(reg, "fpm_tune_pool_cpu_ceiling",
+			"The workers --cpu holds this pool at: the fill count with headroom on top, never below one per core plus one. Published whether or not --cpu is on.", "pool"),
+		cpuStarvedRounds: gaugeVec(reg, "fpm_tune_pool_cpu_starved_rounds",
+			"How many scrapes found this pool with requests queued while the box's CPU was full: the direct observation that another worker would not have helped.", "pool"),
 		cpuLimited: gaugeVec(reg, "fpm_tune_pool_cpu_limited",
 			"1 when the pool runs out of CPU before it reaches its memory-sized ceiling — the fill count is below what memory allows — or when --cpu held it at the fill count. 0 when memory is the limit. Absent until the shape is known.", "pool"),
 
@@ -202,6 +211,9 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 	c.cpuReadings.Reset()
 	c.cpuFillWorkers.Reset()
 	c.cpuLimited.Reset()
+	c.cpuBoxMillicores.Reset()
+	c.cpuCeiling.Reset()
+	c.cpuStarvedRounds.Reset()
 
 	// The CPU dimension, per pool. cpuOf already skipped ambiguous names, and
 	// the rows without a known shape publish only their reading count, so a
@@ -215,7 +227,12 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 		c.cpuShare.WithLabelValues(cp.Name, "p90").Set(cp.P90)
 		if cp.FillWorkers > 0 {
 			c.cpuFillWorkers.WithLabelValues(cp.Name).Set(float64(cp.FillWorkers))
+			c.cpuCeiling.WithLabelValues(cp.Name).Set(float64(cp.Ceiling))
 		}
+		if cp.BoxMeasured {
+			c.cpuBoxMillicores.WithLabelValues(cp.Name).Set(float64(cp.BoxMillicoresPerWorker))
+		}
+		c.cpuStarvedRounds.WithLabelValues(cp.Name).Set(float64(cp.StarvedRounds))
 		c.cpuLimited.WithLabelValues(cp.Name).Set(boolValue(cp.Limit == "cpu"))
 	}
 

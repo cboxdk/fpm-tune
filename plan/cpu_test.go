@@ -125,11 +125,11 @@ func TestTheReportSaysWhatEachPoolRunsOutOfFirst(t *testing.T) {
 	out := b.String()
 	for _, want := range []string{
 		"CPU per request, as measured:",
-		"cpu-bound; ~6 busy workers fill 4 core(s); plan allows",
+		"cpu-bound; ~6 busy workers fill 4 core(s) by PHP's own CPU (the rest of the box not measured yet); ceiling 12 at 2× headroom; plan allows",
 		"(now 40)",
 		"too few readings yet",
 		"against 4 core(s).",
-		"pass --cpu to hold it there",
+		"pass --cpu to hold it at the ceiling shown",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered plan lacks %q:\n%s", want, out)
@@ -186,14 +186,16 @@ func TestTheCPUCeilingBindsOnlyWhenAskedAndOnlyOnATrustedPool(t *testing.T) {
 		}
 	})
 
-	t.Run("asked, trusted: held at the fill count", func(t *testing.T) {
+	t.Run("asked, trusted: held at the ceiling", func(t *testing.T) {
 		res, err := Build(Input{Limits: limits, Views: []observe.PoolView{view}, State: trusted, CPUCeiling: true})
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Six busy workers fill four cores at 700m; the ceiling is twice that
+		// by default, room for I/O waits and bursts.
 		p := res.Plan.Pools[0]
-		if !p.CPUBound || p.MaxChildren != 6 {
-			t.Errorf("with --cpu a trusted cpu-bound pool should be held at 6: %+v", p)
+		if !p.CPUBound || p.MaxChildren != 12 {
+			t.Errorf("with --cpu a trusted cpu-bound pool should be held at 12 (6 fill × 2 headroom): %+v", p)
 		}
 		if !strings.Contains(p.Reason, "cpu-bound") {
 			t.Errorf("the plan row does not say why: %q", p.Reason)
@@ -240,7 +242,7 @@ func TestTheCPUCeilingBindsOnlyWhenAskedAndOnlyOnATrustedPool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p := res.Plan.Pools[0]; p.CPUBound || p.MaxChildren <= 6 {
+		if p := res.Plan.Pools[0]; p.CPUBound || p.MaxChildren <= 12 {
 			t.Errorf("an untrusted pool was held at the CPU ceiling: %+v", p)
 		}
 	})
@@ -310,14 +312,16 @@ func TestAShareAboveOneCoreRendersAsSuch(t *testing.T) {
 	}
 	res, err := Build(Input{
 		Limits: budget.Limits{MemoryBytes: 16 * gb, CPUs: 4, CPUMillicores: 4000, Source: budget.SourceMemInfo},
-		Views:  []observe.PoolView{{Name: "media", ProcessManager: "dynamic", CurrentMaxChildren: 10, MaxChildrenKnown: true, ObservedPeak: 3}},
+		Views:  []observe.PoolView{{Name: "media", ProcessManager: "dynamic", CurrentMaxChildren: 10, MaxChildrenKnown: true, ObservedPeak: 8}},
 		State:  st,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One busy worker fills the box; the ceiling is the floor of cores + 1,
+	// because a cap below the core count would be a fault, not a cap.
 	c := res.CPU[0]
-	if c.P50 != 8.0 || c.MillicoresPerWorker != 8000 || c.FillWorkers != 1 || c.Limit != "cpu" {
+	if c.P50 != 8.0 || c.MillicoresPerWorker != 8000 || c.FillWorkers != 1 || c.Ceiling != 5 || c.Limit != "cpu" {
 		t.Errorf("media = %+v", c)
 	}
 	if res.HostCPU.NeededNow != 10*8000 {
@@ -351,5 +355,75 @@ func TestAmbiguousNamesStayOutOfTheCPUReport(t *testing.T) {
 	}
 	if len(res.CPU) != 0 {
 		t.Errorf("CPU = %+v, want no rows for an ambiguous name", res.CPU)
+	}
+}
+
+// TestCPUCeilingCarriesHeadroomAndAFloor: the fill count is the throughput
+// optimum and nothing more, so the ceiling is the fill count times the
+// headroom, and never fewer workers than cores plus one.
+func TestCPUCeilingCarriesHeadroomAndAFloor(t *testing.T) {
+	for _, tc := range []struct {
+		fill, host int
+		headroom   float64
+		want       int
+	}{
+		{0, 4000, 2, 0},   // no fill, no ceiling
+		{6, 4000, 2, 12},  // cbox-web by PHP's own figure
+		{3, 4000, 2, 6},   // the same with the box measured
+		{3, 4000, 1.5, 5}, // 4.5 rounded up
+		{1, 4000, 2, 5},   // floor: cores + 1
+		{2, 500, 2, 4},    // half a core: floor is 1 + 1, headroom gives 4
+		{6, 4000, 0.5, 6}, // headroom below one is one
+	} {
+		if got := cpuCeiling(tc.fill, tc.host, tc.headroom); got != tc.want {
+			t.Errorf("cpuCeiling(%d, %dm, %.2g) = %d, want %d", tc.fill, tc.host, tc.headroom, got, tc.want)
+		}
+	}
+}
+
+// TestTheBoxCostChangesTheFillCount: with the box-cost fit believed, a busy
+// worker is priced at what the whole box spends for it, not what PHP alone
+// does. cbox-web: 700m in PHP, 2.1× that on the box, so three busy workers
+// fill four cores rather than six, and the report says which figure it used.
+func TestTheBoxCostChangesTheFillCount(t *testing.T) {
+	st := state.New()
+	base := time.Now()
+	for i := 0; i < 25; i++ {
+		st.Learn(cpuBusy("shop", 0.72, i, base.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+	}
+	ps := st.Pools["shop"]
+	for i := 0; i < 100; i++ {
+		x := 2 * float64(i%5) / 4
+		ps.BoxCost.Add(x, 0.2+2.1*x)
+	}
+
+	view := observe.PoolView{Name: "shop", ProcessManager: "dynamic", CurrentMaxChildren: 22, MaxChildrenKnown: true, ObservedPeak: 17}
+	limits := budget.Limits{MemoryBytes: 8 * gb, CPUs: 4, CPUMillicores: 4000, Source: budget.SourceMemInfo}
+
+	res, err := Build(Input{Limits: limits, Views: []observe.PoolView{view}, State: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.CPU[0]
+	if !c.BoxMeasured || c.BoxMillicoresPerWorker != 1470 || c.FillWorkers != 3 || c.Ceiling != 6 {
+		t.Errorf("shop = %+v, want the box measured at 1470m per worker, 3 fill, ceiling 6", c)
+	}
+	if !strings.Contains(c.Why(4000), "with MySQL, nginx and the kernel counted (2.1× PHP's own); ceiling 6 at 2× headroom") {
+		t.Errorf("Why = %q", c.Why(4000))
+	}
+	if res.HostCPU.NeededNow != 22*1470 {
+		t.Errorf("NeededNow = %d, want 22 × 1470m: the host line prices workers at the box cost", res.HostCPU.NeededNow)
+	}
+
+	// The headroom is the operator's: at 1.5 the ceiling is 5, the floor.
+	res, err = Build(Input{Limits: limits, Views: []observe.PoolView{view}, State: st, CPUHeadroom: 1.5, CPUCeiling: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := res.Plan.Pools[0]; !p.CPUBound || p.MaxChildren != 5 {
+		t.Errorf("at 1.5× headroom the pool should be held at 5 (3 × 1.5 = 4.5, and never below cores + 1): %+v", p)
+	}
+	if c := res.CPU[0]; !strings.Contains(c.Why(4000), "at 1.5× headroom") {
+		t.Errorf("Why = %q", c.Why(4000))
 	}
 }

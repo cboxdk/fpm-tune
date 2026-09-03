@@ -129,7 +129,7 @@ func TestBaselineIsPublishedWithItsConfidence(t *testing.T) {
 func TestTheCPUDimensionIsPublished(t *testing.T) {
 	r := result(poolPlan("shop", 12, false), poolPlan("blog", 4, false))
 	r.CPU = []plan.PoolCPU{
-		{Name: "shop", P50: 0.7, P90: 0.75, Samples: 50, Shape: "cpu-bound", MillicoresPerWorker: 700, FillWorkers: 6, Limit: "cpu"},
+		{Name: "shop", P50: 0.7, P90: 0.75, Samples: 50, Shape: "cpu-bound", MillicoresPerWorker: 700, BoxMillicoresPerWorker: 1470, BoxMeasured: true, Overhead: 2.1, FillWorkers: 3, Ceiling: 6, Limit: "cpu", StarvedRounds: 12},
 		{Name: "blog", Samples: 3},
 	}
 
@@ -137,12 +137,15 @@ func TestTheCPUDimensionIsPublished(t *testing.T) {
 	c.Update(r, state.New(), state.Options{}, 1)
 
 	for want, value := range map[string]string{
-		`fpm_tune_pool_cpu_ratio{estimate="p50",pool="shop"}`: "0.7",
-		`fpm_tune_pool_cpu_ratio{estimate="p90",pool="shop"}`: "0.75",
-		`fpm_tune_pool_cpu_readings{pool="shop"}`:             "50",
-		`fpm_tune_pool_cpu_fill_workers{pool="shop"}`:         "6",
-		`fpm_tune_pool_cpu_limited{pool="shop"}`:              "1",
-		`fpm_tune_pool_cpu_readings{pool="blog"}`:             "3",
+		`fpm_tune_pool_cpu_ratio{estimate="p50",pool="shop"}`:      "0.7",
+		`fpm_tune_pool_cpu_ratio{estimate="p90",pool="shop"}`:      "0.75",
+		`fpm_tune_pool_cpu_readings{pool="shop"}`:                  "50",
+		`fpm_tune_pool_cpu_fill_workers{pool="shop"}`:              "3",
+		`fpm_tune_pool_cpu_ceiling{pool="shop"}`:                   "6",
+		`fpm_tune_pool_cpu_box_millicores_per_worker{pool="shop"}`: "1470",
+		`fpm_tune_pool_cpu_starved_rounds{pool="shop"}`:            "12",
+		`fpm_tune_pool_cpu_limited{pool="shop"}`:                   "1",
+		`fpm_tune_pool_cpu_readings{pool="blog"}`:                  "3",
 	} {
 		if !exposes(t, c, want+" "+value) {
 			t.Errorf("%s is not published as %s", want, value)
