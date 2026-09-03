@@ -111,8 +111,10 @@ func TestKeysMoveTheCursorAndTheWindow(t *testing.T) {
 	}
 	press("1")
 	from, to, rounds := m.window()
-	if m.span != 0 || to.Sub(from) != time.Hour || len(rounds) != 40 {
-		t.Errorf("after 1: span %d, axis %s, %d rounds (the axis is the hour even with 20 minutes of data)", m.span, to.Sub(from), len(rounds))
+	// Twenty minutes of data on an hour's span: the axis is the twenty
+	// minutes, from the oldest round, with no empty hour to its left.
+	if m.span != 0 || to.Sub(from) != 39*30*time.Second || len(rounds) != 40 {
+		t.Errorf("after 1: span %d, axis %s, %d rounds", m.span, to.Sub(from), len(rounds))
 	}
 	press("3")
 	from, to, rounds = m.window()

@@ -86,7 +86,7 @@ func TestASampleCarriesTheRound(t *testing.T) {
 	result := plan.Result{
 		Views: []observe.PoolView{{Name: "www", ActiveNow: 7, QueueDepth: 3, CurrentMaxChildren: 22}},
 		Plan: allocate.Plan{Pools: []allocate.PoolPlan{
-			{Name: "www", MaxChildren: 10, WorkerBytes: 35 << 20, DemandUnmet: true, CPUBound: true},
+			{Name: "www", MaxChildren: 10, MemoryWant: 27, WorkerBytes: 35 << 20, DemandUnmet: true, CPUBound: true},
 		}},
 		CPU: []plan.PoolCPU{{Name: "www", P50: 0.85, Samples: 40, FillWorkers: 5, Ceiling: 10, Limit: "cpu"}},
 	}
@@ -96,7 +96,7 @@ func TestASampleCarriesTheRound(t *testing.T) {
 	}
 	p := s.Pools[0]
 	want := PoolSample{Pool: "www", Active: 7, Queue: 3, Configured: 22, Recommended: 10, DemandUnmet: true,
-		WorkerBytes: 35 << 20, CPURatioP50: 0.85, CPUReadings: 40, CPUFill: 5, CPUCeiling: 10, CPULimited: true, CPUBound: true}
+		WorkerBytes: 35 << 20, MemoryCeiling: 27, CPURatioP50: 0.85, CPUReadings: 40, CPUFill: 5, CPUCeiling: 10, CPULimited: true, CPUBound: true}
 	if p != want {
 		t.Errorf("pool sample = %+v, want %+v", p, want)
 	}
@@ -126,5 +126,43 @@ func TestHostBusyRatioIsADifference(t *testing.T) {
 	}
 	if _, ok := l.hostBusyRatio(budget.HostCPU{}, false, 4000); ok {
 		t.Error("an unreadable box gave a ratio")
+	}
+}
+
+// TestAChangeTheDaemonDidNotMakeIsAnEvent: a ceiling that moved between two
+// rounds is recorded as changed outside, unless it is the daemon's own
+// resize showing up the round after.
+func TestAChangeTheDaemonDidNotMakeIsAnEvent(t *testing.T) {
+	l := &Loop{history: newHistory(10, 30*time.Second)}
+	t0 := time.Unix(1_700_000_000, 0)
+	views := func(www, shop int) []observe.PoolView {
+		return []observe.PoolView{
+			{Name: "www", CurrentMaxChildren: www, MaxChildrenKnown: true},
+			{Name: "shop", CurrentMaxChildren: shop, MaxChildrenKnown: true},
+		}
+	}
+	l.noteExternalChanges(views(10, 20), t0)
+	l.noteExternalChanges(views(10, 20), t0.Add(30*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 0 {
+		t.Fatalf("nothing moved, yet %v", events)
+	}
+
+	// Someone ran fpm-tune apply beside the daemon: www 10 → 8.
+	l.noteExternalChanges(views(8, 20), t0.Add(60*time.Second))
+	_, events := l.history.snapshot(0)
+	if len(events) != 1 || events[0].Kind != EventChanged || events[0].Pool != "www" || events[0].From != 10 || events[0].To != 8 {
+		t.Fatalf("events = %+v, want one changed www 10 → 8", events)
+	}
+
+	// The daemon's own resize of shop to 25 shows up next round, and is not
+	// an outside change; a further move it did not make is.
+	l.expected = map[string]int{"shop": 25}
+	l.noteExternalChanges(views(8, 25), t0.Add(90*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 1 {
+		t.Errorf("the daemon's own resize was recorded as an outside change: %+v", events)
+	}
+	l.noteExternalChanges(views(8, 30), t0.Add(120*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 2 || events[1].From != 25 || events[1].To != 30 {
+		t.Errorf("a later outside change was missed: %+v", events)
 	}
 }

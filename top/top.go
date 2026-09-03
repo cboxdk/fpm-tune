@@ -60,6 +60,7 @@ var (
 	cBusy   = lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"}
 	cPlan   = lipgloss.AdaptiveColor{Light: "#7C3AED", Dark: "#C4B5FD"}
 	cNow    = lipgloss.AdaptiveColor{Light: "#9CA3AF", Dark: "#6B7280"}
+	cMemory = lipgloss.AdaptiveColor{Light: "#0F766E", Dark: "#5EEAD4"}
 
 	sTitle  = lipgloss.NewStyle().Bold(true).Foreground(cText)
 	sAccent = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
@@ -71,6 +72,7 @@ var (
 	sBusy   = lipgloss.NewStyle().Foreground(cBusy)
 	sPlan   = lipgloss.NewStyle().Foreground(cPlan)
 	sNow    = lipgloss.NewStyle().Foreground(cNow)
+	sMemory = lipgloss.NewStyle().Foreground(cMemory)
 	sBadge  = lipgloss.NewStyle().Padding(0, 1).Bold(true)
 	sPanel  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cFaint).Padding(0, 1)
 	sHeader = lipgloss.NewStyle().Foreground(cDim).Bold(true)
@@ -225,11 +227,10 @@ func poolNames(resp *serve.HistoryResponse) []string {
 	return names
 }
 
-// window is the time range the charts show: the chosen span back from the
-// newest round, or everything when the span is "all". The axis is the span
-// even when the data is shorter, so pressing 1, 2 or 3 visibly changes the
-// chart, and a daemon started four minutes ago draws four minutes at the
-// right of an hour.
+// window is the time range the charts show: from the oldest round the daemon
+// holds, or the chosen span back from the newest, whichever is shorter. So a
+// young daemon's chart grows from a few minutes up to the span and then
+// scrolls, with no empty axis to the left.
 func (m model) window() (from, to time.Time, rounds []serve.HistorySample) {
 	all := m.resp.Rounds
 	if len(all) == 0 {
@@ -239,15 +240,15 @@ func (m model) window() (from, to time.Time, rounds []serve.HistorySample) {
 	}
 	to = all[len(all)-1].At
 	d := spans[m.span].d
-	if d == 0 {
-		from = all[0].At
-		if to.Sub(from) < 2*time.Minute {
-			from = to.Add(-2 * time.Minute)
-		}
-
-		return from, to, all
+	from = all[0].At
+	if d > 0 && to.Sub(from) > d {
+		from = to.Add(-d)
 	}
-	from = to.Add(-d)
+	// Never an axis shorter than two minutes: a daemon started a moment ago
+	// still needs somewhere to draw.
+	if to.Sub(from) < 2*time.Minute {
+		from = to.Add(-2 * time.Minute)
+	}
 	i := sort.Search(len(all), func(i int) bool { return !all[i].At.Before(from) })
 
 	return from, to, all[i:]
@@ -546,7 +547,7 @@ func (m model) detailPanel(width, height int) string {
 			if p.Pool != name {
 				continue
 			}
-			for _, v := range []int{p.Active, p.Configured, p.Recommended, p.CPUCeiling} {
+			for _, v := range []int{p.Active, p.Configured, p.Recommended, p.CPUCeiling, p.MemoryCeiling} {
 				if float64(v) > yMax {
 					yMax = float64(v)
 				}
@@ -560,6 +561,9 @@ func (m model) detailPanel(width, height int) string {
 		sNow.Render("●") + " now " + fmt.Sprintf("%d", last.Configured),
 		sPlan.Render("●") + " plan " + fmt.Sprintf("%d", last.Recommended),
 	}
+	if last.MemoryCeiling > 0 {
+		legend = append(legend, sMemory.Render("●")+" memory ceiling "+fmt.Sprintf("%d", last.MemoryCeiling))
+	}
 	if last.CPUCeiling > 0 {
 		legend = append(legend, sWarn.Render("●")+" cpu ceiling "+fmt.Sprintf("%d", last.CPUCeiling))
 	}
@@ -571,6 +575,7 @@ func (m model) detailPanel(width, height int) string {
 	c.SetDataSetStyle("busy", sBusy)
 	c.SetDataSetStyle("now", sNow)
 	c.SetDataSetStyle("plan", sPlan)
+	c.SetDataSetStyle("memory", sMemory)
 	c.SetDataSetStyle("cap", sWarn)
 	for _, r := range rounds {
 		for _, p := range r.Pools {
@@ -580,6 +585,9 @@ func (m model) detailPanel(width, height int) string {
 			c.PushDataSet("busy", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Active)})
 			c.PushDataSet("now", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Configured)})
 			c.PushDataSet("plan", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Recommended)})
+			if p.MemoryCeiling > 0 {
+				c.PushDataSet("memory", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.MemoryCeiling)})
+			}
 			if p.CPUCeiling > 0 {
 				c.PushDataSet("cap", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.CPUCeiling)})
 			}
@@ -674,6 +682,8 @@ func (m model) eventsPanel(width int) string {
 				arrow = sWarn.Render("↓")
 			}
 			what = fmt.Sprintf("%s %s %d → %d", arrow, sAccent.Render(e.Pool), e.From, e.To)
+		case serve.EventChanged:
+			what = fmt.Sprintf("%s %s %d → %d", sDim.Render("⇄"), sAccent.Render(e.Pool), e.From, e.To)
 		case serve.EventRepaired:
 			what = sOK.Render("repaired the host")
 		case serve.EventRolledBack:

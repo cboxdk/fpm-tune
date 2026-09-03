@@ -234,6 +234,11 @@ type PoolPlan struct {
 	// exceeds MaxChildren, the pool is being held back.
 	Want int
 
+	// MemoryWant is Want before the measured CPU ceiling was applied: the
+	// number memory alone would have proposed. Equal to Want when no CPU
+	// ceiling bound.
+	MemoryWant int
+
 	// DemandUnmet reports that the pool wanted more than it was given. On its
 	// own this is routine — it means the next run may rebalance toward it. Read
 	// together with Plan.CapacityExhausted it is the difference between "we can
@@ -434,6 +439,7 @@ func Compute(budget Budget, pools []Pool, opts Options) (Plan, error) {
 			WorkerBytes: p.WorkerBytes,
 			ChildBytes:  p.ChildBytes,
 			Want:        wants[i],
+			MemoryWant:  memoryWants[i],
 			DemandUnmet: granted[i] < wants[i],
 			CPUBound:    bound,
 			Measured:    p.Measured,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
 )
 
@@ -55,6 +56,10 @@ type PoolSample struct {
 	// WorkerBytes is the per-worker cost the plan sized on.
 	WorkerBytes int64 `json:"worker_bytes"`
 
+	// MemoryCeiling is what memory alone would have proposed, before any
+	// CPU ceiling: the other bound the plan is the minimum of.
+	MemoryCeiling int `json:"memory_ceiling"`
+
 	CPURatioP50 float64 `json:"cpu_ratio_p50"`
 	CPUReadings int64   `json:"cpu_readings"`
 	CPUFill     int     `json:"cpu_fill_workers"`
@@ -82,6 +87,12 @@ const (
 	EventRolledBack     = "rolled_back"
 	EventRollbackFailed = "rollback_failed"
 	EventRepaired       = "repaired"
+
+	// EventChanged is a pool whose configured ceiling moved between two
+	// rounds without this daemon having moved it: a hand edit, a deploy, or
+	// an fpm-tune apply run beside the daemon. Recorded so the history shows
+	// every change to the host, not only the daemon's own.
+	EventChanged = "changed"
 )
 
 // historyEvents is how many events the ring keeps. A daemon that reloads
@@ -240,6 +251,38 @@ func (h *history) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// noteExternalChanges compares each pool's configured ceiling with the
+// previous round's and records the ones that moved without this daemon
+// moving them. The daemon's own resizes are expected on the following round
+// and are not events twice.
+func (l *Loop) noteExternalChanges(views []observe.PoolView, now time.Time) {
+	if l.lastConfigured == nil {
+		l.lastConfigured = map[string]int{}
+	}
+	if l.expected == nil {
+		l.expected = map[string]int{}
+	}
+	for _, v := range views {
+		if v.Err != nil || !v.MaxChildrenKnown {
+			continue
+		}
+		prev, seen := l.lastConfigured[v.Name]
+		l.lastConfigured[v.Name] = v.CurrentMaxChildren
+		if !seen || prev == v.CurrentMaxChildren {
+			continue
+		}
+		if want, ours := l.expected[v.Name]; ours && want == v.CurrentMaxChildren {
+			delete(l.expected, v.Name)
+
+			continue
+		}
+		l.history.event(HistoryEvent{
+			At: now, Kind: EventChanged, Pool: v.Name, From: prev, To: v.CurrentMaxChildren,
+			Detail: "configured outside this daemon: a hand edit, a deploy, or fpm-tune apply",
+		})
+	}
+}
+
 // hostBusyRatio turns two consecutive box CPU readings into how busy the box
 // was in between, as a fraction of the CPU it has. Unknown on the first round,
 // where the box could not be read, across a hole longer than five minutes, and
@@ -286,20 +329,21 @@ func historySampleOf(result plan.Result, at time.Time, hostBusy float64, hostBus
 		o := observed[p.Name]
 		c := cpu[p.Name]
 		sample.Pools = append(sample.Pools, PoolSample{
-			Pool:        p.Name,
-			Active:      o.active,
-			Queue:       o.queue,
-			Configured:  o.configured,
-			Recommended: p.MaxChildren,
-			DemandUnmet: p.DemandUnmet,
-			Unknown:     p.Unknown,
-			WorkerBytes: p.WorkerBytes,
-			CPURatioP50: c.P50,
-			CPUReadings: c.Samples,
-			CPUFill:     c.FillWorkers,
-			CPUCeiling:  c.Ceiling,
-			CPULimited:  c.Limit == "cpu",
-			CPUBound:    p.CPUBound,
+			Pool:          p.Name,
+			Active:        o.active,
+			Queue:         o.queue,
+			Configured:    o.configured,
+			Recommended:   p.MaxChildren,
+			DemandUnmet:   p.DemandUnmet,
+			Unknown:       p.Unknown,
+			WorkerBytes:   p.WorkerBytes,
+			MemoryCeiling: p.MemoryWant,
+			CPURatioP50:   c.P50,
+			CPUReadings:   c.Samples,
+			CPUFill:       c.FillWorkers,
+			CPUCeiling:    c.Ceiling,
+			CPULimited:    c.Limit == "cpu",
+			CPUBound:      p.CPUBound,
 		})
 	}
 

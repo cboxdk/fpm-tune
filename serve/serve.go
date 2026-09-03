@@ -190,6 +190,13 @@ type Loop struct {
 	lastHostCPU budget.HostCPU
 	hasHostCPU  bool
 
+	// lastConfigured is each pool's configured ceiling as of the previous
+	// round, and expected the ceilings this daemon's own resizes will show
+	// next round, so a change it did not make is an event and one it did is
+	// not counted twice. See noteExternalChanges.
+	lastConfigured map[string]int
+	expected       map[string]int
+
 	// lastRec is the recommendation last LOGGED for each pool — the value and when —
 	// so it is reported the first time it is seen, whenever it moves, and, as a sign
 	// of life, again after HeartbeatEvery even when it has not.
@@ -481,6 +488,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
+	l.noteExternalChanges(views, now)
 	l.history.record(historySampleOf(result, now, hostBusy, hostBusyKnown))
 	l.logPlan(result, now)
 	l.writeRecommendation(result, now)
@@ -799,6 +807,10 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		for _, o := range changed {
 			l.log.Info("Pool resized", "pool", o.Pool, "from", o.From, "to", o.To, "reason", o.Reason)
 			l.history.event(HistoryEvent{At: now, Kind: EventResized, Pool: o.Pool, From: o.From, To: o.To, Detail: o.Reason})
+			if l.expected == nil {
+				l.expected = map[string]int{}
+			}
+			l.expected[o.Pool] = o.To
 		}
 		// The applied values are the hysteresis baseline for the next round, so
 		// they go to disk now rather than waiting for the save interval.
