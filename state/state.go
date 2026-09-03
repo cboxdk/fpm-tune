@@ -73,6 +73,12 @@ type WorkerSample struct {
 	// call, or the opcache probe. They are traffic to php-fpm and not to the
 	// site, and are kept out of the CPU distribution.
 	OwnRequest bool
+
+	// CPUTicks is the worker's cumulative CPU time, own plus reaped children,
+	// in USER_HZ ticks (a hundredth of a second) from /proc/<pid>/stat. The
+	// difference between two scrapes is what the pool spent; see cpuload.go.
+	// Zero where it could not be read.
+	CPUTicks int64
 }
 
 // Observation is one scrape of one pool.
@@ -91,6 +97,11 @@ type Observation struct {
 	ActiveNow int
 	Accepted  int64
 	At        time.Time
+
+	// QueueDepth is the listen queue at the scrape: requests waiting for a
+	// worker. Read beside the box's CPU, it is the direct observation that
+	// another worker would, or would not, have helped.
+	QueueDepth int64
 	// MasterConfig is the php-fpm configuration this pool belongs to. Optional:
 	// it exists so a daemon scoped to one master does not forget another's pools
 	// out of a shared state file.
@@ -228,6 +239,14 @@ type PoolState struct {
 	CPUSamples   int64         `json:"cpu_samples,omitempty"`
 	CPUSeen      map[int]int64 `json:"cpu_seen,omitempty"`
 
+	// CPUTicksSeen is each live worker's cumulative CPU counter as of the last
+	// scrape, BoxCost the fit of the box's busy cores on this pool's own, and
+	// CPUStarvedRounds how many scrapes found requests queued while the box
+	// was full. See cpuload.go.
+	CPUTicksSeen     map[int]int64 `json:"cpu_ticks_seen,omitempty"`
+	BoxCost          Fit           `json:"box_cost,omitempty"`
+	CPUStarvedRounds int           `json:"cpu_starved_rounds,omitempty"`
+
 	// MasterConfig is the php-fpm configuration this pool was learned from.
 	//
 	// A state file can be shared by two daemons, each scoped to one master, and
@@ -276,6 +295,10 @@ type State struct {
 	// for the caller to log. Not persisted: it describes this load, not the
 	// state.
 	Notices []string `json:"-"`
+
+	// HostCPU is the box's cumulative CPU time as of the last scrape, so the
+	// next one can take the difference. See cpuload.go.
+	HostCPU *HostCPUSeen `json:"host_cpu,omitempty"`
 
 	Version int                   `json:"version"`
 	Pools   map[string]*PoolState `json:"pools"`
@@ -358,6 +381,13 @@ type Options struct {
 	// MinCPUReadings is how many requests a pool's CPU histogram needs before
 	// its shape is called anything, or allowed to cap the pool. See cpu.go.
 	MinCPUReadings int
+
+	// MinBoxCostSamples and MinBoxCostSpread gate the box-cost fit: how many
+	// scrapes it needs, and how much the pool's own CPU has to have varied
+	// across them (in cores) before its slope is believed. A fit through points
+	// that all sit at the same load has no slope to give. See cpuload.go.
+	MinBoxCostSamples int
+	MinBoxCostSpread  float64
 
 	// AlphaUp is the weight given to an observation LARGER than the current
 	// estimate. Per sample, and deliberately high: a worker costing more than
@@ -494,6 +524,12 @@ func (o Options) Defaults() Options {
 	}
 	if o.MinCPUReadings <= 0 {
 		o.MinCPUReadings = 20
+	}
+	if o.MinBoxCostSamples <= 0 {
+		o.MinBoxCostSamples = 30
+	}
+	if o.MinBoxCostSpread <= 0 {
+		o.MinBoxCostSpread = 0.2
 	}
 
 	return o

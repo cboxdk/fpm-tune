@@ -111,6 +111,7 @@ type commonFlags struct {
 	workload    *string
 	sizing      *string
 	cpu         *bool
+	cpuHeadroom *float64
 	timeout     *time.Duration
 	verbose     *bool
 	noLearn     *bool
@@ -150,6 +151,9 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 			"busy workers that fill the CPU instead of the number memory allows. Without it the CPU shape is "+
 			"still measured and reported, and the plan says which of memory and CPU each pool runs out of "+
 			"first, but sizes on memory alone"),
+		cpuHeadroom: fs.Float64("cpu-headroom", plan.DefaultCPUHeadroom, "with -cpu, the factor on the workers that fill the CPU a "+
+			"pool is held at: room for requests waiting on I/O and for bursts past the point where the CPU "+
+			"is full. Never below one worker per core plus one"),
 		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
 		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
@@ -300,6 +304,10 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	now := time.Now()
 	if !*c.noLearn {
 		plan.LearnFrom(st, views, now, stateOpts)
+		// The box's CPU beside the pools' own, for what a busy worker costs the
+		// host as a whole.
+		hostCPU, hostOK := budget.HostCPUOf(masterPID)
+		plan.LearnCPULoad(st, views, hostCPU, hostOK, limits.Millicores(), now)
 	}
 
 	result, buildErr := plan.Build(plan.Input{
@@ -312,6 +320,7 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		StateOptions:    stateOpts,
 		Workload:        resolveWorkload(*c.workload, log),
 		CPUCeiling:      *c.cpu,
+		CPUHeadroom:     *c.cpuHeadroom,
 		CgroupUsage:     usage,
 		HasCgroupUsage:  hasCgroup,
 	})
@@ -1097,6 +1106,7 @@ func runServe(args []string) error {
 		ReserveFraction: reserveFraction,
 		Workload:        resolveWorkload(*c.workload, log),
 		CPUCeiling:      *c.cpu,
+		CPUHeadroom:     *c.cpuHeadroom,
 		ScrapeTimeout:   *c.timeout,
 		HeartbeatEvery:  *heartbeat,
 		ApplyOptions: apply.Options{

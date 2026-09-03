@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -91,10 +92,11 @@ type PoolView struct {
 // Observation converts the view into something the learner can fold in.
 func (v PoolView) Observation() state.Observation {
 	return state.Observation{
-		Pool:      v.Name,
-		Workers:   v.Workers,
-		ActiveNow: v.ActiveNow,
-		Accepted:  v.Accepted,
+		Pool:       v.Name,
+		Workers:    v.Workers,
+		ActiveNow:  v.ActiveNow,
+		Accepted:   v.Accepted,
+		QueueDepth: v.QueueDepth,
 	}
 }
 
@@ -327,12 +329,55 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 				LastRequestCPU:    proc.LastRequestCPU,
 				LastRequestMicros: proc.RequestDuration,
 				OwnRequest:        ownRequest(proc.RequestURI, target.StatusPath),
+				CPUTicks:          workerCPUTicks(proc.PID),
 			})
 		}
 
 	}
 
 	return view
+}
+
+// workerCPUTicks is a worker's cumulative CPU time from /proc/<pid>/stat:
+// utime, stime and the reaped children's cutime and cstime, in USER_HZ ticks.
+// Zero where /proc is not there (macOS) or the process is gone. One small read
+// per worker, beside the memory reads the scrape already does.
+func workerCPUTicks(pid int) int64 {
+	if pid <= 0 {
+		return 0
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+
+	return parseStatCPUTicks(string(data))
+}
+
+// parseStatCPUTicks pulls the four CPU fields out of a /proc/<pid>/stat line.
+// The command name is in parentheses and may contain spaces, so the fields are
+// counted from the last ')' rather than the first space.
+func parseStatCPUTicks(stat string) int64 {
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 {
+		return 0
+	}
+	fields := strings.Fields(stat[i+1:])
+	// After the ')': state(0) ppid pgrp session tty tpgid flags minflt cminflt
+	// majflt cmajflt utime(11) stime(12) cutime(13) cstime(14).
+	if len(fields) < 15 {
+		return 0
+	}
+	var ticks int64
+	for _, f := range fields[11:15] {
+		n, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			return 0
+		}
+		ticks += n
+	}
+
+	return ticks
 }
 
 // opcacheProbePrefix is the script the phpfpm library runs through a worker

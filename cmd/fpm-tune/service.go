@@ -403,6 +403,11 @@ metrics = %s
 # CPU each pool runs out of first) but sizes nothing.
 %s
 
+# With cpu on, the factor on the workers that fill the CPU a pool is held at:
+# room for requests waiting on I/O and for bursts. Never below one per core
+# plus one.
+# cpu-headroom = 2
+
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
 # drop-in-dir =

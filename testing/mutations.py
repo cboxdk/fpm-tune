@@ -463,10 +463,25 @@ MUTATIONS = [
      "plan/cpu.go",
      "	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {",
      "	if ps == nil || !ps.CPUShapeKnown(opts) {"),
+    # The box-cost fit stands on three guards: the box is attributed to the
+    # pool that did the work, the slope is believed only with spread, and the
+    # ceiling never drops below cores plus one.
+    ("state: the box's CPU is charged to every pool, busy or not",
+     "state/cpuload.go",
+     "		case cores[i] >= dominantShare*total:",
+     "		case true:"),
+    ("state: the box-cost slope is believed without spread",
+     "state/cpuload.go",
+     "	if !ok || ps.BoxCost.N < float64(opts.MinBoxCostSamples) || sdX < opts.MinBoxCostSpread {",
+     "	if !ok || ps.BoxCost.N < float64(opts.MinBoxCostSamples) {"),
+    ("plan: the CPU ceiling can drop below the core count",
+     "plan/cpu.go",
+     "	if floor := (hostMillicores+999)/1000 + 1; ceiling < floor {",
+     "	if floor := 1; ceiling < floor {"),
     ("plan: the CPU ceiling binds without --cpu",
      "plan/plan.go",
-     "	if cpuCeiling {\n		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)\n	}\n",
-     "	pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)\n"),
+     "	if cpuCeiling {\n		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom)\n	}\n",
+     "	pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom)\n"),
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")
