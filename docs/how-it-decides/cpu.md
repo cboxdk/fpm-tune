@@ -160,11 +160,13 @@ first and the ceiling is a separate decision.
 ## Turning the ceiling on
 
 ```bash
-fpm-tune plan --cpu          # see what the cap would do
-fpm-tune serve --cpu         # let it bind, in advisory or apply mode as usual
+fpm-tune plan --cpu                    # see what the cap would do
+fpm-tune serve --cpu                   # let it bind, in advisory or apply mode as usual
+sudo fpm-tune install-service --cpu    # the same for the installed service; re-run to switch
 ```
 
-Or `cpu = true` in the service config. The measurement, the report, the
+Or `cpu = true` in the service config, which is what `install-service --cpu`
+writes. The measurement, the report, the
 `/metrics` series (`fpm_tune_pool_cpu_ratio`,
 `fpm_tune_pool_cpu_readings`, `fpm_tune_pool_cpu_fill_workers`,
 `fpm_tune_pool_cpu_limited`; see [Alerting](../operating/alerting.md)) and the

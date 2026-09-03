@@ -54,9 +54,46 @@ func TestCPUIsAFlagOnEveryCommandAndAConfigKey(t *testing.T) {
 	}
 
 	// And the rendered config documents the key, so an operator finds it where
-	// the other settings live.
-	if !strings.Contains(renderServiceConfig("advisory", "127.0.0.1:9110"), "# cpu = true") {
-		t.Error("the rendered service config does not mention the cpu key")
+	// the other settings live: commented out by default, active when
+	// install-service was told so, and in either case a file serve loads.
+	off := renderServiceConfig("advisory", "127.0.0.1:9110", false)
+	if !strings.Contains(off, "\n# cpu = true\n") || strings.Contains(off, "\ncpu = true\n") {
+		t.Errorf("without -cpu the rendered config should carry the key commented out:\n%s", off)
+	}
+	on := renderServiceConfig("advisory", "127.0.0.1:9110", true)
+	if !strings.Contains(on, "\ncpu = true\n") {
+		t.Errorf("with -cpu the rendered config should carry cpu = true:\n%s", on)
+	}
+	// The whole file has to load, so the flagset needs the keys serve's own
+	// flags supply beside the common ones.
+	fs2 := flag.NewFlagSet("serve", flag.ContinueOnError)
+	c2 := registerCommon(fs2)
+	fs2.Bool("apply", false, "")
+	fs2.String("recommend", "", "")
+	fs2.String("metrics", "", "")
+	if err := fs2.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyConfig(fs2, writeConfig(t, on)); err != nil {
+		t.Fatal(err)
+	}
+	if !*c2.cpu {
+		t.Error("the config install-service -cpu writes did not turn the flag on in serve")
+	}
+
+	// A re-run switches it without touching the rest of the file: the key
+	// starts commented, so it is added as an active line, and a later
+	// -cpu=false rewrites that line in place.
+	path = writeConfig(t, off)
+	if err := setConfigKey(path, "cpu", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setConfigKey(path, "cpu", "false"); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(path)
+	if strings.Count(string(body), "cpu = false") != 1 || strings.Contains(string(body), "cpu = true\n") && !strings.Contains(string(body), "# cpu = true") {
+		t.Errorf("re-running did not update the cpu key in place:\n%s", body)
 	}
 }
 
@@ -146,7 +183,7 @@ func TestApplyConfigRejectsABadMode(t *testing.T) {
 // on the format, or the unit it writes would not start.
 func TestTheRenderedConfigLoadsBack(t *testing.T) {
 	for _, mode := range []string{"advisory", "apply"} {
-		path := writeConfig(t, renderServiceConfig(mode, defaultMetricsAddr))
+		path := writeConfig(t, renderServiceConfig(mode, defaultMetricsAddr, false))
 
 		fs, apply, _, metrics, _ := serveFlags()
 		if err := fs.Parse(nil); err != nil {

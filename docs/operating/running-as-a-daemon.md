@@ -29,6 +29,7 @@ You do not have to write a unit. One command installs and starts it:
 ```bash
 sudo fpm-tune install-service          # advisory (watch and recommend)
 sudo fpm-tune install-service --apply  # act on the plan
+sudo fpm-tune install-service --cpu    # also let the CPU measurement cap a pool
 ```
 
 It writes `/etc/fpm-tune/config` and a unit that reads it, then enables and starts
