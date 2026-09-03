@@ -428,10 +428,27 @@ func TestTheBoxCostChangesTheFillCount(t *testing.T) {
 	}
 }
 
+// TestTheHostHeadroomIsBoundedToo: Input.CPUHeadroom is held to the range a
+// pool's marker is, so a caller that skips the command's flag check cannot
+// saturate the ceiling either, and the ceiling itself clamps whatever reaches
+// it. Six workers fill a 4-core box here; the largest headroom gives 600, and
+// 1e19 gives the same rather than the floor of five.
+func TestTheHostHeadroomIsBoundedToo(t *testing.T) {
+	for in, want := range map[float64]float64{0: 2, -1: 2, 0.5: 1, 1.5: 1.5, 100: 100, 101: 100, 1e19: 100} {
+		if got := hostHeadroom(in); got != want {
+			t.Errorf("hostHeadroom(%g) = %g, want %g", in, got, want)
+		}
+	}
+	if got := cpuCeiling(6, 4000, 1e19); got != 600 {
+		t.Errorf("cpuCeiling(6, 4000m, 1e19) = %d, want 600: the ceiling must clamp, not saturate", got)
+	}
+}
+
 // TestAPoolCanCarryItsOwnHeadroom: env[FPM_TUNE_CPU_HEADROOM] on the pool wins
 // over the host's --cpu-headroom for that pool alone, the report says so, and
-// a marker that does not read as a number of one or more is a warning, not a
-// silent default.
+// a marker that does not read as a number from one to MaxCPUHeadroom is a
+// warning, not a silent default. 1e19 is the value that used to saturate the
+// ceiling's float-to-int conversion.
 func TestAPoolCanCarryItsOwnHeadroom(t *testing.T) {
 	for marker, want := range map[string]struct {
 		headroom float64
@@ -441,9 +458,14 @@ func TestAPoolCanCarryItsOwnHeadroom(t *testing.T) {
 		"":      {2, false, true},
 		"3":     {3, true, true},
 		" 1.5 ": {1.5, true, true},
+		"100":   {100, true, true},
+		"101":   {2, false, false},
+		"1e19":  {2, false, false},
 		"0.5":   {2, false, false},
 		"abc":   {2, false, false},
 		"-1":    {2, false, false},
+		"NaN":   {2, false, false},
+		"+Inf":  {2, false, false},
 	} {
 		h, fromPool, ok := headroomFor(marker, 2)
 		if h != want.headroom || fromPool != want.fromPool || ok != want.ok {

@@ -252,10 +252,7 @@ func Build(in Input) (Result, error) {
 	// The CPU to divide by, read once for the round, and the headroom the
 	// ceiling carries on top of the fill count.
 	hostCPU := in.Limits.Millicores()
-	headroom := in.CPUHeadroom
-	if headroom <= 0 {
-		headroom = DefaultCPUHeadroom
-	}
+	headroom := hostHeadroom(in.CPUHeadroom)
 
 	// The child cost is folded into each pool's per-worker cost, not held back as
 	// a host-wide reserve. That is what keeps it safe: the allocator sizes every
@@ -330,8 +327,8 @@ func Build(in Input) (Result, error) {
 	if len(badHeadrooms) > 0 {
 		sort.Strings(badHeadrooms)
 		allocation.Warnings = append(allocation.Warnings, fmt.Sprintf(
-			"unreadable %s on %s — using the host's %.2g×; it takes a number of one or more",
-			HeadroomMarker, strings.Join(badHeadrooms, ", "), headroom))
+			"unreadable %s on %s — using the host's %.2g×; it takes a number from 1 to %g",
+			HeadroomMarker, strings.Join(badHeadrooms, ", "), headroom, MaxCPUHeadroom))
 	}
 
 	result.Plan = allocation
