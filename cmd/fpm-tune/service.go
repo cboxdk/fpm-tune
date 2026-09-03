@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -104,7 +105,10 @@ func runInstallService(args []string) error {
 		apply = fs.Bool("apply", false, "install in apply mode — act on the plan. The default is "+
 			"advisory: watch, learn and recommend, changing nothing")
 		metrics = fs.String("metrics", defaultMetricsAddr, "address for /metrics")
-		print   = fs.Bool("print", false, "print the unit and config instead of installing them")
+		cpu     = fs.Bool("cpu", false, "let what a pool's requests measured cap it: a cpu-limited pool is held at the "+
+			"busy workers that fill the CPU instead of the number memory allows. Off by default; the CPU "+
+			"shape is measured and reported either way. Re-run with -cpu or -cpu=false to switch")
+		print = fs.Bool("print", false, "print the unit and config instead of installing them")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "fpm-tune install-service — run fpm-tune in the background under "+
@@ -129,7 +133,7 @@ func runInstallService(args []string) error {
 	if *apply {
 		mode = "apply"
 	}
-	config := renderServiceConfig(mode, *metrics)
+	config := renderServiceConfig(mode, *metrics, *cpu)
 	unit := renderUnit(binPath)
 
 	if *print {
@@ -176,6 +180,12 @@ func runInstallService(args []string) error {
 		if explicit["metrics"] {
 			if err := setConfigKey(defaultConfigPath, "metrics", *metrics); err != nil {
 				return fmt.Errorf("cannot update the metrics address in %s: %w", defaultConfigPath, err)
+			}
+			configChanged = true
+		}
+		if explicit["cpu"] {
+			if err := setConfigKey(defaultConfigPath, "cpu", strconv.FormatBool(*cpu)); err != nil {
+				return fmt.Errorf("cannot update the cpu setting in %s: %w", defaultConfigPath, err)
 			}
 			configChanged = true
 		}
@@ -356,7 +366,12 @@ func systemctl(args ...string) error {
 	return cmd.Run()
 }
 
-func renderServiceConfig(mode, metrics string) string {
+func renderServiceConfig(mode, metrics string, cpu bool) string {
+	cpuLine := "# cpu = true"
+	if cpu {
+		cpuLine = "cpu = true"
+	}
+
 	return fmt.Sprintf(`# fpm-tune service settings, read by: fpm-tune serve --config %s
 #
 # Switch mode without editing this file:
@@ -386,7 +401,7 @@ metrics = %s
 # busy workers that fill the CPU instead of the number memory allows. Off, the
 # CPU shape is still measured and reported (the plan says which of memory and
 # CPU each pool runs out of first) but sizes nothing.
-# cpu = true
+%s
 
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
@@ -394,7 +409,7 @@ metrics = %s
 
 # In advisory mode, the recommendation is written here for you to read and paste.
 # recommend = %s
-`, defaultConfigPath, mode, metrics, defaultRecommendPath)
+`, defaultConfigPath, mode, metrics, cpuLine, defaultRecommendPath)
 }
 
 func renderUnit(binPath string) string {
