@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
+	"github.com/cboxdk/fpm-tune/state"
 )
 
 // A day of rounds, in memory, for anything that wants to draw a line.
@@ -55,6 +58,10 @@ type PoolSample struct {
 	// WorkerBytes is the per-worker cost the plan sized on.
 	WorkerBytes int64 `json:"worker_bytes"`
 
+	// MemoryCeiling is what memory alone would have proposed, before any
+	// CPU ceiling: the other bound the plan is the minimum of.
+	MemoryCeiling int `json:"memory_ceiling"`
+
 	CPURatioP50 float64 `json:"cpu_ratio_p50"`
 	CPUReadings int64   `json:"cpu_readings"`
 	CPUFill     int     `json:"cpu_fill_workers"`
@@ -82,6 +89,12 @@ const (
 	EventRolledBack     = "rolled_back"
 	EventRollbackFailed = "rollback_failed"
 	EventRepaired       = "repaired"
+
+	// EventChanged is a pool whose configured ceiling moved between two
+	// rounds without this daemon having moved it: a hand edit, a deploy, or
+	// an fpm-tune apply run beside the daemon. Recorded so the history shows
+	// every change to the host, not only the daemon's own.
+	EventChanged = "changed"
 )
 
 // historyEvents is how many events the ring keeps. A daemon that reloads
@@ -94,6 +107,7 @@ const historyEvents = 1000
 type history struct {
 	mu       sync.Mutex
 	interval time.Duration
+	host     HostInfo
 
 	samples []HistorySample
 	head    int // where the next sample goes
@@ -165,6 +179,20 @@ func (h *history) snapshot(last int) ([]HistorySample, []HistoryEvent) {
 	return samples, events
 }
 
+// HostInfo is what a client needs to label the history: which box, how big,
+// and what the daemon is allowed to do to it.
+type HostInfo struct {
+	Hostname    string  `json:"hostname"`
+	Version     string  `json:"version"`
+	Apply       bool    `json:"apply"`
+	CPUCeiling  bool    `json:"cpu_ceiling"`
+	CPUHeadroom float64 `json:"cpu_headroom"`
+
+	MemoryBytes   int64  `json:"memory_bytes"`
+	CPUMillicores int    `json:"cpu_millicores"`
+	Source        string `json:"memory_source"`
+}
+
 // HistoryResponse is the body of /history.json.
 type HistoryResponse struct {
 	// IntervalSeconds is how far apart the rounds are, and Capacity how many
@@ -172,8 +200,18 @@ type HistoryResponse struct {
 	IntervalSeconds float64 `json:"interval_seconds"`
 	Capacity        int     `json:"capacity"`
 
+	Host HostInfo `json:"host"`
+
 	Rounds []HistorySample `json:"rounds"`
 	Events []HistoryEvent  `json:"events"`
+}
+
+// setHost records what the daemon knows about the box, refreshed each round
+// because the budget can change under a running daemon.
+func (h *history) setHost(info HostInfo) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.host = info
 }
 
 // ServeHTTP answers GET /history.json. ?last=N limits the rounds to the newest
@@ -197,9 +235,13 @@ func (h *history) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rounds, events := h.snapshot(last)
+	h.mu.Lock()
+	host := h.host
+	h.mu.Unlock()
 	body := HistoryResponse{
 		IntervalSeconds: h.interval.Seconds(),
 		Capacity:        len(h.samples),
+		Host:            host,
 		Rounds:          rounds,
 		Events:          events,
 	}
@@ -212,34 +254,67 @@ func (h *history) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// noteExternalChanges compares each pool's configured ceiling with the
+// previous round's and records the ones that moved without this daemon
+// moving them. The daemon's own resizes are expected on the following round
+// and are not events twice.
+func (l *Loop) noteExternalChanges(views []observe.PoolView, now time.Time) {
+	for _, v := range views {
+		if v.Err != nil || !v.MaxChildrenKnown {
+			continue
+		}
+		prev, seen := l.lastConfigured[v.Name]
+		l.lastConfigured[v.Name] = v.CurrentMaxChildren
+		// The daemon's own resize is expected on exactly this round, the one
+		// after it wrote, and the expectation is spent here whatever the
+		// scrape found: kept longer, it would excuse a later hand edit to the
+		// same number, or one after a resize the reconcile rolled back.
+		want, ours := l.expected[v.Name]
+		delete(l.expected, v.Name)
+		if !seen || prev == v.CurrentMaxChildren {
+			continue
+		}
+		if ours && want == v.CurrentMaxChildren {
+			continue
+		}
+		l.history.event(HistoryEvent{
+			At: now, Kind: EventChanged, Pool: v.Name, From: prev, To: v.CurrentMaxChildren,
+			Detail: "configured outside this daemon: a hand edit, a deploy, or fpm-tune apply",
+		})
+	}
+}
+
 // hostBusyRatio turns two consecutive box CPU readings into how busy the box
 // was in between, as a fraction of the CPU it has. Unknown on the first round,
 // where the box could not be read, across a hole longer than five minutes, and
 // when the counter went backwards.
+//
+// Kept beside the state's own reading of the same counters because a --no-learn
+// daemon records nothing in the state and the history wants the ratio anyway;
+// the arithmetic and its gates are the state's, in one place.
 func (l *Loop) hostBusyRatio(now budget.HostCPU, ok bool, millicores int) (float64, bool) {
 	prev, had := l.lastHostCPU, l.hasHostCPU
 	l.lastHostCPU, l.hasHostCPU = now, ok
-	if !ok || !had || millicores <= 0 {
+	if !ok || !had {
 		return 0, false
 	}
-	wall := now.At.Sub(prev.At)
-	busy := now.BusyMicros - prev.BusyMicros
-	if wall < 5*time.Second || wall > 5*time.Minute || busy < 0 {
-		return 0, false
-	}
-	ratio := float64(busy) / float64(wall.Microseconds()) / (float64(millicores) / 1000)
-	if ratio > 1 {
-		ratio = 1
-	}
+	_, ratio, known := state.HostBusy(
+		state.HostCPUSeen{BusyMicros: prev.BusyMicros, At: prev.At},
+		state.HostCPUSeen{BusyMicros: now.BusyMicros, At: now.At}, millicores)
 
-	return ratio, true
+	return ratio, known
 }
 
-// observedPool is the part of a round the history keeps from the scrape.
-type observedPool struct {
-	active     int
-	queue      int64
-	configured int
+// firstLine is an error's first line: php-fpm's rejection carries its whole
+// stderr, which echoes the offending configuration, and the history is
+// served to whoever can reach the metrics address. The log keeps the rest.
+func firstLine(err error) string {
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+
+	return s
 }
 
 // historySampleOf flattens a round into what the history keeps of it.
@@ -248,9 +323,9 @@ func historySampleOf(result plan.Result, at time.Time, hostBusy float64, hostBus
 	for _, c := range result.CPU {
 		cpu[c.Name] = c
 	}
-	observed := make(map[string]observedPool, len(result.Views))
+	observed := make(map[string]observe.PoolView, len(result.Views))
 	for _, v := range result.Views {
-		observed[v.Name] = observedPool{v.ActiveNow, v.QueueDepth, v.CurrentMaxChildren}
+		observed[v.Name] = v
 	}
 
 	sample := HistorySample{At: at, HostBusyRatio: hostBusy, HostBusyKnown: hostBusyKnown}
@@ -258,20 +333,21 @@ func historySampleOf(result plan.Result, at time.Time, hostBusy float64, hostBus
 		o := observed[p.Name]
 		c := cpu[p.Name]
 		sample.Pools = append(sample.Pools, PoolSample{
-			Pool:        p.Name,
-			Active:      o.active,
-			Queue:       o.queue,
-			Configured:  o.configured,
-			Recommended: p.MaxChildren,
-			DemandUnmet: p.DemandUnmet,
-			Unknown:     p.Unknown,
-			WorkerBytes: p.WorkerBytes,
-			CPURatioP50: c.P50,
-			CPUReadings: c.Samples,
-			CPUFill:     c.FillWorkers,
-			CPUCeiling:  c.Ceiling,
-			CPULimited:  c.Limit == "cpu",
-			CPUBound:    p.CPUBound,
+			Pool:          p.Name,
+			Active:        o.ActiveNow,
+			Queue:         o.QueueDepth,
+			Configured:    o.CurrentMaxChildren,
+			Recommended:   p.MaxChildren,
+			DemandUnmet:   p.DemandUnmet,
+			Unknown:       p.Unknown,
+			WorkerBytes:   p.WorkerBytes,
+			MemoryCeiling: p.MemoryWant,
+			CPURatioP50:   c.P50,
+			CPUReadings:   c.Samples,
+			CPUFill:       c.FillWorkers,
+			CPUCeiling:    c.Ceiling,
+			CPULimited:    c.Limit == "cpu",
+			CPUBound:      p.CPUBound,
 		})
 	}
 

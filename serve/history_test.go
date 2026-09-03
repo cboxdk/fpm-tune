@@ -1,14 +1,21 @@
 package serve
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/budget"
+	"github.com/cboxdk/fpm-tune/metrics"
 	"github.com/cboxdk/fpm-tune/observe"
 	"github.com/cboxdk/fpm-tune/plan"
 )
@@ -68,6 +75,14 @@ func TestHistoryJSONIsServed(t *testing.T) {
 		t.Errorf("events = %+v", body.Events)
 	}
 
+	// HEAD is how a dashboard checks the daemon is there without pulling a
+	// day of rounds: the headers as GET would send them, and no body.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/history.json", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" || rec.Body.Len() != 0 {
+		t.Errorf("HEAD gave %d, content-type %q, %d body bytes; want 200, JSON, none", rec.Code, rec.Header().Get("Content-Type"), rec.Body.Len())
+	}
+
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/history.json", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -86,7 +101,7 @@ func TestASampleCarriesTheRound(t *testing.T) {
 	result := plan.Result{
 		Views: []observe.PoolView{{Name: "www", ActiveNow: 7, QueueDepth: 3, CurrentMaxChildren: 22}},
 		Plan: allocate.Plan{Pools: []allocate.PoolPlan{
-			{Name: "www", MaxChildren: 10, WorkerBytes: 35 << 20, DemandUnmet: true, CPUBound: true},
+			{Name: "www", MaxChildren: 10, MemoryWant: 27, WorkerBytes: 35 << 20, DemandUnmet: true, CPUBound: true},
 		}},
 		CPU: []plan.PoolCPU{{Name: "www", P50: 0.85, Samples: 40, FillWorkers: 5, Ceiling: 10, Limit: "cpu"}},
 	}
@@ -96,9 +111,32 @@ func TestASampleCarriesTheRound(t *testing.T) {
 	}
 	p := s.Pools[0]
 	want := PoolSample{Pool: "www", Active: 7, Queue: 3, Configured: 22, Recommended: 10, DemandUnmet: true,
-		WorkerBytes: 35 << 20, CPURatioP50: 0.85, CPUReadings: 40, CPUFill: 5, CPUCeiling: 10, CPULimited: true, CPUBound: true}
+		WorkerBytes: 35 << 20, MemoryCeiling: 27, CPURatioP50: 0.85, CPUReadings: 40, CPUFill: 5, CPUCeiling: 10, CPULimited: true, CPUBound: true}
 	if p != want {
 		t.Errorf("pool sample = %+v, want %+v", p, want)
+	}
+}
+
+// TestASampleOfAPoolTheScrapeDidNotSeeIsZeroes: the plan can name a pool the
+// views do not carry (a pool whose scrape failed, planned from what the state
+// remembers of it). The sample joins by name and takes zero for what was not
+// observed rather than panicking or dropping the pool.
+func TestASampleOfAPoolTheScrapeDidNotSeeIsZeroes(t *testing.T) {
+	result := plan.Result{
+		Plan: allocate.Plan{Pools: []allocate.PoolPlan{{Name: "ghost", MaxChildren: 5, WorkerBytes: 30 << 20}}},
+	}
+	s := historySampleOf(result, time.Unix(1, 0), 0, false)
+	if len(s.Pools) != 1 {
+		t.Fatalf("sample = %+v, want the planned pool", s)
+	}
+	p := s.Pools[0]
+	if p.Pool != "ghost" || p.Active != 0 || p.Queue != 0 || p.Configured != 0 || p.Recommended != 5 || p.WorkerBytes != 30<<20 {
+		t.Errorf("pool sample = %+v, want zero observation and the plan's numbers", p)
+	}
+
+	// An error with no newline is kept whole.
+	if got := firstLine(errors.New("one line, no newline")); got != "one line, no newline" {
+		t.Errorf("firstLine = %q", got)
 	}
 }
 
@@ -128,3 +166,195 @@ func TestHostBusyRatioIsADifference(t *testing.T) {
 		t.Error("an unreadable box gave a ratio")
 	}
 }
+
+// TestAChangeTheDaemonDidNotMakeIsAnEvent: a ceiling that moved between two
+// rounds is recorded as changed outside, unless it is the daemon's own
+// resize showing up the round after.
+func TestAChangeTheDaemonDidNotMakeIsAnEvent(t *testing.T) {
+	l := &Loop{history: newHistory(10, 30*time.Second), lastConfigured: map[string]int{}, expected: map[string]int{}}
+	t0 := time.Unix(1_700_000_000, 0)
+	views := func(www, shop int) []observe.PoolView {
+		return []observe.PoolView{
+			{Name: "www", CurrentMaxChildren: www, MaxChildrenKnown: true},
+			{Name: "shop", CurrentMaxChildren: shop, MaxChildrenKnown: true},
+		}
+	}
+	l.noteExternalChanges(views(10, 20), t0)
+	l.noteExternalChanges(views(10, 20), t0.Add(30*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 0 {
+		t.Fatalf("nothing moved, yet %v", events)
+	}
+
+	// Someone ran fpm-tune apply beside the daemon: www 10 → 8.
+	l.noteExternalChanges(views(8, 20), t0.Add(60*time.Second))
+	_, events := l.history.snapshot(0)
+	if len(events) != 1 || events[0].Kind != EventChanged || events[0].Pool != "www" || events[0].From != 10 || events[0].To != 8 {
+		t.Fatalf("events = %+v, want one changed www 10 → 8", events)
+	}
+
+	// The daemon's own resize of shop to 25 shows up next round, and is not
+	// an outside change; a further move it did not make is.
+	l.expected = map[string]int{"shop": 25}
+	l.noteExternalChanges(views(8, 25), t0.Add(90*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 1 {
+		t.Errorf("the daemon's own resize was recorded as an outside change: %+v", events)
+	}
+	l.noteExternalChanges(views(8, 30), t0.Add(120*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 2 || events[1].From != 25 || events[1].To != 30 {
+		t.Errorf("a later outside change was missed: %+v", events)
+	}
+
+	// An expectation is spent on the round after the write, whatever that
+	// round found: a hand edit that lands first is an outside change, and
+	// so is a later edit to the very number the daemon once wrote.
+	l.expected = map[string]int{"shop": 35}
+	l.noteExternalChanges(views(8, 40), t0.Add(150*time.Second))
+	l.noteExternalChanges(views(8, 35), t0.Add(180*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 4 || events[2].To != 40 || events[3].To != 35 {
+		t.Errorf("a stale expectation excused an outside change: %+v", events)
+	}
+}
+
+// TestAnUnreadablePoolIsNeitherAChangeNorAConsumedExpectation: a scrape that
+// failed says nothing about the pool's ceiling, whatever number came with
+// it. It records no event, does not move what the daemon last saw
+// configured, and does not spend the expectation of the daemon's own
+// resize — which is spent on the round the pool is readable again, so that
+// the move to the expected value is still not an event.
+func TestAnUnreadablePoolIsNeitherAChangeNorAConsumedExpectation(t *testing.T) {
+	l := &Loop{history: newHistory(10, 30*time.Second), lastConfigured: map[string]int{}, expected: map[string]int{}}
+	t0 := time.Unix(1_700_000_000, 0)
+	view := func(max int, err error) []observe.PoolView {
+		return []observe.PoolView{{Name: "www", CurrentMaxChildren: max, MaxChildrenKnown: true, Err: err}}
+	}
+	l.noteExternalChanges(view(10, nil), t0)
+
+	// The daemon wrote 12; the next scrape failed, and its stale number is
+	// the new ceiling anyway.
+	l.expected = map[string]int{"www": 12}
+	l.noteExternalChanges(view(12, errors.New("status page: connection refused")), t0.Add(30*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 0 {
+		t.Errorf("an unreadable pool became an event: %+v", events)
+	}
+	if l.lastConfigured["www"] != 10 {
+		t.Errorf("lastConfigured = %d after an unreadable round, want the last readable 10", l.lastConfigured["www"])
+	}
+	if want, ok := l.expected["www"]; !ok || want != 12 {
+		t.Errorf("expected = %v after an unreadable round, want www: 12 kept", l.expected)
+	}
+
+	// Readable again at the expected value: the daemon's own resize, not
+	// an outside change, and the expectation is spent now.
+	l.noteExternalChanges(view(12, nil), t0.Add(60*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 0 {
+		t.Errorf("the daemon's own resize, seen late, became an event: %+v", events)
+	}
+	if l.lastConfigured["www"] != 12 || len(l.expected) != 0 {
+		t.Errorf("after the readable round: lastConfigured = %v, expected = %v", l.lastConfigured, l.expected)
+	}
+}
+
+// TestReleasingTheLockSendsTheNextWriteThroughRecovery: a watching daemon
+// gives the pool-directory lock back after every apply-now, and while it is
+// not held anyone may have written the directory — so releasing it also
+// forgets that the directory was reconciled, and the next forced round
+// reconciles before writing. Taking the lock afresh clears the flag the
+// same way. A lock another process holds is refused with the outcome an
+// apply-now should see.
+func TestReleasingTheLockSendsTheNextWriteThroughRecovery(t *testing.T) {
+	dir, other := t.TempDir(), t.TempDir()
+	l := &Loop{log: discardLogger(), metrics: metrics.New()}
+	defer l.releaseResource()
+	if !l.holdResource(dir) {
+		t.Fatalf("the lock on a free directory was refused: %+v", l.outcome)
+	}
+	l.reconciled = true
+	l.releaseResource()
+	if l.reconciled || l.resource != nil {
+		t.Errorf("after release: reconciled=%v held=%v, want neither", l.reconciled, l.resource != nil)
+	}
+	if !l.holdResource(dir) || l.reconciled {
+		t.Errorf("taking the lock again: held=%v reconciled=%v, want held and not reconciled", l.resource != nil, l.reconciled)
+	}
+
+	// Held by another process (an apply-mode daemon, usually): the refusal
+	// is the outcome an apply-now gets, not a generic 'not reconciled'.
+	if !l.holdResource(other) {
+		t.Fatalf("the lock on a second free directory was refused: %+v", l.outcome)
+	}
+	second := &Loop{log: discardLogger(), metrics: metrics.New()}
+	if second.holdResource(other) || !strings.Contains(second.outcome.Error, "pool-directory lock") {
+		t.Errorf("a held lock: held=%v outcome=%+v", second.resource != nil, second.outcome)
+	}
+}
+
+// TestTheControlSocketReplacesOnlyASocket: a --control naming some other
+// file is refused rather than deleted; and an error's first line is what
+// the history keeps of php-fpm's rejection.
+func TestTheControlSocketReplacesOnlyASocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "fpmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := dir + "/not-a-socket"
+	if err := os.WriteFile(path, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loop{cfg: Config{ControlPath: path}, log: discardLogger()}
+	if srv, err := l.startControl(); err == nil || !strings.Contains(err.Error(), "not a socket") {
+		if srv != nil {
+			_ = srv.Close()
+		}
+		t.Errorf("a regular file at the control path gave %v", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "keep me" {
+		t.Errorf("the file was touched: %q, %v", b, err)
+	}
+
+	if got := firstLine(errors.New("php-fpm rejected the configuration\n[pool www] unknown entry 'pm.max_childre'")); got != "php-fpm rejected the configuration" {
+		t.Errorf("firstLine = %q", got)
+	}
+}
+
+// TestApplyNowGoesThroughTheDaemon: the client posts to the socket, the
+// handler hands the request to the loop and answers with what the round did;
+// the socket is root-only by its mode.
+func TestApplyNowGoesThroughTheDaemon(t *testing.T) {
+	// A short directory: a unix socket path is limited to about a hundred
+	// characters, and macOS's t.TempDir is longer than that.
+	dir, err := os.MkdirTemp("/tmp", "fpmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	l := &Loop{cfg: Config{ControlPath: dir + "/control.sock"}, applyNow: make(chan applyRequest), log: discardLogger()}
+	srv, err := l.startControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	if info, err := os.Stat(l.cfg.ControlPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("socket mode = %v, err %v; want 0600", info.Mode(), err)
+	}
+
+	// The loop's side: one request answered with a resize.
+	go func() {
+		req := <-l.applyNow
+		req.reply <- ApplyOutcome{Changed: []HistoryEvent{{Kind: EventResized, Pool: "www", From: 22, To: 10, Detail: "22 to 10"}}}
+	}()
+	out, err := ApplyNow(context.Background(), l.cfg.ControlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Changed) != 1 || out.Changed[0].Pool != "www" || out.Changed[0].To != 10 {
+		t.Errorf("outcome = %+v", out)
+	}
+
+	// A daemon that is not there is an error that names the socket.
+	if _, err := ApplyNow(context.Background(), dir+"/nobody.sock"); err == nil || !strings.Contains(err.Error(), "nobody.sock") {
+		t.Errorf("a missing daemon gave %v", err)
+	}
+}
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

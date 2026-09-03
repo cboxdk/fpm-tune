@@ -10,7 +10,8 @@ Once you understand [how it decides](../how-it-decides/_index.md), the operating
 concerns are small and few:
 
 - **[Running as a daemon](running-as-a-daemon.md)**: watch-only versus
-  `--apply`, and what the loop does each round.
+  `--apply`, what the loop does each round, the day of history it keeps,
+  `fpm-tune top`, and applying once with `apply-now`.
 - **[Advisory mode](advisory-mode.md)**: running it permanently as an adviser
   that writes its conclusion to a file you paste by hand, and never touches the
   host.

@@ -149,17 +149,13 @@ func (s *State) LearnCPULoad(obs []Observation, sample CPULoadSample) {
 
 	prev := s.HostCPU
 	s.HostCPU = &HostCPUSeen{BusyMicros: sample.BusyMicros, At: at}
-	if prev == nil || wall < minCPULoadGap || wall > maxCPULoadGap || sample.Millicores <= 0 {
+	if prev == nil {
 		return
 	}
-	busyMicros := sample.BusyMicros - prev.BusyMicros
-	if busyMicros < 0 {
-		// The counter reset: a reboot, or a different source than last time.
+	hostCores, busyRatio, ok := HostBusy(*prev, *s.HostCPU, sample.Millicores)
+	if !ok {
 		return
 	}
-	hostCores := float64(busyMicros) / float64(wall.Microseconds())
-	capacity := float64(sample.Millicores) / 1000
-	busyRatio := hostCores / capacity
 
 	for i, o := range obs {
 		ps := s.forWriting(o.MasterConfig, o.Pool, at)
@@ -173,6 +169,24 @@ func (s *State) LearnCPULoad(obs []Observation, sample CPULoadSample) {
 			ps.CPUStarvedRounds++
 		}
 	}
+}
+
+// HostBusy turns two consecutive box CPU readings into the cores busy in
+// between, and that as a share of the cores the box has (clamped at one: a
+// box cannot be busier than it is, and a reading straddling a quota change
+// says otherwise). Unknown across a gap shorter than minCPULoadGap or longer
+// than maxCPULoadGap, when the counter went backwards (a reboot, or a
+// different source than last time), and when the box has no known capacity.
+func HostBusy(prev, now HostCPUSeen, millicores int) (cores, ratio float64, ok bool) {
+	wall := now.At.Sub(prev.At)
+	busyMicros := now.BusyMicros - prev.BusyMicros
+	if wall < minCPULoadGap || wall > maxCPULoadGap || busyMicros < 0 || millicores <= 0 {
+		return 0, 0, false
+	}
+	cores = float64(busyMicros) / float64(wall.Microseconds())
+	ratio = min(cores/(float64(millicores)/1000), 1)
+
+	return cores, ratio, true
 }
 
 // poolCPUTicks is the CPU this pool's workers spent since the last scrape, in

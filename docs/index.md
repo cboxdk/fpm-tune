@@ -137,8 +137,9 @@ that moment is the whole reason the [capacity signals](operating/alerting.md) ex
 
 Fair question: it writes production config. The answer: **you decide how far to
 trust it, one step at a time.** `plan` only looks. `serve` watches and recommends,
-still touching nothing. Only `--apply` lets it act, and you flip that on once its
-decisions have looked right for a day or a week, not before. (The
+still touching nothing. Only `--apply`, or an `apply-now` you ask for, lets it
+act, and you flip `--apply` on once its decisions have looked right for a day or
+a week, not before. (The
 [Quickstart](quickstart.md) walks that path command by command.)
 
 When it *does* act, nothing reaches PHP-FPM until it's been validated against a

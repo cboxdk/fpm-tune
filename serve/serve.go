@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -119,6 +120,14 @@ type Config struct {
 	// History / Interval rounds. Zero means a day. It lives in memory only.
 	History time.Duration
 
+	// Version is the binary's version, for /history.json to report.
+	Version string
+
+	// ControlPath is the unix socket on which an operator asks the daemon to
+	// apply once (fpm-tune apply-now). Empty means beside the state file.
+	// See control.go.
+	ControlPath string
+
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
 
@@ -142,6 +151,9 @@ func (c Config) Defaults() Config {
 	}
 	if c.StatePath == "" {
 		c.StatePath = state.DefaultPath
+	}
+	if c.ControlPath == "" {
+		c.ControlPath = controlPathFor(c.StatePath)
 	}
 	if c.SaveEvery <= 0 {
 		c.SaveEvery = 5 * time.Minute
@@ -181,10 +193,27 @@ type Loop struct {
 	// history is the ring of rounds and events behind /history.json.
 	history *history
 
+	// applyNow carries "apply once" requests from the control socket to the
+	// loop; forceApply is on for the round that serves one, and outcome is
+	// what that round did, for the answer. See control.go.
+	applyNow   chan applyRequest
+	forceApply bool
+	// applyBlocked shadows the apply_blocked metric's reason, so a forced
+	// round can clear its own refusal without clearing an older one.
+	applyBlocked string
+	outcome      ApplyOutcome
+
 	// lastHostCPU is the box's CPU reading from the previous round, so this
 	// round's busy ratio can be recorded in the history.
 	lastHostCPU budget.HostCPU
 	hasHostCPU  bool
+
+	// lastConfigured is each pool's configured ceiling as of the previous
+	// round, and expected the ceilings this daemon's own resizes will show
+	// next round, so a change it did not make is an event and one it did is
+	// not counted twice. See noteExternalChanges.
+	lastConfigured map[string]int
+	expected       map[string]int
 
 	// lastRec is the recommendation last LOGGED for each pool — the value and when —
 	// so it is reported the first time it is seen, whenever it moves, and, as a sign
@@ -259,12 +288,15 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 	}
 
 	return &Loop{
-		history: newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
-		cfg:     cfg,
-		log:     log,
-		metrics: metrics.New(),
-		state:   st,
-		release: release,
+		history:        newHistory(int(cfg.History/cfg.Interval), cfg.Interval),
+		applyNow:       make(chan applyRequest),
+		lastConfigured: map[string]int{},
+		expected:       map[string]int{},
+		cfg:            cfg,
+		log:            log,
+		metrics:        metrics.New(),
+		state:          st,
+		release:        release,
 	}, nil
 }
 
@@ -301,6 +333,17 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 
+	var control *http.Server
+	if l.cfg.ControlPath != "" {
+		var err error
+		if control, err = l.startControl(); err != nil {
+			// Not fatal: the daemon can watch and act on its own without an
+			// operator being able to ask it to. Said loudly, because apply-now
+			// and top's a key will not work until it is fixed.
+			l.log.Warn("No control socket; fpm-tune apply-now will not reach this daemon", "error", err)
+		}
+	}
+
 	l.metrics.SetApplyEnabled(l.cfg.Apply)
 
 	l.log.Info("fpm-tune running",
@@ -321,13 +364,50 @@ func (l *Loop) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			l.shutdown(srv)
+			if control != nil {
+				_ = control.Close()
+				_ = os.Remove(l.cfg.ControlPath)
+			}
 
 			return nil
 		case <-ticker.C:
 			l.round(ctx)
+		case req := <-l.applyNow:
+			// One round with applying forced on, whatever the mode, and the
+			// answer is what it did. The mode itself does not change.
+			l.forceApply = true
+			l.outcome = ApplyOutcome{Message: "nothing was applied: the round did not reach the plan"}
+			l.round(ctx)
+			l.forceApply = false
+			// A watching daemon does not keep the pool directory: it took the
+			// lock for this one write, and another writer (the operator, an
+			// apply-mode daemon) must be able to take it the moment it is
+			// done. An apply-mode daemon keeps it, as it always has.
+			if !l.cfg.Apply {
+				l.releaseResource()
+				// A refusal this round (lock, budget) is this round's; a
+				// watching daemon is not blocked from applying, it does not.
+				// A state file that could not be saved is not this round's
+				// and stays up until a save succeeds.
+				if l.applyBlocked != "state_unsaved" {
+					l.setApplyBlocked("")
+				}
+			}
+			req.reply <- l.outcome
 		}
 	}
 }
+
+// setApplyBlocked publishes why a round could not apply, or clears it, and
+// remembers the reason.
+func (l *Loop) setApplyBlocked(reason string) {
+	l.applyBlocked = reason
+	l.metrics.SetApplyBlocked(reason)
+}
+
+// applying reports whether this round may write: the daemon is in apply
+// mode, or an operator asked for one round of it.
+func (l *Loop) applying() bool { return l.cfg.Apply || l.forceApply }
 
 // round is one full pass. Failures are logged and the loop continues: a pool
 // that is restarting, or a host whose php-fpm is briefly down, must not end the
@@ -340,7 +420,7 @@ func (l *Loop) round(ctx context.Context) {
 	// php-fpm will not accept, and discovery parses the effective config to find
 	// pools — so from that point on nothing is discoverable and the recovery
 	// path cannot reach the master it exists to recover.
-	if l.cfg.Apply && !l.reconciled {
+	if l.applying() && !l.reconciled {
 		l.reconcile(roundCtx)
 	}
 
@@ -430,6 +510,12 @@ func (l *Loop) round(ctx context.Context) {
 		plan.LearnCPULoad(l.state, views, hostCPU, hostOK, limits.Millicores(), now)
 	}
 	hostBusy, hostBusyKnown := l.hostBusyRatio(hostCPU, hostOK, limits.Millicores())
+	hostname, _ := os.Hostname()
+	l.history.setHost(HostInfo{
+		Hostname: hostname, Version: l.cfg.Version, Apply: l.cfg.Apply, CPUCeiling: l.cfg.CPUCeiling,
+		CPUHeadroom: l.cfg.CPUHeadroom,
+		MemoryBytes: limits.MemoryBytes, CPUMillicores: limits.Millicores(), Source: string(limits.Source),
+	})
 
 	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 	if hasCgroup {
@@ -472,6 +558,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.metrics.Update(result, l.state, l.cfg.StateOptions, float64(now.Unix()))
+	l.noteExternalChanges(views, now)
 	l.history.record(historySampleOf(result, now, hostBusy, hostBusyKnown))
 	l.logPlan(result, now)
 	l.writeRecommendation(result, now)
@@ -497,8 +584,12 @@ func (l *Loop) round(ctx context.Context) {
 		}
 	}
 
-	if l.cfg.Apply && l.reconciled {
+	if l.applying() && l.reconciled {
 		l.applyPlan(roundCtx, result, now)
+	} else if l.forceApply && l.outcome.Error == "" {
+		// The reconcile that just ran says why when it failed on the lock or
+		// the repair; this is for the rest (no master to reconcile against).
+		l.outcome = ApplyOutcome{Message: "nothing was applied: the host is not reconciled, so writing to it is refused this round"}
 	}
 
 	l.save(now, false)
@@ -670,8 +761,9 @@ func sameStringSet(a, b map[string]bool) bool {
 func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time) {
 	master, err := MasterOnHost(l.cfg.DropInDir, l.log)
 	if err != nil {
-		l.metrics.SetApplyBlocked("no_master")
+		l.setApplyBlocked("no_master")
 		l.log.Warn("Cannot apply", "error", err)
+		l.outcome = ApplyOutcome{Error: err.Error()}
 
 		return
 	}
@@ -692,6 +784,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	if !l.reconciled {
 		l.log.Warn("The pool directory changed under this process; reconciling before "+
 			"writing to it", "dir", master.DropInDir)
+		l.outcome = ApplyOutcome{Message: "nothing was applied: the pool directory changed under the daemon, which reconciles it first; ask again"}
 
 		return
 	}
@@ -700,13 +793,14 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// to write from. Published rather than only logged, because a daemon that
 	// has quietly stopped applying looks exactly like one that has nothing to do.
 	if result.Budget.LookupErr != nil {
-		l.metrics.SetApplyBlocked("budget_unconfirmed")
+		l.setApplyBlocked("budget_unconfirmed")
 
 		// The lock goes back, because this process is holding it for work it
 		// has just decided not to do — and the way out of this state is a
 		// one-shot apply, which the lock would refuse. A daemon that blocks the
 		// remedy it recommends is worse than one that simply stops.
 		l.releaseResource()
+		l.outcome = ApplyOutcome{Error: "php-fpm's own memory limit could not be read, so there is no confirmed budget to apply from: " + result.Budget.LookupErr.Error()}
 
 		l.log.Error("Not applying: php-fpm's own memory limit could not be read, so the "+
 			"only budget available is the machine's — and if php-fpm is capped below "+
@@ -718,11 +812,18 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		return
 	}
 
-	l.metrics.SetApplyBlocked("")
+	l.setApplyBlocked("")
 	l.state.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
 	opts := l.cfg.ApplyOptions
 	opts.BackupDir = l.cfg.BackupDir
+	if l.forceApply {
+		// The operator saw the plan and asked for it: the damping that keeps
+		// the daemon from reloading on every wobble does not apply to a
+		// change a person chose.
+		opts.MinChange, opts.MinInterval = 0.0001, time.Second
+		opts.ShrinkMinChange, opts.ShrinkMinInterval = 0.0001, time.Second
+	}
 
 	applied, err := apply.Apply(ctx, result.Plan, master, l.state, opts, l.log)
 	// Wrote, not Changed(): a run that only removes the section of a site that no
@@ -756,7 +857,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 			// is the difference between restarting php-fpm now and finding out
 			// in the morning. The CLI had the same sentence and the same fault.
 			if errors.Is(err, apply.ErrMasterDidNotSurvive) {
-				l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: err.Error()})
+				l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: firstLine(err)})
 				l.log.Error("PHP-FPM IS DOWN AND COULD NOT BE PUT BACK. The master did "+
 					"not survive the reload, and the configuration that killed it could "+
 					"not be removed. Remove these by hand, then reset-failed and start "+
@@ -771,7 +872,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 				"the next reload from any source will adopt it, and a master that fails "+
 				"to start does not come back. Remove these by hand.",
 				"paths", applied.RollbackFailed, "error", err)
-			l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: err.Error()})
+			l.history.event(HistoryEvent{At: now, Kind: EventRollbackFailed, Detail: firstLine(err)})
 
 			return
 		}
@@ -781,15 +882,21 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		if applied.RolledBack {
 			kind = EventRolledBack
 		}
-		l.history.event(HistoryEvent{At: now, Kind: kind, Detail: err.Error()})
+		l.history.event(HistoryEvent{At: now, Kind: kind, Detail: firstLine(err)})
+		l.outcome = ApplyOutcome{Error: err.Error()}
 
 		return
 	}
+	l.outcome = ApplyOutcome{Message: "nothing to change: every pool is at its planned ceiling"}
 
 	if changed := applied.Changed(); len(changed) > 0 {
 		for _, o := range changed {
 			l.log.Info("Pool resized", "pool", o.Pool, "from", o.From, "to", o.To, "reason", o.Reason)
-			l.history.event(HistoryEvent{At: now, Kind: EventResized, Pool: o.Pool, From: o.From, To: o.To, Detail: o.Reason})
+			ev := HistoryEvent{At: now, Kind: EventResized, Pool: o.Pool, From: o.From, To: o.To, Detail: o.Reason}
+			l.history.event(ev)
+			l.outcome.Changed = append(l.outcome.Changed, ev)
+			l.outcome.Message = ""
+			l.expected[o.Pool] = o.To
 		}
 		// The applied values are the hysteresis baseline for the next round, so
 		// they go to disk now rather than waiting for the save interval.
@@ -858,6 +965,10 @@ func (l *Loop) reconcile(ctx context.Context) {
 		// the opposite of what the name says.
 		l.metrics.RecordRepair()
 		l.history.event(HistoryEvent{At: time.Now(), Kind: EventRepaired})
+		// The repair moved ceilings this process did not resize; the scrape
+		// that follows starts its comparison afresh rather than calling them
+		// an outside change.
+		clear(l.lastConfigured)
 	}
 	if err != nil {
 		// Released, so the operator's own `fpm-tune apply` is not refused by a
@@ -866,9 +977,10 @@ func (l *Loop) reconcile(ctx context.Context) {
 			l.resource()
 			l.resource, l.resourceDir = nil, ""
 		}
-		l.metrics.SetApplyBlocked("unrepaired")
+		l.setApplyBlocked("unrepaired")
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
+		l.outcome = ApplyOutcome{Error: "a previous run left configuration this daemon could not repair; not applying: " + err.Error()}
 
 		return
 	}
@@ -914,7 +1026,7 @@ func (l *Loop) save(now time.Time, force bool) {
 		// save has lost its brake, and a log line once every five minutes is not
 		// how anyone finds that out.
 		if force {
-			l.metrics.SetApplyBlocked("state_unsaved")
+			l.setApplyBlocked("state_unsaved")
 		}
 		l.log.Error("Could not save state; the record of what was applied is not on disk, "+
 			"so a restart returns to bootstrap and the reload damping has nothing to "+
@@ -993,12 +1105,21 @@ func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.Po
 // never looked at may be carrying a record from a run that did not finish.
 // releaseResource gives the pool-directory lock back, so an operator's one-shot
 // run is not refused by a daemon that has stopped writing.
+//
+// Giving the lock back also gives up what this process knows about the
+// directory: while the lock is free, another writer may leave an unfinished
+// transaction there, and only a reconcile reads that record. So the next
+// round that may write starts with a reconcile, which takes the lock and
+// holds it through the apply in the same round. Without this the round after
+// a release skipped the reconcile, then refused to write because taking the
+// lock afresh cleared the flag: every second apply-now was refused.
 func (l *Loop) releaseResource() {
 	if l.resource == nil {
 		return
 	}
 	l.resource()
 	l.resource, l.resourceDir = nil, ""
+	l.reconciled = false
 }
 
 func (l *Loop) holdResource(dropInDir string) bool {
@@ -1014,9 +1135,14 @@ func (l *Loop) holdResource(dropInDir string) bool {
 
 	release, err := lock.Acquire(lock.ResourcePath(dropInDir))
 	if err != nil {
-		l.metrics.SetApplyBlocked("lock")
+		l.setApplyBlocked("lock")
 		l.log.Error("Cannot take the pool-directory lock; not applying",
 			"dir", dropInDir, "error", err)
+		// The answer to an apply-now that ran into this, whether here on the
+		// way to the plan or in the reconcile before it: an apply-mode daemon
+		// keeps the lock for as long as it runs, and that is the usual holder.
+		l.outcome = ApplyOutcome{Error: "cannot take the pool-directory lock on " + dropInDir +
+			": " + err.Error() + " (an fpm-tune serve --apply keeps it for as long as it runs; ask that daemon instead)"}
 
 		return false
 	}

@@ -7,7 +7,9 @@ description: Run it permanently as an adviser that writes its conclusion to a fi
 # Advisory mode
 
 Watching without acting is a first-class way to run this tool, not just a step on
-the way to `--apply`. A daemon without `--apply` changes nothing and never will.
+the way to `--apply`. A daemon without `--apply` changes nothing on its own. The one exception is
+an `apply-now` you send it, which applies the plan it showed once and leaves
+it advisory.
 But until now it could not leave its conclusion anywhere you could act on: the
 numbers were in a log line and on a metrics endpoint, and neither is something
 you can put into a pool file.
@@ -62,8 +64,10 @@ profile's guess, not the pool's own memory), so you know which figures to wait o
 
 Run it with `--recommend` and no `--apply` for a day or two, through a real
 traffic pattern. Diff the file against what you have. When you agree with what it
-recommends (and the numbers have stopped being profile guesses), either paste the
-changes yourself, or add `--apply` and let it do the writing.
+recommends (and the numbers have stopped being profile guesses), paste the
+changes yourself, or run `sudo fpm-tune apply-now` (or press `a` in
+`fpm-tune top`), which applies that plan once over the daemon's control socket
+and leaves it advisory, or add `--apply` and let it do the writing from then on.
 
 The same percentiles are on `/metrics` as `estimate="p50"`, `"p95"` and `"p99"`,
 and the CPU share as `fpm_tune_pool_cpu_ratio` with `estimate="p50"` and

@@ -233,6 +233,7 @@ func runInstallService(args []string) error {
 	fmt.Print("\nSwitch mode any time (no unit edit needed):\n" +
 		"  fpm-tune mode apply       # let it act on what it finds\n" +
 		"  fpm-tune mode advisory    # back to watch-only\n\n" +
+		"Watch it:   fpm-tune top\n" +
 		"Follow it:  journalctl -u fpm-tune -f\n")
 
 	return nil
@@ -412,6 +413,13 @@ metrics = %s
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
 # drop-in-dir =
+
+# How far back /history.json (what fpm-tune top draws) reaches. In memory only.
+# history = 24h
+
+# The unix socket fpm-tune apply-now (and top's a key) asks this daemon on.
+# Root-only. Default: beside the state file.
+# control = /var/lib/fpm-tune/control.sock
 
 # In advisory mode, the recommendation is written here for you to read and paste.
 # recommend = %s

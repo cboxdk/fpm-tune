@@ -191,6 +191,7 @@ or choose somewhere you own:
     say "Run it in the background under systemd — advisory first, acting when you trust it:"
     say "  sudo $BIN install-service     # watch and recommend, change nothing"
     say "  sudo $BIN mode apply          # let it act on what it finds"
+    say "  $BIN top                      # watch it: workers, queues, CPU, every resize"
 }
 
 main "$@"
