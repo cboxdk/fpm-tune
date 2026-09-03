@@ -49,6 +49,30 @@ type WorkerSample struct {
 	// Requests is how many requests this worker has served since it started.
 	// It is the maturity signal — see Learn.
 	Requests int64
+
+	// PID identifies the worker across scrapes, so the CPU figure of a request
+	// that has already been counted is not counted again on the next look.
+	// Zero when the scrape did not carry one.
+	PID int
+
+	// Idle is whether the worker was between requests when it was read. php-fpm
+	// fills in LastRequestCPU only for an idle worker: a running one reports
+	// zero, which is not a measurement.
+	Idle bool
+
+	// LastRequestCPU is php-fpm's own figure for the worker's most recent
+	// request: the share of its wall time spent on CPU, as a percentage, with
+	// the CPU of anything it spawned counted in. 100 is a request that
+	// computed the whole time; 10 is one that mostly waited on the database.
+	// LastRequestMicros is that request's duration, which decides whether the
+	// percentage means anything — see cpu.go.
+	LastRequestCPU    float64
+	LastRequestMicros int64
+
+	// OwnRequest marks a last request that was fpm-tune's own: the status
+	// call, or the opcache probe. They are traffic to php-fpm and not to the
+	// site, and are kept out of the CPU distribution.
+	OwnRequest bool
 }
 
 // Observation is one scrape of one pool.
@@ -195,6 +219,15 @@ type PoolState struct {
 	RSSHistogram []uint32 `json:"rss_histogram,omitempty"`
 	RSSSamples   int64    `json:"rss_samples,omitempty"`
 
+	// CPUHistogram counts how CPU-bound this pool's requests have been: the
+	// share of wall time a request spent on CPU, in buckets 5% wide to 100%,
+	// 25% wide to 400% and 100% wide to 3200% (cpu.go has the why). CPUSamples
+	// is how many readings are in it, and CPUSeen is each live worker's request
+	// count as of the last reading, so one request is counted once.
+	CPUHistogram []uint32      `json:"cpu_histogram,omitempty"`
+	CPUSamples   int64         `json:"cpu_samples,omitempty"`
+	CPUSeen      map[int]int64 `json:"cpu_seen,omitempty"`
+
 	// MasterConfig is the php-fpm configuration this pool was learned from.
 	//
 	// A state file can be shared by two daemons, each scoped to one master, and
@@ -239,6 +272,11 @@ type PoolState struct {
 
 // State is the whole store.
 type State struct {
+	// Notices is what Load had to do to the file to use it, one line each,
+	// for the caller to log. Not persisted: it describes this load, not the
+	// state.
+	Notices []string `json:"-"`
+
 	Version int                   `json:"version"`
 	Pools   map[string]*PoolState `json:"pools"`
 
@@ -316,6 +354,10 @@ type Options struct {
 	// MinMatureWorkers is how many such workers a scrape needs before it counts.
 	// One mature worker is an anecdote.
 	MinMatureWorkers int
+
+	// MinCPUReadings is how many requests a pool's CPU histogram needs before
+	// its shape is called anything, or allowed to cap the pool. See cpu.go.
+	MinCPUReadings int
 
 	// AlphaUp is the weight given to an observation LARGER than the current
 	// estimate. Per sample, and deliberately high: a worker costing more than
@@ -450,6 +492,9 @@ func (o Options) Defaults() Options {
 	if o.PeakWindow <= 0 {
 		o.PeakWindow = 24 * time.Hour
 	}
+	if o.MinCPUReadings <= 0 {
+		o.MinCPUReadings = 20
+	}
 
 	return o
 }
@@ -491,9 +536,34 @@ func Load(path string) (*State, error) {
 	for _, ps := range s.Pools {
 		ps.inferCadence()
 		ps.forgetTheFuture(now)
+		s.Notices = append(s.Notices, ps.dropMisshapenHistograms()...)
 	}
 
 	return &s, nil
+}
+
+// dropMisshapenHistograms discards a histogram whose length is not this
+// build's bucket count, and says so. The buckets are addressed by index, so a
+// file written by a build with a different layout — or a hand-edited one —
+// would be read under the wrong floors and, one bucket past its end, would
+// stop the daemon with an index out of range on the first scrape. A histogram
+// is a description that rebuilds itself within a day; the daemon is not. The
+// notice is for the journal: a pool that flips to "too few readings" after an
+// upgrade should have a line beside it saying why.
+func (ps *PoolState) dropMisshapenHistograms() []string {
+	var notices []string
+	if ps.RSSHistogram != nil && len(ps.RSSHistogram) != rssBuckets {
+		n := len(ps.RSSHistogram)
+		ps.RSSHistogram, ps.RSSSamples = nil, 0
+		notices = append(notices, fmt.Sprintf("pool %q: dropped its memory histogram, written with %d buckets where this build uses %d; it rebuilds from the next scrape", ps.Pool, n, rssBuckets))
+	}
+	if ps.CPUHistogram != nil && len(ps.CPUHistogram) != cpuBuckets {
+		n := len(ps.CPUHistogram)
+		ps.CPUHistogram, ps.CPUSamples = nil, 0
+		notices = append(notices, fmt.Sprintf("pool %q: dropped its CPU histogram, written with %d buckets where this build uses %d; it rebuilds from the next scrape", ps.Pool, n, cpuBuckets))
+	}
+
+	return notices
 }
 
 // forgetTheFuture drops timestamps that have not happened yet.
@@ -741,6 +811,11 @@ func (s *State) Learn(obs Observation, opts Options) bool {
 	if obs.MasterConfig != "" {
 		ps.MasterConfig = obs.MasterConfig
 	}
+
+	// Before the memory path's early returns: how CPU-bound a request was is
+	// known the moment it finished, and does not wait for the worker that served
+	// it to have loaded the whole application.
+	ps.observeCPU(obs.Workers)
 
 	// The peak is taken over EVERY worker with a reading; maturity decides only
 	// whether the scrape counts at all.

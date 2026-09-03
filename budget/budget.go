@@ -40,8 +40,17 @@ type Limits struct {
 	MemoryBytes int64
 
 	// CPUs is the effective core count, including a fractional cgroup quota
-	// rounded up — half a core still runs one worker at a time.
+	// rounded up — half a core still runs one worker at a time. It is the
+	// allocator's coarse per-core bound; anything that divides by the CPU
+	// should use CPUMillicores, which keeps the fraction.
 	CPUs int
+
+	// CPUMillicores is the CPU actually available, in thousandths of a core:
+	// 4000 for four cores, 500 for a container quota of half a core. It is the
+	// number the CPU-per-request arithmetic divides, because rounding a
+	// half-core quota up to one core would tell a pool it has twice the CPU it
+	// has.
+	CPUMillicores int
 
 	// Containerized reports whether MemoryBytes came from a cgroup limit rather
 	// than from the machine's total.
@@ -263,7 +272,7 @@ func readTrimmed(path string) (string, error) {
 }
 
 func detectWith(p sysPaths) Limits {
-	limits := Limits{CPUs: runtime.NumCPU()}
+	limits := Limits{CPUs: runtime.NumCPU(), CPUMillicores: runtime.NumCPU() * 1000}
 
 	// cgroup before /proc/meminfo: inside a container meminfo reports the
 	// HOST's memory, so consulting it first would size every container against
@@ -278,10 +287,10 @@ func detectWith(p sysPaths) Limits {
 		limits.MemoryBytes, limits.Source = bytes, SourceSysctl
 	}
 
-	if cpus, ok := readCgroupV2CPU(p.cgroupV2CPU); ok {
-		limits.CPUs = cpus
-	} else if cpus, ok := readCgroupV1CPU(p.cgroupV1Quota, p.cgroupV1Period); ok {
-		limits.CPUs = cpus
+	if m, ok := readCgroupV2CPU(p.cgroupV2CPU); ok {
+		limits.CPUMillicores, limits.CPUs = m, coresFor(m)
+	} else if m, ok := readCgroupV1CPU(p.cgroupV1Quota, p.cgroupV1Period); ok {
+		limits.CPUMillicores, limits.CPUs = m, coresFor(m)
 	}
 
 	return limits
@@ -353,8 +362,14 @@ func (l Limits) Describe() string {
 		where = "container"
 	}
 
-	base := fmt.Sprintf("%s memory %s, %d CPU(s) (via %s)",
-		where, HumanBytes(l.MemoryBytes), l.CPUs, l.Source)
+	cpu := fmt.Sprintf("%d CPU(s)", l.CPUs)
+	if l.CPUMillicores > 0 && l.CPUMillicores%1000 != 0 {
+		// A fractional quota, said as such: "1 CPU" for a half-core container
+		// would be the number every division below is careful not to use.
+		cpu = fmt.Sprintf("%dm CPU", l.CPUMillicores)
+	}
+	base := fmt.Sprintf("%s memory %s, %s (via %s)",
+		where, HumanBytes(l.MemoryBytes), cpu, l.Source)
 
 	if l.LookupErr != nil {
 		// Said out loud, because this number and a genuinely unlimited host's
@@ -454,6 +469,23 @@ func readSysctlMemory() (int64, bool) {
 	return v, true
 }
 
+// coresFor rounds millicores up to whole cores: half a core still runs one
+// worker at a time, and rounding down would report zero.
+func coresFor(millicores int) int {
+	return (millicores + 999) / 1000
+}
+
+// Millicores is the CPU to divide by. Limits built by hand, or by a source
+// that fills only the core count, carry no millicores; a core is a thousand of
+// them, and a division by zero would call every pool memory-limited.
+func (l Limits) Millicores() int {
+	if l.CPUMillicores > 0 {
+		return l.CPUMillicores
+	}
+
+	return l.CPUs * 1000
+}
+
 func readCgroupV2CPU(path string) (int, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -466,7 +498,7 @@ func readCgroupV2CPU(path string) (int, bool) {
 		return 0, false
 	}
 
-	return quotaToCPUs(fields[0], fields[1])
+	return quotaToMillicores(fields[0], fields[1])
 }
 
 func readCgroupV1CPU(quotaPath, periodPath string) (int, bool) {
@@ -479,13 +511,12 @@ func readCgroupV1CPU(quotaPath, periodPath string) (int, bool) {
 		return 0, false
 	}
 
-	return quotaToCPUs(strings.TrimSpace(string(quota)), strings.TrimSpace(string(period)))
+	return quotaToMillicores(strings.TrimSpace(string(quota)), strings.TrimSpace(string(period)))
 }
 
-// quotaToCPUs converts a CFS quota/period pair to a core count, rounding up:
-// half a core still runs one worker at a time, and rounding down would report
-// zero.
-func quotaToCPUs(quotaRaw, periodRaw string) (int, bool) {
+// quotaToMillicores converts a CFS quota/period pair to millicores, rounded
+// up so a quota is never reported as nothing.
+func quotaToMillicores(quotaRaw, periodRaw string) (int, bool) {
 	quota, err := strconv.ParseInt(quotaRaw, 10, 64)
 	if err != nil || quota <= 0 {
 		return 0, false
@@ -495,12 +526,22 @@ func quotaToCPUs(quotaRaw, periodRaw string) (int, bool) {
 		return 0, false
 	}
 
-	cpus := int((quota + period - 1) / period)
-	if cpus < 1 {
-		cpus = 1
+	millicores := int((quota*1000 + period - 1) / period)
+	if millicores < 1 {
+		millicores = 1
 	}
 
-	return cpus, true
+	return millicores, true
+}
+
+// HumanMillicores prints a CPU amount the way people read it: whole cores when
+// it is whole cores, otherwise millicores.
+func HumanMillicores(m int) string {
+	if m%1000 == 0 {
+		return fmt.Sprintf("%d core(s)", m/1000)
+	}
+
+	return fmt.Sprintf("%dm", m)
 }
 
 // HumanBytes formats a byte count for operator-facing output.

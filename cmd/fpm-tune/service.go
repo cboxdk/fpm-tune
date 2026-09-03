@@ -382,6 +382,12 @@ metrics = %s
 # conservative, sizes forever on the worst worker ever seen. Also p99, or a number.
 # sizing = p95
 
+# Let what a pool's requests measured cap it: a cpu-limited pool is held at the
+# busy workers that fill the CPU instead of the number memory allows. Off, the
+# CPU shape is still measured and reported (the plan says which of memory and
+# CPU each pool runs out of first) but sizes nothing.
+# cpu = true
+
 # On a host running several php-fpm masters, name the pool directory of the one to
 # manage. Unset is correct for a single master.
 # drop-in-dir =

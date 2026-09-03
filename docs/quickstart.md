@@ -36,14 +36,20 @@ container memory 4.0GiB, 12 CPU(s) (via cgroup v2)
   headroom kept:           614.4MiB (15% of 4.0GiB)
   available to workers:    3.4GiB
 
-POOL   NOW  PLAN  MEMORY    WHY
-shop   12   14    1.3GiB    peak 11 workers busy; raised to 14, measured 96.0MiB/worker
-blog   12   8     384.0MiB  peak 6 workers busy; 8 is enough, measured 48.0MiB/worker
+POOL   MODE     NOW  PLAN  MEMORY    WHY
+shop   dynamic  12   14    1.3GiB    peak 11 workers busy; raised to 14, measured 96.0MiB/worker
+blog   dynamic  12   8     384.0MiB  peak 6 workers busy; 8 is enough, measured 48.0MiB/worker
 ```
 
 It keeps ~85% of the budget for workers and holds the rest back as headroom (that's
 the 15%, tunable with `--reserve`). On a shared box it also subtracts what MySQL and
 friends are actually using; a `used by other services` line shows up then.
+
+Further down, a `CPU per request` table says which of memory and CPU each pool
+runs out of first, once it has read enough requests (on a first run it says `too
+few readings yet`). The plan reports that on its own. Pass `--cpu` to let it
+hold a cpu-limited pool at the workers that fill the CPU. See
+[CPU per request](how-it-decides/cpu.md).
 
 On a first run every pool is `estimated`, not measured: the numbers are a
 profile's guess until the tool has watched real traffic. That is expected, and

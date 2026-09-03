@@ -315,12 +315,44 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 				PSSBytes:        proc.CurrentPSS,
 				SubtreeRSSBytes: proc.SubtreeRSS,
 				Requests:        proc.Requests,
+
+				// Carried on every scrape whether or not CPU is being measured:
+				// the numbers are already in the status response, and the
+				// learner's option decides what to do with them. php-fpm only
+				// fills in the CPU figure once the request has finished and the
+				// worker is back to Idle; while it is Running the field reads 0,
+				// which is not a measurement, so the state travels with it.
+				PID:               proc.PID,
+				Idle:              strings.EqualFold(proc.State, "Idle"),
+				LastRequestCPU:    proc.LastRequestCPU,
+				LastRequestMicros: proc.RequestDuration,
+				OwnRequest:        ownRequest(proc.RequestURI, target.StatusPath),
 			})
 		}
 
 	}
 
 	return view
+}
+
+// opcacheProbePrefix is the script the phpfpm library runs through a worker
+// every scrape to read opcache status. The library keeps the constant private;
+// it is repeated here because a request the tool sent must not be measured as
+// one the site served, and the alternative is a measurement that calls a quiet
+// pool cpu-bound from being watched.
+const opcacheProbePrefix = "/cbox-phpfpm-opcache-"
+
+// ownRequest reports whether a worker's last request was one this tool sent:
+// the status call, or the opcache probe. The URI arrives with its query string
+// already stripped by the library. The status path is matched exactly — a
+// site's own /status/orders is the site's request, and a prefix match would
+// have dropped it from the measurement.
+func ownRequest(uri, statusPath string) bool {
+	if statusPath != "" && uri == statusPath {
+		return true
+	}
+
+	return strings.HasPrefix(uri, opcacheProbePrefix)
 }
 
 // SubtreeRSS sums php-fpm's own current memory across the views — each worker plus

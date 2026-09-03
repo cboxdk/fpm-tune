@@ -29,6 +29,10 @@ type Collectors struct {
 	confidence         *prometheus.GaugeVec
 	demandUnmet        *prometheus.GaugeVec
 	poolMeasured       *prometheus.GaugeVec
+	cpuShare           *prometheus.GaugeVec
+	cpuReadings        *prometheus.GaugeVec
+	cpuFillWorkers     *prometheus.GaugeVec
+	cpuLimited         *prometheus.GaugeVec
 
 	poolsAmbiguous    prometheus.Gauge
 	budgetBytes       *prometheus.GaugeVec
@@ -78,6 +82,14 @@ func New() *Collectors {
 			"1 when a pool wants more workers than it was given, and could not be. fpm_tune_capacity_exhausted is 1 whenever any pool is in this state — the two are the same news at different granularity, which pool and whether any.", "pool"),
 		poolMeasured: gaugeVec(reg, "fpm_tune_pool_measured",
 			"1 when a pool is sized from its own observed memory rather than a bootstrap estimate.", "pool"),
+		cpuShare: gaugeVec(reg, "fpm_tune_pool_cpu_ratio",
+			"CPU seconds over wall seconds for a request, 0 to 1, as php-fpm reports it for each worker's last request, counting the children the request waited for: a transcode on eight cores for the whole request is 8. estimate=\"p50\" is what the shape and the fill count are built on; \"p90\" says how much heavier the heavy requests are. Bucket floors, so read as at-least. Absent until the pool has enough readings (see fpm_tune_pool_cpu_readings).", "pool", "estimate"),
+		cpuReadings: gaugeVec(reg, "fpm_tune_pool_cpu_readings",
+			"How many requests the CPU share is built on. Below the threshold (20 by default) the shape is not called and the share series are absent.", "pool"),
+		cpuFillWorkers: gaugeVec(reg, "fpm_tune_pool_cpu_fill_workers",
+			"How many of this pool's workers, all busy at once, fill the host's CPU: the host's millicores over the pool's median per-request CPU. Compare with fpm_tune_pool_workers_recommended: a ceiling above this number is workers that make every request slower rather than serving more. Every pool is measured against the whole host; the figures do not add up across pools. Absent until the shape is known, and for a pool whose median is under 5%, which has no fill count to give.", "pool"),
+		cpuLimited: gaugeVec(reg, "fpm_tune_pool_cpu_limited",
+			"1 when the pool runs out of CPU before it reaches its memory-sized ceiling — the fill count is below what memory allows — or when --cpu held it at the fill count. 0 when memory is the limit. Absent until the shape is known.", "pool"),
 
 		poolsAmbiguous: gauge(reg, "fpm_tune_pools_ambiguous",
 			"How many pool names are shared by more than one PHP-FPM master this round. Above zero, those pools are NOT published: every per-pool series is labelled by name, so two pools called www would set the same series twice and the endpoint would report whichever ran last. Name a pool directory with --drop-in-dir."),
@@ -186,6 +198,26 @@ func (c *Collectors) Update(result plan.Result, st *state.State, opts state.Opti
 	c.confidence.Reset()
 	c.demandUnmet.Reset()
 	c.poolMeasured.Reset()
+	c.cpuShare.Reset()
+	c.cpuReadings.Reset()
+	c.cpuFillWorkers.Reset()
+	c.cpuLimited.Reset()
+
+	// The CPU dimension, per pool. cpuOf already skipped ambiguous names, and
+	// the rows without a known shape publish only their reading count, so a
+	// dashboard shows the measurement is running before it shows a number.
+	for _, cp := range result.CPU {
+		c.cpuReadings.WithLabelValues(cp.Name).Set(float64(cp.Samples))
+		if cp.Shape == "" {
+			continue
+		}
+		c.cpuShare.WithLabelValues(cp.Name, "p50").Set(cp.P50)
+		c.cpuShare.WithLabelValues(cp.Name, "p90").Set(cp.P90)
+		if cp.FillWorkers > 0 {
+			c.cpuFillWorkers.WithLabelValues(cp.Name).Set(float64(cp.FillWorkers))
+		}
+		c.cpuLimited.WithLabelValues(cp.Name).Set(boolValue(cp.Limit == "cpu"))
+	}
 
 	configured := map[string]int{}
 	for _, v := range result.Views {

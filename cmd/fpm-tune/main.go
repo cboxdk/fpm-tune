@@ -110,6 +110,7 @@ type commonFlags struct {
 	reserve     *string
 	workload    *string
 	sizing      *string
+	cpu         *bool
 	timeout     *time.Duration
 	verbose     *bool
 	noLearn     *bool
@@ -145,6 +146,10 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 			"percentile so a rare monster request doesn't inflate the pool, floored by the most recent "+
 			"peak so a deploy is still caught in one scrape; also p99, or a bare number) or `peak` (the "+
 			"pure peak-follower, most conservative, sizes forever on the worst worker ever seen)"),
+		cpu: fs.Bool("cpu", false, "let what a pool's requests measured cap it: a cpu-limited pool is held at the "+
+			"busy workers that fill the CPU instead of the number memory allows. Without it the CPU shape is "+
+			"still measured and reported, and the plan says which of memory and CPU each pool runs out of "+
+			"first, but sizes on memory alone"),
 		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
 		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
@@ -258,6 +263,9 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 	if err != nil {
 		return plan.Result{}, nil, err
 	}
+	for _, notice := range st.Notices {
+		log.Warn("State file adjusted on load", "what", notice)
+	}
 
 	views := observe.Sample(ctx, targets, log)
 
@@ -303,6 +311,7 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		ReserveFraction: reserveFraction,
 		StateOptions:    stateOpts,
 		Workload:        resolveWorkload(*c.workload, log),
+		CPUCeiling:      *c.cpu,
 		CgroupUsage:     usage,
 		HasCgroupUsage:  hasCgroup,
 	})
@@ -1087,6 +1096,7 @@ func runServe(args []string) error {
 		ReserveBytes:    reserveBytes,
 		ReserveFraction: reserveFraction,
 		Workload:        resolveWorkload(*c.workload, log),
+		CPUCeiling:      *c.cpu,
 		ScrapeTimeout:   *c.timeout,
 		HeartbeatEvery:  *heartbeat,
 		ApplyOptions: apply.Options{

@@ -78,6 +78,13 @@ type Input struct {
 	CgroupUsage    budget.CgroupUsage
 	HasCgroupUsage bool
 
+	// CPUCeiling lets what a pool's requests measured CAP the pool: a cpu-bound
+	// pool is held at the busy workers that fill the CPU rather than the number
+	// memory allows. Off, the measurement is still taken and reported — the
+	// plan says which resource each pool runs out of first — but sizes nothing.
+	// The --cpu flag.
+	CPUCeiling bool
+
 	// ReserveBytes overrides the profile's reserve when non-zero.
 	ReserveBytes int64
 
@@ -155,6 +162,15 @@ type Result struct {
 	// apart because it is not trying to.
 	Distribution []PoolDistribution
 
+	// CPU is how CPU-bound each pool's requests have measured, one row per
+	// pool, and what that means beside the number the plan gives it: which of
+	// memory and CPU the pool runs out of first. HostCPU adds the rows up
+	// against the CPU the host has. Always measured; it caps a pool only when
+	// Input.CPUCeiling is set, and CPUCeiling records whether it was.
+	CPU        []PoolCPU
+	HostCPU    HostCPU
+	CPUCeiling bool
+
 	// Ambiguous names pool names that appear more than once in this round,
 	// because two masters each have one. Nothing keyed on the name alone can
 	// represent them — not the metrics labels, not the plan table — so both say
@@ -225,6 +241,9 @@ func Build(in Input) (Result, error) {
 	// old record.
 	ambiguous := ambiguousNames(in.Views)
 
+	// The CPU to divide by, read once for the round.
+	hostCPU := in.Limits.Millicores()
+
 	// The child cost is folded into each pool's per-worker cost, not held back as
 	// a host-wide reserve. That is what keeps it safe: the allocator sizes every
 	// pool by dividing the budget by a bounded per-worker cost, so a worker that
@@ -240,7 +259,8 @@ func Build(in Input) (Result, error) {
 			result.Unreachable = append(result.Unreachable, view.Name)
 		}
 
-		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name])
+		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name],
+			in.CPUCeiling, hostCPU)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -296,6 +316,8 @@ func Build(in Input) (Result, error) {
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
 	result.Advice = adviceFor(in.Views, in.State, allocation)
+	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, allocation, ambiguous)
+	result.CPUCeiling = in.CPUCeiling
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage
 	for name := range ambiguous {
@@ -497,6 +519,8 @@ func poolFor(
 	opts state.Options,
 	at time.Time,
 	ambiguous bool,
+	cpuCeiling bool,
+	hostMillicores int,
 ) (allocate.Pool, bool) {
 	pool := allocate.Pool{
 		Name:               view.Name,
@@ -590,6 +614,13 @@ func poolFor(
 
 	if !pool.Reducible && view.MaxChildrenKnown && pool.CurrentMaxChildren > 0 {
 		pool.Floor = pool.CurrentMaxChildren
+	}
+
+	// The measured CPU ceiling, only where the operator let it bind, and only
+	// for a pool trusted enough to be cut on memory evidence — the same gate,
+	// because a cap below the configured ceiling IS a cut.
+	if cpuCeiling {
+		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)
 	}
 
 	// A pool whose configured ceiling could not be read is in the same position

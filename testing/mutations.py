@@ -140,8 +140,8 @@ MUTATIONS = [
      "state/state.go", "		ps.inferCadence()\n", ""),
     ("state: the peak is filtered by maturity again",
      "state/state.go",
-     "		if w.Requests >= opts.MinRequestsPerWorker {\n			mature++\n		}\n		if w.RSSBytes > peak {\n			peak = w.RSSBytes\n		}",
-     "		if w.Requests < opts.MinRequestsPerWorker {\n			continue\n		}\n		mature++\n		if w.RSSBytes > peak {\n			peak = w.RSSBytes\n		}"),
+     "		if w.Requests >= opts.MinRequestsPerWorker {\n			mature++\n		}\n		if cost > peak {\n			peak = cost\n		}",
+     "		if w.Requests < opts.MinRequestsPerWorker {\n			continue\n		}\n		mature++\n		if cost > peak {\n			peak = cost\n		}"),
     ("state: confidence accrues without work",
      "state/state.go",
      "	if worked && mature >= opts.MinMatureWorkers {", "	if true {"),
@@ -432,6 +432,41 @@ MUTATIONS = [
      "plan/plan.go",
      "	if in.ReserveBytes == 0 && in.Limits.NeighborBytes > 0 {\n		reserve += in.Limits.NeighborBytes\n	}\n",
      ""),
+    # The CPU measurement stands on three guards. A worker's last request is
+    # counted once, or a quiet pool re-counts the same request every scrape and
+    # the distribution describes idleness. A running worker's counter is not
+    # remembered, or the request that spans a scrape is never counted. And the
+    # tool's own probes are not the site's traffic.
+    ("state: the same request is counted on every scrape",
+     "state/cpu.go",
+     "		if prev, ok := ps.CPUSeen[w.PID]; ok && w.Requests == prev {",
+     "		if false {"),
+    ("state: a running worker's counter is remembered",
+     "state/cpu.go",
+     "			if prev, ok := ps.CPUSeen[w.PID]; ok {\n				seen[w.PID] = prev\n			}\n\n			continue\n",
+     "			seen[w.PID] = w.Requests\n\n			continue\n"),
+    ("state: our own probes are measured as the site",
+     "state/cpu.go",
+     "		if w.OwnRequest {",
+     "		if false {"),
+    # And the ceiling it feeds binds only where it may: on want, never as a cut
+    # of a pool that has not earned one, and never without --cpu.
+    ("allocate: the CPU ceiling cuts below the floor",
+     "allocate/allocate.go",
+     "			if cap < floors[i] {\n				cap = floors[i]\n			}\n",
+     "			if cap < floors[i] {\n				floors[i] = cap\n			}\n"),
+    ("allocate: a pool the budget trimmed is reported as held at the CPU",
+     "allocate/allocate.go",
+     "		bound := cpuBound[i] && granted[i] >= wants[i]",
+     "		bound := cpuBound[i]"),
+    ("plan: the CPU ceiling ignores the confidence gate",
+     "plan/cpu.go",
+     "	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {",
+     "	if ps == nil || !ps.CPUShapeKnown(opts) {"),
+    ("plan: the CPU ceiling binds without --cpu",
+     "plan/plan.go",
+     "	if cpuCeiling {\n		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)\n	}\n",
+     "	pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores)\n"),
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")
@@ -495,10 +530,11 @@ for label, path, old, new in MUTATIONS:
     if old == "@@MOVE@@":
         block = ("	// After the plan: the counters are what the NEXT round compares against, and\n"
                  "	// storing them earlier made the comparison one against itself.\n"
-                 "	plan.RecordCounters(l.state, views)\n")
+                 "	if !l.cfg.NoLearn {\n		plan.RecordCounters(l.state, views)\n	}\n")
         anchor = "	plan.LearnFrom(l.state, views, now, l.cfg.StateOptions)\n"
+        assert block in src, "RecordCounters block not found"
         moved = src.replace(block, "", 1).replace(
-            anchor, anchor + "	plan.RecordCounters(l.state, views)\n", 1)
+            anchor, anchor + "	if !l.cfg.NoLearn {\n		plan.RecordCounters(l.state, views)\n	}\n", 1)
         stash(path)
         open(path, "w").write(moved)
         failed = suite_fails(path)
@@ -521,10 +557,12 @@ for label, path, old, new in MUTATIONS:
         continue
     if old == "@@NOOP-DECAY@@":
         src2 = open("state/percentile.go").read()
-        guard = ("	if ps.RSSSamples > decayAfter {\n"
-                 "		for i := range ps.RSSHistogram {\n"
-                 "			ps.RSSHistogram[i] /= 2\n		}\n"
-                 "		ps.RSSSamples = ps.total()\n	}\n")
+        # One helper serves the memory and the CPU histogram, so removing
+        # this is removing decay from both.
+        guard = ("	if *samples > decayAfter {\n"
+                 "		for i := range hist {\n"
+                 "			hist[i] /= 2\n		}\n"
+                 "		*samples = histogramTotal(hist)\n	}\n")
         assert guard in src2, "decay guard not found"
         stash("state/percentile.go")
         open("state/percentile.go", "w").write(src2.replace(guard, "", 1))

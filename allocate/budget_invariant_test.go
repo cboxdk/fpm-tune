@@ -52,6 +52,12 @@ func TestAPlanNeverCommitsMoreThanTheBudget(t *testing.T) {
 				HitMaxChildren: rng.Intn(3) == 0,
 				QueueDepth:     int64(rng.Intn(50)),
 			}
+			// A measured CPU ceiling on a third of them, so the cap path is
+			// inside the sweep: it only ever lowers a want, and the invariant
+			// has to hold across it like every other branch.
+			if rng.Intn(3) == 0 {
+				pools[i].CPUCeiling = 1 + rng.Intn(80)
+			}
 		}
 
 		allocatable := int64(64+rng.Intn(8192)) * mb

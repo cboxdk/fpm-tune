@@ -43,24 +43,62 @@ func (ps *PoolState) observeRSS(bytes int64) {
 		ps.RSSHistogram = make([]uint32, rssBuckets)
 	}
 
-	ps.RSSHistogram[bucketOf(bytes)]++
-	ps.RSSSamples++
+	histogramAdd(ps.RSSHistogram, &ps.RSSSamples, bucketOf(bytes))
+}
 
-	if ps.RSSSamples > decayAfter {
-		for i := range ps.RSSHistogram {
-			ps.RSSHistogram[i] /= 2
+// histogramAdd counts one reading in a bucket and keeps the sample count
+// beside it, halving every bucket once the count passes decayAfter. Shared by
+// the memory and CPU histograms, so the decay policy is one policy.
+func histogramAdd(hist []uint32, samples *int64, bucket int) {
+	hist[bucket]++
+	*samples++
+
+	if *samples > decayAfter {
+		for i := range hist {
+			hist[i] /= 2
 		}
-		ps.RSSSamples = ps.total()
+		*samples = histogramTotal(hist)
 	}
 }
 
-func (ps *PoolState) total() int64 {
+func histogramTotal(hist []uint32) int64 {
 	var n int64
-	for _, c := range ps.RSSHistogram {
+	for _, c := range hist {
 		n += int64(c)
 	}
 
 	return n
+}
+
+// histogramBucketAt is the first bucket whose cumulative count reaches the
+// given fraction of the readings, and false when there are none. The caller
+// turns the index into a value; the walk is the same for every histogram.
+func histogramBucketAt(hist []uint32, p float64) (int, bool) {
+	total := histogramTotal(hist)
+	if total == 0 {
+		return 0, false
+	}
+	if p < 0 {
+		p = 0
+	}
+	if p > 1 {
+		p = 1
+	}
+
+	want := int64(math.Ceil(p * float64(total)))
+	if want < 1 {
+		want = 1
+	}
+
+	var seen int64
+	for i, c := range hist {
+		seen += int64(c)
+		if seen >= want {
+			return i, true
+		}
+	}
+
+	return len(hist) - 1, true
 }
 
 // bucketOf maps a size to its bucket, clamped at both ends. Anything below 1MiB
@@ -96,30 +134,10 @@ func bucketFloor(i int) int64 {
 // questions: this one describes what has been seen, that one decides what to
 // reserve.
 func (ps *PoolState) Percentile(p float64) int64 {
-	total := ps.total()
-	if total == 0 {
+	i, ok := histogramBucketAt(ps.RSSHistogram, p)
+	if !ok {
 		return 0
 	}
-	if p < 0 {
-		p = 0
-	}
-	if p > 1 {
-		p = 1
-	}
 
-	// The first bucket whose cumulative count reaches the fraction.
-	want := int64(math.Ceil(p * float64(total)))
-	if want < 1 {
-		want = 1
-	}
-
-	var seen int64
-	for i, c := range ps.RSSHistogram {
-		seen += int64(c)
-		if seen >= want {
-			return bucketFloor(i)
-		}
-	}
-
-	return bucketFloor(rssBuckets - 1)
+	return bucketFloor(i)
 }

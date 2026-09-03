@@ -157,3 +157,8 @@ scrape lands. Where the master runs under a cgroup, the cgroup's own high-water
 host with no cgroup, and no workload declaration, subtree measurement is
 best-effort: declare the workload on a pool you know shells out, and its floor
 holds regardless of what the sampling happens to catch.
+
+The CPU those children burn is measured on the other axis. php-fpm's
+per-request CPU share counts every child the request waited for, so a
+transcode shows up as a share above 100% in the
+[CPU per request](cpu.md) table even when the subtree walk missed its memory.

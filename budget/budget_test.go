@@ -136,12 +136,13 @@ func TestCPUQuotaRoundsUp(t *testing.T) {
 	tests := map[string]struct {
 		quota, period string
 		want          int
+		millicores    int
 	}{
-		"half a core":     {"50000", "100000", 1},
-		"one core":        {"100000", "100000", 1},
-		"one and a half":  {"150000", "100000", 2},
-		"four cores":      {"400000", "100000", 4},
-		"a tenth of core": {"10000", "100000", 1},
+		"half a core":     {"50000", "100000", 1, 500},
+		"one core":        {"100000", "100000", 1, 1000},
+		"one and a half":  {"150000", "100000", 2, 1500},
+		"four cores":      {"400000", "100000", 4, 4000},
+		"a tenth of core": {"10000", "100000", 1, 100},
 	}
 
 	for name, tt := range tests {
@@ -151,8 +152,14 @@ func TestCPUQuotaRoundsUp(t *testing.T) {
 			write(t, p.cgroupV2CPU, tt.quota+" "+tt.period)
 			write(t, p.memInfo, "MemTotal:        4194304 kB\n")
 
-			if got := detectWith(p).CPUs; got != tt.want {
-				t.Errorf("CPUs = %d, want %d", got, tt.want)
+			got := detectWith(p)
+			if got.CPUs != tt.want {
+				t.Errorf("CPUs = %d, want %d", got.CPUs, tt.want)
+			}
+			// The fraction survives alongside: anything that divides by the
+			// CPU must not be told a half-core quota is a core.
+			if got.CPUMillicores != tt.millicores {
+				t.Errorf("CPUMillicores = %d, want %d", got.CPUMillicores, tt.millicores)
 			}
 		})
 	}

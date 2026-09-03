@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"sort"
@@ -117,6 +118,35 @@ func (r Result) Render(w io.Writer) error {
 			"  peak, which rises fast and falls on a half-life. The spread is here for\n"+
 			"  the decision you are making by hand: a pool whose p99 is far above its\n"+
 			"  median has a tail, and a tail is what fills a host at the wrong moment.\n")
+	}
+
+	if len(r.CPU) > 0 {
+		fmt.Fprintf(&b, "\nCPU per request, as measured:\n")
+
+		ct := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(ct, "  POOL\tTYPICAL\tP90\tREADINGS\tPER WORKER\tLIMIT\tWHY")
+		for _, c := range r.CPU {
+			_, _ = fmt.Fprintf(ct, "  %s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				c.Name, c.Percent(c.P50), c.Percent(c.P90), c.Samples,
+				c.PerWorker(), cmp.Or(c.Limit, "-"), c.Why(r.HostCPU.Millicores))
+		}
+		if err := ct.Flush(); err != nil {
+			return err
+		}
+
+		if h := r.HostCPU; h.Millicores > 0 && (h.NeededNow > 0 || h.NeededAtPlan > 0) {
+			fmt.Fprintf(&b, "  If every measured pool ran its ceiling busy at once: %s now, %s at this\n"+
+				"  plan, against %s.\n",
+				budget.HumanMillicores(h.NeededNow), budget.HumanMillicores(h.NeededAtPlan),
+				budget.HumanMillicores(h.Millicores))
+		}
+		if r.CPUCeiling {
+			fmt.Fprintf(&b, "  --cpu is on: a cpu-limited pool is held at the busy workers that fill the\n"+
+				"  CPU, and its row in the plan table says so.\n")
+		} else {
+			fmt.Fprintf(&b, "  Sizing uses memory. A cpu-limited pool only gets slower past the workers\n"+
+				"  that fill the CPU; pass --cpu to hold it there.\n")
+		}
 	}
 
 	if len(r.Bootstrapped) > 0 {
