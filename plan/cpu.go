@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/budget"
@@ -59,9 +61,12 @@ type PoolCPU struct {
 	// on top, never below one worker per core plus one. The headroom is the
 	// one figure here that is a judgement rather than a measurement: it is
 	// how many workers may sit waiting on I/O or absorbing a burst past the
-	// point where the CPU is full. Zero until the shape is known.
-	Ceiling  int
-	Headroom float64
+	// point where the CPU is full. HeadroomFromPool says the pool set its own
+	// (env[FPM_TUNE_CPU_HEADROOM]) rather than taking the host's. Zero until
+	// the shape is known.
+	Ceiling          int
+	Headroom         float64
+	HeadroomFromPool bool
 
 	// StarvedRounds is how many scrapes found requests queued while the box
 	// was full: the direct observation that another worker would not have
@@ -140,6 +145,64 @@ func fillWorkers(perWorker, hostMillicores int) int {
 // and two workers per core; two is the generous end.
 const DefaultCPUHeadroom = 2.0
 
+// HeadroomMarker is the key a pool sets in its own configuration to carry more
+// or less headroom than the host: a pool with a slow payment API behind it
+// wants workers to wait in while the CPU is full, and can say so without every
+// other pool getting the same.
+const HeadroomMarker = "env[FPM_TUNE_CPU_HEADROOM]"
+
+// MaxCPUHeadroom is the most headroom a pool or the host may ask for. A
+// hundred times the fill count is already far past anything a real pool wants
+// (memory caps it long before), and the bound is what keeps the ceiling an
+// honest int: the product of a fill count and an unbounded float saturates
+// when it is converted, to the largest int on arm64 and the smallest on amd64,
+// where the floor check then holds the pool at the SMALLEST ceiling for asking
+// for the largest. A refused value is a warning the operator can act on; a
+// wrapped one is a silent cap.
+const MaxCPUHeadroom = 100.0
+
+// headroomFor resolves a pool's headroom: its own marker when it set one that
+// reads as a number from one to MaxCPUHeadroom, otherwise the host's. ok is
+// false for a marker that could not be read, so the caller can warn — a typo
+// should tell the operator, not quietly hand the pool the default.
+func headroomFor(marker string, host float64) (headroom float64, fromPool, ok bool) {
+	marker = strings.TrimSpace(marker)
+	if marker == "" {
+		return host, false, true
+	}
+	v, err := strconv.ParseFloat(marker, 64)
+	if err != nil || !headroomInRange(v) {
+		return host, false, false
+	}
+
+	return v, true, true
+}
+
+// headroomInRange says whether a headroom is one the ceiling can carry: a
+// finite number from one to MaxCPUHeadroom. NaN fails both comparisons, so it
+// needs no case of its own.
+func headroomInRange(v float64) bool {
+	return v >= 1 && v <= MaxCPUHeadroom
+}
+
+// hostHeadroom is the headroom the host's flag resolves to inside plan: the
+// default when unset, and otherwise held to the same range a pool's marker is.
+// The command validates the flag before it gets here, so this is the guard for
+// callers of the package that do not: the same saturation headroomFor refuses
+// on a pool would otherwise arrive through Input.CPUHeadroom.
+func hostHeadroom(v float64) float64 {
+	switch {
+	case v <= 0 || math.IsNaN(v):
+		return DefaultCPUHeadroom
+	case v < 1:
+		return 1
+	case v > MaxCPUHeadroom:
+		return MaxCPUHeadroom
+	}
+
+	return v
+}
+
 // cpuCeiling is the number --cpu holds a pool at: the fill count with headroom
 // on top, never below one worker per core plus one — a cap that leaves a box
 // fewer workers than cores is not a cap on concurrency, it is a fault.
@@ -147,9 +210,9 @@ func cpuCeiling(fill, hostMillicores int, headroom float64) int {
 	if fill <= 0 {
 		return 0
 	}
-	if headroom < 1 {
-		headroom = 1
-	}
+	// Clamped here too, so the conversion below can never saturate whatever
+	// path a headroom arrived by.
+	headroom = math.Min(math.Max(headroom, 1), MaxCPUHeadroom)
 	ceiling := int(math.Ceil(float64(fill) * headroom))
 	if floor := (hostMillicores+999)/1000 + 1; ceiling < floor {
 		ceiling = floor
@@ -232,6 +295,9 @@ func (c PoolCPU) Why(hostMillicores int) string {
 	}
 	if c.Ceiling > 0 {
 		line += fmt.Sprintf("; ceiling %d at %.2g× headroom", c.Ceiling, c.Headroom)
+		if c.HeadroomFromPool {
+			line += " (the pool's own)"
+		}
 	}
 	switch {
 	case c.CPUBound:
@@ -315,8 +381,9 @@ func cpuOf(
 				row.Shape, row.MillicoresPerWorker = cpuShape(row.P50)
 				row.BoxMillicoresPerWorker, row.Overhead, row.BoxMeasured = boxCost(ps, opts, row.MillicoresPerWorker)
 				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)
-				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, headroom)
-				row.Headroom = headroom
+				own, fromPool, _ := headroomFor(v.CPUHeadroom, headroom)
+				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, own)
+				row.Headroom, row.HeadroomFromPool = own, fromPool
 			}
 		}
 		if row.Shape != "" {

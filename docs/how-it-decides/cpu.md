@@ -156,6 +156,17 @@ The headroom is the one figure on this page that is a judgement rather than a
 measurement, and the report prints it beside the ceiling so it is never
 mistaken for one.
 
+A pool can carry its own. `env[FPM_TUNE_CPU_HEADROOM] = 3` in the pool's
+configuration gives that pool three times its fill count while the rest of the
+host keeps the default, which is what a pool with a slow payment API behind it
+wants: workers to wait in while the CPU is full, without every other pool
+getting the same. The report marks such a ceiling "(the pool's own)". The
+marker takes a number between one and one hundred, as does `--cpu-headroom`;
+a marker that does not read as one is a warning in the plan and in the
+recommendation file, naming the pool and the value, and the host's value is
+used for that pool. The serve loop does not log it, so a pool's marker is
+worth checking with `fpm-tune plan --cpu` after it is set.
+
 Every pool is measured against the whole host, so the fill counts do not add up
 across pools. The line under the table is where they do: what every measured
 pool would draw if it ran its ceiling busy at once, now and at this plan,

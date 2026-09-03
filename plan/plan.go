@@ -246,13 +246,13 @@ func Build(in Input) (Result, error) {
 	// old record.
 	ambiguous := ambiguousNames(in.Views)
 
+	// Pools whose own headroom marker could not be read, for one warning.
+	var badHeadrooms []string
+
 	// The CPU to divide by, read once for the round, and the headroom the
 	// ceiling carries on top of the fill count.
 	hostCPU := in.Limits.Millicores()
-	headroom := in.CPUHeadroom
-	if headroom <= 0 {
-		headroom = DefaultCPUHeadroom
-	}
+	headroom := hostHeadroom(in.CPUHeadroom)
 
 	// The child cost is folded into each pool's per-worker cost, not held back as
 	// a host-wide reserve. That is what keeps it safe: the allocator sizes every
@@ -269,8 +269,12 @@ func Build(in Input) (Result, error) {
 			result.Unreachable = append(result.Unreachable, view.Name)
 		}
 
+		poolHeadroom, _, headroomOK := headroomFor(view.CPUHeadroom, headroom)
+		if !headroomOK {
+			badHeadrooms = append(badHeadrooms, fmt.Sprintf("%s (%q)", view.Name, view.CPUHeadroom))
+		}
 		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name],
-			in.CPUCeiling, hostCPU, headroom)
+			in.CPUCeiling, hostCPU, poolHeadroom)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -319,6 +323,12 @@ func Build(in Input) (Result, error) {
 		allocation.Warnings = append(allocation.Warnings, fmt.Sprintf(
 			"unknown env[FPM_TUNE_WORKLOAD] on %s — reserving nothing for their children; "+
 				"known values are %s", strings.Join(badMarkers, ", "), KnownWorkloads))
+	}
+	if len(badHeadrooms) > 0 {
+		sort.Strings(badHeadrooms)
+		allocation.Warnings = append(allocation.Warnings, fmt.Sprintf(
+			"unreadable %s on %s — using the host's %.2g×; it takes a number from 1 to %g",
+			HeadroomMarker, strings.Join(badHeadrooms, ", "), headroom, MaxCPUHeadroom))
 	}
 
 	result.Plan = allocation

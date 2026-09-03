@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -153,7 +154,8 @@ func registerCommon(fs *flag.FlagSet) commonFlags {
 			"first, but sizes on memory alone"),
 		cpuHeadroom: fs.Float64("cpu-headroom", plan.DefaultCPUHeadroom, "with -cpu, the factor on the workers that fill the CPU a "+
 			"pool is held at: room for requests waiting on I/O and for bursts past the point where the CPU "+
-			"is full. Never below one worker per core plus one"),
+			"is full. Never below one worker per core plus one. A number from 1 to 100. A pool overrides "+
+			"this with env[FPM_TUNE_CPU_HEADROOM] in its own config"),
 		timeout: fs.Duration("timeout", 15*time.Second, "budget for scraping all pools"),
 		verbose: fs.Bool("verbose", false, "log what is being read"),
 		noLearn: fs.Bool("no-learn", false,
@@ -239,6 +241,9 @@ func gather(ctx context.Context, c commonFlags, dropInDir string, log *slog.Logg
 		if reserveBytes, reserveFraction, err = parseReserve(*c.reserve); err != nil {
 			return plan.Result{}, nil, fmt.Errorf("--reserve: %w", err)
 		}
+	}
+	if err := checkHeadroom(*c.cpuHeadroom); err != nil {
+		return plan.Result{}, nil, err
 	}
 
 	targets, err := observe.Discover(ctx, log)
@@ -947,6 +952,20 @@ const defaultSizingMargin = 0.10
 // number like 95) sizes on that percentile of the worker distribution plus a small
 // margin, floored so it still reacts to a real increase in one scrape; "peak" is the
 // opt-in pure peak-follower, which sizes forever on the worst worker ever seen.
+// checkHeadroom refuses a --cpu-headroom the ceiling cannot carry. The flag
+// parses any float, and a value like 1e19 would saturate the ceiling's
+// conversion to an int (see plan.MaxCPUHeadroom), so the range is checked up
+// front, where the other flags are, rather than clamped out of sight. A pool's
+// own marker is bounded the same way inside plan, and warns instead, because a
+// typo in one pool's config should not stop the whole host being planned.
+func checkHeadroom(v float64) error {
+	if v < 1 || v > plan.MaxCPUHeadroom || math.IsNaN(v) {
+		return fmt.Errorf("--cpu-headroom must be a number from 1 to %g, got %g", plan.MaxCPUHeadroom, v)
+	}
+
+	return nil
+}
+
 func parseSizing(raw string) (state.Sizing, error) {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	if s == "" {
@@ -1083,6 +1102,9 @@ func runServe(args []string) error {
 		if reserveBytes, reserveFraction, err = parseReserve(*c.reserve); err != nil {
 			return fmt.Errorf("--reserve: %w", err)
 		}
+	}
+	if err := checkHeadroom(*c.cpuHeadroom); err != nil {
+		return err
 	}
 
 	sizing, err := parseSizing(*c.sizing)

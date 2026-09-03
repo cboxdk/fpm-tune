@@ -32,6 +32,12 @@ type PoolView struct {
 	// keep for the children a worker spawns before any has been observed.
 	Workload string
 
+	// CPUHeadroom is the pool's own env[FPM_TUNE_CPU_HEADROOM], as written, or
+	// empty when it set none and the host's --cpu-headroom applies. Carried
+	// raw: the plan interprets it, and warns about one it cannot read rather
+	// than silently using the default.
+	CPUHeadroom string
+
 	// CurrentMaxChildren is the configured pm.max_children, read from the
 	// effective configuration rather than inferred from the process count — a
 	// pool that has never been busy runs fewer workers than it is allowed.
@@ -231,7 +237,8 @@ func Sample(ctx context.Context, targets []phpfpm.Target, log *slog.Logger) []Po
 }
 
 func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView {
-	view := PoolView{Name: outcome.Name, Target: target, Workload: target.Workload}
+	view := PoolView{Name: outcome.Name, Target: target, Workload: target.Workload,
+		CPUHeadroom: poolMarker(target, "env[FPM_TUNE_CPU_HEADROOM]")}
 
 	// What discovery already knew, carried before anything can return early.
 	//
@@ -336,6 +343,22 @@ func viewFromOutcome(outcome phpfpm.PoolOutcome, target phpfpm.Target) PoolView 
 	}
 
 	return view
+}
+
+// poolMarker reads one env[FPM_TUNE_*] key from the pool's effective
+// configuration. The library parsed that configuration during discovery and
+// caches it per master, so this is a map lookup, not a fork. Empty when the
+// pool did not set the key or the configuration cannot be read.
+func poolMarker(target phpfpm.Target, key string) string {
+	if target.Binary == "" || target.ConfigPath == "" {
+		return ""
+	}
+	cfg, err := phpfpm.ParseConfig(target.Binary, target.ConfigPath)
+	if err != nil || cfg == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(cfg.Pools[target.Name][key])
 }
 
 // workerCPUTicks is a worker's cumulative CPU time from /proc/<pid>/stat:

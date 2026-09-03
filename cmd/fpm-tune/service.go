@@ -405,7 +405,8 @@ metrics = %s
 
 # With cpu on, the factor on the workers that fill the CPU a pool is held at:
 # room for requests waiting on I/O and for bursts. Never below one per core
-# plus one.
+# plus one. A number from 1 to 100. A pool overrides this with
+# env[FPM_TUNE_CPU_HEADROOM] in its own config.
 # cpu-headroom = 2
 
 # On a host running several php-fpm masters, name the pool directory of the one to
