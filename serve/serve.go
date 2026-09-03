@@ -374,6 +374,13 @@ func (l *Loop) Run(ctx context.Context) error {
 			l.outcome = ApplyOutcome{Message: "nothing was applied: the round did not reach the plan"}
 			l.round(ctx)
 			l.forceApply = false
+			// A watching daemon does not keep the pool directory: it took the
+			// lock for this one write, and another writer (the operator, an
+			// apply-mode daemon) must be able to take it the moment it is
+			// done. An apply-mode daemon keeps it, as it always has.
+			if !l.cfg.Apply {
+				l.releaseResource()
+			}
 			req.reply <- l.outcome
 		}
 	}

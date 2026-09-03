@@ -303,6 +303,13 @@ grep -qE "→|nothing to change" "$ROOT/applynow.out" || { kill $SERVE 2>/dev/nu
 if grep -q "→" "$ROOT/applynow.out" && [ "$(fingerprint)" = "$BEFORE" ]; then
   kill $SERVE 2>/dev/null || true; fail "apply-now reported a change but the pool directory is unchanged"
 fi
+# And the daemon let go of the pool directory afterwards: a second writer is
+# not refused while the watching daemon is still up. (Its own state dir, so
+# the state lock is not what is being tested.)
+mkdir -p "$ROOT/writer-state"
+"$BIN" apply --dry-run --memory 512MB --state "$ROOT/writer-state/state.json" "${SCOPE[@]}" \
+  --backup-dir "$ROOT/writer-backup" > "$ROOT/writer.out" 2>&1 \
+  || { kill $SERVE 2>/dev/null || true; fail "a writer was refused after apply-now; the watching daemon kept the pool lock:$(printf '\n')$(cat "$ROOT/writer.out")"; }
 kill $SERVE 2>/dev/null || true; wait $SERVE 2>/dev/null || true
 [ -S "$CONTROL" ] && fail "the control socket was left behind after the daemon stopped"
 echo "  confirmed: the watching daemon applied once, on request, and cleaned up its socket"
