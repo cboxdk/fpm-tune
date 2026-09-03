@@ -1,21 +1,16 @@
 ---
 title: Operating it
 weight: 30
-description: Running it as a daemon, advising instead of acting, what to alert on, and recovering a host whose master will not start.
+description: Running it as a service, applying once, the metrics, advisory mode, recovery, and the lifecycle of an install.
 ---
 
 # Operating it
 
-Once you understand [how it decides](../how-it-decides/_index.md), the operating
-concerns are small and few:
+These pages are for the person who runs fpm-tune on a host: installing it as a service, acting on its plan once, alerting on it, and undoing, removing or upgrading it.
 
-- **[Running as a daemon](running-as-a-daemon.md)**: watch-only versus
-  `--apply`, what the loop does each round, the day of history it keeps,
-  `fpm-tune top`, and applying once with `apply-now`.
-- **[Advisory mode](advisory-mode.md)**: running it permanently as an adviser
-  that writes its conclusion to a file you paste by hand, and never touches the
-  host.
-- **[Alerting](alerting.md)**: the metrics that tell you whether it is working,
-  and the one distinction (watching versus acting) that is invisible without them.
-- **[Recovering a host](recovering.md)**: what happens, and what to do, when
-  php-fpm will not start.
+- **[Running as a daemon](running-as-a-daemon.md)**: the systemd install, the two modes, what a round does, and what it logs.
+- **[Applying once](applying-once.md)**: `fpm-tune top` and `sudo fpm-tune apply-now`, for acting on a plan you have read.
+- **[Metrics and alerting](metrics-and-alerting.md)**: every series on `/metrics`, the three alerts that matter, `/healthz` and `/history.json`.
+- **[Advisory mode](advisory-mode.md)**: the recommendation file, and the workflow of deciding by hand.
+- **[Recovering a host](recovering.md)**: what happens, and what to do, when php-fpm will not start.
+- **[Lifecycle](lifecycle.md)**: undoing a change, removing it, upgrading, what it costs to run, and resetting the baseline.

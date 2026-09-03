@@ -84,7 +84,7 @@ func TestRenderShowsModeAndAdvice(t *testing.T) {
 		t.Errorf("the mode suggestion is missing from the output:\n%s", out)
 	}
 	// The suggestion must read as advisory, never as something it applies.
-	if !strings.Contains(out, "won't change it") {
+	if !strings.Contains(out, "will not change it") {
 		t.Errorf("the suggestion is not clearly marked advisory:\n%s", out)
 	}
 }

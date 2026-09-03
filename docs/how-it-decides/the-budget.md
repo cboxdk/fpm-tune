@@ -1,137 +1,103 @@
 ---
 title: The budget
 weight: 1
-description: Where the number it divides comes from, and why the machine's memory is the wrong answer on a VM.
+description: Where the memory it divides comes from, what it holds back, and how to give php-fpm a hard limit.
 ---
 
 # The budget
 
-Everything downstream divides one number: how much memory there is for PHP-FPM
-workers. Getting it wrong is the single worst thing this tool can do. Too large
-and the host OOMs; too small and every site is throttled.
+Everything else in this section divides one number: the memory available to
+PHP-FPM workers. This page is where that number comes from, and it is the page
+to read when a plan's first lines look wrong.
 
-## It reads the master's cgroup, not the machine
+## Where the number comes from
 
-The budget is read from the cgroup of the php-fpm master being managed, walking
-up the hierarchy and taking the tightest limit, because a cap on any ancestor
-binds everything below it.
+fpm-tune finds the php-fpm master, reads its cgroup path from
+`/proc/<pid>/cgroup`, and walks up the cgroup tree taking the tightest limit it
+finds. It reads `memory.high` as well as `memory.max`, because a service above
+its `MemoryHigh=` is throttled into reclaim rather than killed, and a pool sized
+past that line thrashes instead of serving.
 
-That distinction is the difference between a container and a VM, and it is not a
-detail:
+Reading the master's own cgroup, rather than the machine, is what makes the same
+code right in both places. Inside a container, `/sys/fs/cgroup/memory.max` is
+the container's limit. On a VM that path is the machine, which is usually
+unlimited, while php-fpm may be capped by a systemd `MemoryMax=` on its own
+service. Sizing against the machine's 20 GiB would grow the pools into a 3 GiB
+limit they never see.
 
-- **Inside a container**, `/sys/fs/cgroup/memory.max` is the container's own
-  limit. Reading it is exactly right.
-- **On a VM**, that same path is the *machine*, and the machine is usually not
-  limited. But php-fpm may well be capped, by a systemd `MemoryMax=3G` on its
-  own slice. Sizing against the machine's 20GiB would grow the pools straight
-  into a 3GiB ceiling they never see, and the host would look fine right up until
-  the OOM killer arrives.
-
-So the tool finds the master's pid, reads *its* cgroup path from
-`/proc/<pid>/cgroup`, and walks the memory-limit files up the tree. On the VM,
-that reaches the slice's `MemoryMax` rather than the machine's non-limit.
-
-## Soft limits count too
-
-`MemoryHigh=` is systemd's documented way to say "keep this service under N".
-Above it the cgroup is not killed but throttled into aggressive reclaim,
-which from outside looks like a host that has simply gone slow. The tool reads
-`memory.high` alongside `memory.max` and takes the tighter of the two, because a
-pool sized past the soft ceiling thrashes rather than serves.
-
-## When it cannot read the limit, it refuses to write
-
-"Found no limit" and "could not read the limit" produce the same fallback (the
-machine's memory) and they are opposite situations. The second is the one that
-sizes a 3GiB service against 32GiB.
-
-So the two are distinguished. If the master's own limit *could not be read* (a
-`/proc` mounted `hidepid=2` while php-fpm runs as root and the tool does not, a
-hardened host, or the plain race of the master restarting during the scrape), the
-tool records that, and **refuses to write** rather than sizing against a budget
-nobody confirmed. The message names the file it could not read, and tells you to
-either make it readable or pass `--memory` with the real number.
-
-A host with no cgroup limit anywhere (a bare VM, or a platform with no
-cgroups at all) is not a failed lookup. There the machine's memory is the honest
-answer, and the tool uses it.
-
-## A good neighbour on a shared host
-
-On a bare VM with no cgroup cap, php-fpm is rarely the only thing using memory:
-MySQL, Redis and the OS want their share. Sizing php-fpm against the whole machine
-would tune it to claim memory those services need, and the first busy moment OOMs
-one of them.
-
-So on the `/proc/meminfo` path (and only there, since a cgroup limit already
-excludes them) the budget leaves room for whatever else is running. It reads
-`MemAvailable`, the memory the kernel has free for new allocations after everything
-else's use, and holds back `MemTotal − MemAvailable − php-fpm's own` on top of the
-percentage headroom. The effect is that the host **as a whole** stays under the
-target utilisation, not just php-fpm's share of it. On a dedicated box, where almost
-everything is free, this reserves nothing extra and the behaviour is unchanged.
-
-The plan shows what it left:
+A host with no limit anywhere (a bare VM, or a platform without cgroups) is
+sized against the machine's memory, read from `/proc/meminfo`. The plan's first
+line says which source it used:
 
 ```
 host memory 7.5GiB, 4 CPU(s) (via /proc/meminfo)
-  used by other services:  3.1GiB (left for them; cap php-fpm's cgroup for a hard limit)
-  headroom kept:           1.1GiB (15% of 7.5GiB)
-  available to workers:    3.3GiB
 ```
 
-It sizes against what those services use **now**. A service still warming up
-(MySQL's InnoDB buffer pool filling toward its configured maximum) will use more
-later, so on a shared VM the honest hard guarantee is still a cgroup cap on php-fpm.
-The good-neighbour reserve is the safe default; a cap is the promise.
+With a cgroup limit the line begins `php-fpm's memory` and ends
+`(via php-fpm's cgroup)`.
 
-## Guaranteeing php-fpm a slice (the hard limit)
+## When the limit cannot be read
 
-If php-fpm and its neighbours compete for the memory (the shared VM
-where `plan` reports `CAPACITY EXHAUSTED`), the clean answer is to give php-fpm its
-own cgroup, so neither can starve the other and neither can OOM the host. On
-systemd, cap the php-fpm service:
+"Found no limit" and "could not read the limit" fall back to the same number,
+the machine's memory, and they are opposite situations. The second is the one
+that sizes a 3 GiB service against 32 GiB: a `/proc` mounted `hidepid=2` while
+php-fpm runs as root and fpm-tune does not, or the master restarting during the
+scrape.
+
+So the two are kept apart. When the master's own limit could not be read, the
+plan prints a `WARNING:` under the first line saying so, and `apply`,
+`serve --apply` and `apply-now` refuse to write from that budget. Make the file
+readable, or pass `--memory` with the real number.
+
+## The shared host
+
+On the `/proc/meminfo` path php-fpm is rarely alone: MySQL, Redis and the OS
+want their share, and there is no cgroup limit to exclude them. So the budget
+reads `MemAvailable` and holds back `MemTotal - MemAvailable - php-fpm's own`
+for them, on top of the reserve below. The host as a whole stays under the
+target, and on a dedicated host, where almost everything is free, this holds
+back nothing extra.
+
+```
+host memory 7.5GiB, 4 CPU(s) (via /proc/meminfo)
+  used by other services:  3.0GiB (left for them; cap php-fpm's cgroup for a hard limit)
+  reserve kept:            1.1GiB (15% of 7.5GiB)
+  available to workers:    3.5GiB
+```
+
+This is what the neighbours use now. A MySQL still filling its buffer pool will
+use more later, which is why the line says to cap php-fpm's cgroup. The
+neighbour term is the safe default; the limit is the guarantee.
+
+## The reserve
+
+The reserve is what is held back from workers for the OS, the web server and
+opcache's shared segment. The default is 15% of the budget (85% for workers),
+with a floor of 256 MiB: on a host where 15% would be less than that, the floor
+is kept instead, and on a host smaller than 256 MiB half of it is. The plan
+prints the reserve and its reason on the `reserve kept:` line.
+
+`--reserve` changes it. A percentage (`--reserve 20%`) sets the fraction and
+keeps the neighbour term. A fixed amount (`--reserve 1G`) replaces the whole
+reserve, neighbours included, so it is the total you are choosing. In the
+service config the key is `reserve`.
+
+## Giving php-fpm a hard limit
+
+On a shared host the clean answer is a cgroup limit on php-fpm itself: neither
+it nor its neighbours can then starve the other, and the budget stops moving
+when MySQL does. On systemd (the unit is `php8.4-fpm` on Debian and Ubuntu,
+including Forge and Ploi hosts, and `php-fpm` elsewhere):
 
 ```bash
-sudo systemctl edit php8.4-fpm      # (or php-fpm, php8.3-fpm, …)
-```
-```ini
-[Service]
-MemoryMax=3G
-```
-```bash
-sudo systemctl restart php8.4-fpm
+sudo systemctl set-property php8.4-fpm.service MemoryMax=4G
 ```
 
-Now `fpm-tune plan` reads `via php-fpm's cgroup` and sizes to that 3GiB, a stable
-budget that does not move when MySQL does, and one MySQL cannot cross either. This
-is the recommended shape for any host where php-fpm is not the only tenant; the
-good-neighbour default is what runs until you set it.
+This takes effect immediately and persists across reboots. The next plan reads
+`via php-fpm's cgroup` and sizes to the 4 GiB.
 
-## Overriding it
+## Overriding the detection
 
-`--memory 8G` replaces the detection entirely, for when php-fpm is not the only
-tenant of its cgroup, or when the detection cannot see the real limit and you know
-it.
-
-`--reserve` sets how much to hold back from workers. It takes a fixed amount
-(`--reserve 1G`) or a percentage of the budget (`--reserve 20%`, so 80%
-utilisation). Without it, the default keeps **15% back (85% utilisation)**, plus,
-on a shared host, whatever other services are using (above). The 85% matches the
-`cboxdk/laravel-queue-autoscale` default, so a host running both sizes to one
-utilisation target rather than two that disagree.
-
-## Reading the budget line
-
-Every plan and every recommendation states where the number came from:
-
-```
-host memory 4.0GiB, 12 CPU(s) (via php-fpm's cgroup)
-```
-
-- `via php-fpm's cgroup`: read from the master's own slice. Trust it.
-- `via /proc/meminfo`: the machine's memory, because no cap was found. Correct
-  on a bare VM or in a container that really is unlimited; a red flag if you
-  expected php-fpm to be capped.
-- A `WARNING` that the limit could not be read: the number is the machine's and
-  the tool will not apply from it. Pass `--memory`.
+`--memory 8G` replaces the detected budget, for a php-fpm that shares its
+cgroup with something else, or a host where the detection cannot see the real
+limit and you can. In the service config it is `memory`.

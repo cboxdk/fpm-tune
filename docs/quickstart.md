@@ -1,116 +1,92 @@
 ---
 title: Quickstart
 weight: 1
-description: From nothing to a tuned host in one read, without risking anything on the way.
+description: From install to a host sized by fpm-tune, in one read.
 ---
 
 # Quickstart
 
-The safe path is the same one this tool wants you to take: look first, advise
-for a while, then let it act.
+This page takes you from install to a host sized by fpm-tune: read a plan, run it advisory for a day, then let it apply. It is written for the person who runs the host.
 
-## 1. Get it
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | sh
 ```
 
-One static binary, no runtime dependency beyond php-fpm. The installer verifies
-the release checksum and refuses to install on a mismatch; it never uses `sudo`.
-On macOS, `brew install cboxdk/tap/fpm-tune` does the same. For verifying the
-release signature, other platforms, or building from source, see
-[Installation](getting-started/installation.md).
+The installer verifies the release checksum, and the Sigstore signature when `cosign` is installed, and refuses to install on a mismatch. It never runs `sudo`: run it as root on a server so the binary lands in `/usr/local/bin`, where `sudo fpm-tune` can find it. The other methods and the details are in [Installation](getting-started/installation.md).
 
-## 2. See what it thinks
+## Read a plan
 
 ```bash
 fpm-tune plan
 ```
 
-`plan` writes no configuration and reloads nothing. On a host with a running
-php-fpm master it discovers the pools, reads the budget from the master's cgroup,
-and prints what it would set and why:
+`plan` writes no configuration and reloads nothing. It records what it observed to the state file, so a plan run before anything is applied is already building a baseline. It prints the memory budget, one row per pool, and what it measured:
 
 ```
-container memory 4.0GiB, 12 CPU(s) (via cgroup v2)
-  headroom kept:           614.4MiB (15% of 4.0GiB)
-  available to workers:    3.4GiB
+host memory 7.5GiB, 4 CPU(s) (via /proc/meminfo)
+  used by other services:  3.0GiB (left for them; cap php-fpm's cgroup for a hard limit)
+  reserve kept:            1.1GiB (15% of 7.5GiB)
+  available to workers:    3.5GiB
 
-POOL   MODE     NOW  PLAN  MEMORY    WHY
-shop   dynamic  12   14    1.3GiB    peak 11 workers busy; raised to 14, measured 96.0MiB/worker
-blog   dynamic  12   8     384.0MiB  peak 6 workers busy; 8 is enough, measured 48.0MiB/worker
+POOL       MODE     NOW  PLAN  MEMORY    WHY
+www        dynamic  20   20    960.0MiB  peak 2 workers busy, but not yet watched under load; held at its configured 20, estimated 48.0MiB/worker
+www-forge  dynamic  10   41    1.7GiB    peak 33 workers busy; raised to 41, measured 41.9MiB/worker + 37.6KiB children
+
+allocated 2.6GiB of 3.5GiB, 869.2MiB free
 ```
 
-It keeps ~85% of the budget for workers and holds the rest back as headroom (that's
-the 15%, tunable with `--reserve`). On a shared box it also subtracts what MySQL and
-friends are actually using; a `used by other services` line shows up then.
+The WHY column is the evidence for the number. `estimated` means the pool has not been watched under load yet and is held where you configured it; `measured` means the per-worker cost is the pool's own. Every line is explained in [Reading a plan](getting-started/reading-a-plan.md).
 
-Further down, a `CPU per request` table says which of memory and CPU each pool
-runs out of first, once it has read enough requests (on a first run it says `too
-few readings yet`). The plan reports that on its own. Pass `--cpu` to let it
-hold a cpu-limited pool at the workers that fill the CPU. See
-[CPU per request](how-it-decides/cpu.md).
+### If it finds no pools
 
-On a first run every pool is `estimated`, not measured: the numbers are a
-profile's guess until the tool has watched real traffic. That is expected, and
-the plan says so.
-
-If instead `plan` says a pool **has no `pm.status_path`**, that is a stock
-php-fpm: it sizes each pool from its live status page, and that page ships off.
-Turn it on and the pool becomes visible, then run `plan` again:
+fpm-tune sizes a pool from its status page (`pm.status_path`), and a stock php-fpm ships that page off. On such a host `plan` says a master is running but its pools have no `pm.status_path`. Turn the page on:
 
 ```bash
-fpm-tune enable-status      # validated drop-in + reload; rolled back if it fails
+sudo fpm-tune enable-status
 ```
 
-(`apply` and `serve --apply` do this for you; you only need it by hand to `plan`
-first. See [First run](getting-started/first-run.md).)
+This writes `zz-fpm-tune-status.conf` into the pool directory, validated first and rolled back if the master does not come back, and reloads. It changes no ceiling. `apply` and `serve --apply` do this on their own; `enable-status` is for reading a plan before anything is applied. A pool with no status page is not sized at all: `plan` leaves it out, and `serve` warns about it by name.
 
-## 3. Let it advise, permanently
+## Let it advise for a day
+
+Run it in the background in advisory mode. On a systemd host:
 
 ```bash
-fpm-tune serve --recommend /var/lib/fpm-tune/recommended.conf
+sudo fpm-tune install-service
 ```
 
-`serve` without `--apply` changes nothing and never will. It measures, publishes
-metrics on `:9110`, and (with `--recommend`) writes its conclusion as
-PHP-FPM configuration you can read, diff, and paste by hand. The file is
-rewritten only when the recommended settings change, so its modification time
-tells you when the advice last moved. See [Advisory mode](operating/advisory-mode.md).
+This writes `/etc/fpm-tune/config` and a unit, and starts the service. Every 30 s it measures, publishes metrics on `127.0.0.1:9110`, and writes its recommendation to `/var/lib/fpm-tune/recommended.conf`, logging it whenever it changes. It changes nothing. Without systemd, `fpm-tune serve` in a terminal does the same. `fpm-tune top` shows what it sees: busy workers, queues, the CPU side and every resize.
 
-Leave it running for a day or two through a real traffic pattern. The estimates
-become measurements, and the recommendation settles onto numbers backed by what
-the workers actually did.
+Give it a day through a real traffic pattern. The estimates become measurements, and the recommendation settles.
 
-## 4. Let it act
+## Let it act
 
-When you trust the numbers, ask the daemon from step 3 to apply them once:
+To apply the plan once, now:
 
 ```bash
-sudo fpm-tune apply-now     # or press a in fpm-tune top
+sudo fpm-tune apply-now
 ```
 
-It stays advisory afterwards. (Without a daemon running, `fpm-tune apply` does
-the same from the command line; beside one it is refused, because two writers
-of one state file discard each other's learning.) Either way this writes one
-file (`zz-fpm-tune.conf`, in the directory your master already includes), validates it against a sandboxed copy of the configuration, and
-reloads the master with SIGUSR2. If php-fpm would reject the file, it never
-reaches the live directory. If the master does not survive the reload, the
-change is rolled back. Deleting the file returns everything to what you
-configured.
+The daemon writes `zz-fpm-tune.conf` into the pool directory and reloads, then stays in advisory mode. When there is nothing to change it says so:
 
-To let it act on its own from now on:
+```
+nothing to change: every pool is at its planned ceiling
+```
+
+To let it keep the host sized from now on:
 
 ```bash
-fpm-tune serve --apply        # or: sudo fpm-tune mode apply, for the installed service
+sudo fpm-tune mode apply
 ```
 
-Now it closes the loop: measure, decide, apply when a change is worth a reload,
-and repair the host if its own file ever stops php-fpm from starting.
+From here the daemon writes a new ceiling whenever a change is worth a reload (a growth of 15% held for 5 minutes, a shrink of 30% held for 20 minutes; see [Hysteresis](how-it-decides/hysteresis.md)), and repairs the host if its own file ever stops php-fpm from starting. `sudo fpm-tune mode advisory` turns it back. Every write is validated against a copy of the configuration, written atomically, reloaded with SIGUSR2, and rolled back if the master does not come back; see [How it fails safe](safety/how-it-fails-safe.md).
 
-## What to read next
+## Things to know on day one
 
-- [First run](getting-started/first-run.md): the same path, with the safety
-  guarantees spelled out.
-- [How it decides](how-it-decides/_index.md): the part to read before you trust
-  `--apply`.
+- `fpm-tune help` lists the commands. `fpm-tune version` (or `--version`) prints the version.
+- `fpm-tune plan --no-learn` reports without recording anything to the state file.
+- `sudo fpm-tune apply --dry-run` renders and validates the change and writes nothing. `apply --no-learn` is refused: a run that writes has to record it, or the next run reloads the pool this one just reloaded.
+- fpm-tune takes no positional arguments. `fpm-tune plan www` is refused, because a flag after a stray word would be silently ignored.
+- Beside a running daemon, a hand-run `plan` prints `another fpm-tune is running, so this will report without recording what it observes` and carries on; a hand-run `apply` is refused. Use `apply-now`.

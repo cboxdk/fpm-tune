@@ -1,89 +1,82 @@
 ---
 title: Static, dynamic, ondemand
-weight: 6
-description: What fpm-tune does with each pm mode, why it sizes within the mode instead of changing it, and the one suggestion it will make.
+weight: 5
+description: What fpm-tune writes for each pm mode, why it never changes the mode, and the one suggestion it makes.
 ---
 
 # Static, dynamic, ondemand
 
-PHP-FPM gives every pool a `pm` mode, and it changes what `pm.max_children`
-*means*. fpm-tune sizes that number for all three, but the number lands
-differently depending on the mode, so it's worth 60 seconds on what each one does.
+PHP-FPM gives every pool a `pm` mode, and the mode changes what
+`pm.max_children` means. This page is what fpm-tune writes for each, and the
+two cases where it suggests a different mode.
 
-- **static**: the pool runs *exactly* `pm.max_children` workers, always. No
-  scaling. `max_children` isn't a ceiling here; it's the running count.
+- **static**: the pool runs exactly `pm.max_children` workers, always. The
+  number is the memory the pool commits right now.
 - **dynamic**: PHP-FPM keeps a warm floor and scales between it and
-  `max_children` as load comes and goes, using `start_servers` and the
-  `min/max_spare_servers` band.
-- **ondemand**: no workers until a request arrives; each is spawned on demand and
-  killed after it goes idle. `max_children` is the ceiling it may spawn up to.
+  `pm.max_children` as load comes and goes, using `pm.start_servers` and the
+  `pm.min_spare_servers` to `pm.max_spare_servers` band.
+- **ondemand**: no workers until a request arrives; each is spawned on demand
+  and killed when idle. The number is a ceiling the pool may reach.
 
-The one thing to hold onto: **for a static pool the number is the memory it
-commits right now; for an ondemand pool it's only a limit it might reach.** Sizing
-the same integer means two different things.
+## What it writes, per mode
 
-## What fpm-tune writes, per mode
+| Mode | Written to `zz-fpm-tune.conf` |
+|---|---|
+| static | `pm.max_children` |
+| ondemand | `pm.max_children` |
+| dynamic | `pm.max_children`, `pm.start_servers` (25% of it), `pm.min_spare_servers` (10%), `pm.max_spare_servers` (50%), each rounded up |
 
-| mode | what it writes | notes |
-|------|----------------|-------|
-| **static** | `pm.max_children` only | changing it changes the resident worker count immediately |
-| **ondemand** | `pm.max_children` only | sizes the ceiling; PHP-FPM still spawns on demand under it |
-| **dynamic** | `pm.max_children` **plus** `start_servers`, `min_spare_servers`, `max_spare_servers` | the spare band is re-derived from the new ceiling (≈25% to start, a 10-50% spare band) so PHP-FPM's own scaling stays coherent |
+The spare band is re-derived from the new ceiling so PHP-FPM's own scaling
+stays coherent, and PHP-FPM's ordering rule (min spare, then start, then max
+spare, then max children, each no larger than the next) is kept. A ceiling of
+10 comes out as:
 
-Two details that matter:
+```ini
+[www-forge]
+pm.max_children = 10
+pm.start_servers = 3
+pm.min_spare_servers = 1
+pm.max_spare_servers = 5
+```
 
-- **Spare settings are dynamic-only.** Writing `pm.start_servers` into a static or
-  ondemand pool is a config error PHP-FPM refuses, so fpm-tune writes them for
-  dynamic pools and nothing else. (This is exactly the kind of thing its
-  [sandbox validation](../safety/how-it-fails-safe.md) catches before a reload, but
-  it's cheaper never to write it.)
-- **The learner is ondemand-aware.** An ondemand pool sitting visible-but-empty
-  isn't evidence its workers are cheap. It's just quiet. fpm-tune won't
-  under-size a pool from a scrape that happened to catch it idle. The details are
-  in [measuring workers](measuring-workers.md).
+Spare settings are written for dynamic pools only. PHP-FPM refuses
+`pm.start_servers` in a static or ondemand pool, and the
+[sandbox validation](../safety/how-it-fails-safe.md) would catch that before a
+reload, but it is cheaper never to write it.
 
-## Why it doesn't just pick the mode for you
+An ondemand pool seen with no workers teaches the learner nothing about its
+cost; [measuring workers](measuring-workers.md) has the rules for what counts.
 
-Because the right mode isn't a memory question, and fpm-tune only measures memory.
+## Why it never changes the mode
 
-static-vs-dynamic-vs-ondemand is a trade between predictable RAM, latency, and
-cold-starts, and the tie-breakers (do you have a latency SLO? do you want
-memory that never moves? is this one of forty pools that are each hit twice an
-hour?) live in your head, not in the numbers on the host. So fpm-tune sizes
-*inside* the mode you chose and never rewrites `pm` itself. Its whole stance is to
-keep PHP-FPM's own worker management on and get the ceiling right underneath it.
-
-Here's the shape of the trade, so the choice is yours to make well:
+The right mode is a trade between idle memory, latency and cold starts, and the
+tie-breakers (a latency target, a preference for memory that never moves, forty
+pools each hit twice an hour) are not in the numbers on the host. fpm-tune
+sizes inside the mode you chose and never writes `pm`.
 
 | | static | dynamic | ondemand |
 |---|---|---|---|
-| **idle memory** | highest: every worker resident always | low: scales down to the floor | lowest: nothing when quiet |
-| **latency under load** | best: workers always warm | good: warm floor absorbs bursts | worst: each burst pays a cold start |
-| **fits** | steady, latency-sensitive, memory to spare | most pools; a safe default | many pools each rarely hit |
+| idle memory | every worker resident, always | scales down to the floor | nothing when quiet |
+| latency under load | workers always warm | warm floor absorbs bursts | each burst pays a cold start |
+| fits | steady, latency-sensitive, memory to spare | most pools | many pools each rarely hit |
 
-## The one suggestion it will make
+## The one suggestion it makes
 
-fpm-tune stays quiet about mode unless the *measured* shape points somewhere
-clearly. When it does, `plan` prints a line under the table (and `serve` logs it
-once), a nudge, never a change:
+Two measured shapes get a line under the plan table, and one `Mode suggestion`
+line in the daemon's log the first time each is seen. Neither changes anything.
 
-- **A static pool holding idle workers.** If its busiest moment left a lot of
-  workers unused, static is paying to keep memory resident that nothing touched.
-  dynamic or ondemand would hand that back between requests, *unless* you're
-  keeping them warm for latency on purpose, which is a fine reason to ignore it.
-- **An ondemand pool that's queuing.** Requests waiting on an ondemand pool means
-  bursts are paying cold-start latency. A dynamic pool with a warm floor absorbs
-  the burst instead.
+- A static pool holding idle workers: its busiest moment left at least two
+  workers unused, and they hold at least 256 MiB between them. dynamic or
+  ondemand would hand that memory back between requests, unless you keep them
+  warm for latency on purpose.
+- An ondemand pool that is queueing, or that the allocator could not fully
+  satisfy: its bursts are paying cold-start latency, and a dynamic pool's warm
+  floor would absorb them.
 
-It won't push a busy dynamic pool toward static, even though that can be the right
-move. Telling "steadily maxed out" from "spiked once" needs a sustained-load
-signal fpm-tune doesn't keep, and guessing there would just be noise. dynamic is a
-safe default; if you want static's predictable memory, that's a deliberate call.
+It does not push a busy dynamic pool toward static. Telling steady saturation
+from one spike needs a sustained-load signal it does not keep.
 
-## Mode is not a security boundary
-
-Worth saying plainly, since it comes up: the `pm` mode has nothing to do with
-isolating one pool from another. That's `user`/`group`/`chroot`/`open_basedir`,
-and it's orthogonal to how workers are scaled. What fpm-tune does guard is covered
-in [the trust boundary](../safety/the-trust-boundary.md); mode choice is a
-performance-and-memory decision, not a security one.
+The `pm` mode is a performance and memory decision and says nothing about
+isolating one pool from another; that is `user`, `group`, `chroot` and
+`open_basedir`, and what fpm-tune itself guards is in
+[the trust boundary](../safety/the-trust-boundary.md).

@@ -1,152 +1,114 @@
 ---
 title: Measuring workers
-weight: 2
-description: How the learner decides what a worker costs, why cost and permission-to-shrink are different questions, and why it believes an expensive reading instantly.
+weight: 3
+description: What one worker costs, which readings count, how fast the estimate moves, and when a pool may be shrunk.
 ---
 
 # Measuring workers
 
-The learner's job is to answer one question (what does one worker of this pool
-cost?) from noisy observations. Too low and the host OOMs; too high and every
-site is throttled. Almost everything it does is a refusal to be fooled by a
-reading that looks like evidence and is not.
+The learner answers one question from noisy readings: what does one worker of
+this pool cost? Too low and the host OOMs; too high and every site is
+throttled. This page is which readings it believes, how fast the estimate
+moves, and what separates knowing a pool's cost from being allowed to shrink
+it.
 
 ## Bootstrap, then learned
 
-With no history, a pool is sized from a workload profile, the same guess a
-hand-written config makes, and honest about being a guess. As the tool
-accumulates trustworthy measurements it switches to sizing each pool on its own
-observed worker memory. Baselines persist to `state.json`, so a restart does not
-begin from zero.
+A pool with no history is sized from a profile guess of 48 MiB per worker, and
+the plan labels it `estimated`. From the first accepted reading the pool is
+sized from its own workers and labelled `measured`. Baselines are kept in
+`/var/lib/fpm-tune/state.json`, so a restart does not start over; deleting the
+file does.
 
-## What "a worker costs" means: PSS, not RSS
+## PSS, not RSS
 
-A php-fpm worker's resident set (RSS) overstates it on a busy host. Most of what a
-warm worker maps is *shared*: the opcache SHM segment (often hundreds of MB), the
-shared libraries, the copy-on-write pages it still shares with the master. RSS
-charges every one of those pages in full to every worker, so summing the RSS of
-twenty workers counts a 512 MB opcache twenty times and sizes the pool as if it
-needed gigabytes it does not.
+A warm worker's resident set is mostly shared pages: the opcache segment, the
+libraries, the copy-on-write pages it still shares with the master. RSS charges
+each of those in full to every worker, so twenty workers count a 512 MiB
+opcache twenty times. The sizing reads PSS from `/proc/<pid>/smaps_rollup`
+instead, where every shared page is divided among the processes mapping it, so
+the sum across a pool is what the pool costs the host.
 
-So the sizing reads **PSS** (proportional set size) instead, from
-`/proc/<pid>/smaps_rollup`: every shared page is divided by the number of processes
-mapping it, so summing PSS across a pool is what those workers actually cost the
-host. A warm Laravel worker might read 140 MB RSS but noticeably less PSS once its
-shared opcache is counted once rather than per worker. It's the same reason a
-container's RSS lies about its real footprint.
+`smaps_rollup` needs kernel 4.14 and permission to read another process's
+memory map. Where either is missing the reading falls back to RSS, which is
+safe and less precise. The [spawned-children](spawned-children.md) figure stays
+on RSS on purpose: it is the difference of two RSS reads.
 
-Two honest caveats. The kernel has only offered `smaps_rollup` since 4.14, and
-reading another process's rollup needs the privilege the tool already has over the
-workers it manages; where either is missing, the per-worker number falls back to
-RSS, safe and just less precise. And the [spawned-children](spawned-children.md)
-delta stays on RSS on purpose, because a worker's ffmpeg is a separate process with
-its own private memory: subtracting a PSS worker from an RSS subtree would credit it
-the shared pages the worker no longer carries.
+## Which readings count
 
-## Cost and permission are different questions
+A worker that has served three requests has not loaded the application yet, and
+an idle pool is made of such workers. So a scrape counts only when it has at
+least 2 workers that have each served 20 requests, and the reading is the
+largest of them: the tail is what fills a host, and the mean of a scrape is
+half cold workers. Two shapes of pool would otherwise never be measured:
 
-There are two things you might mean by "trust a pool's measurements", and
-conflating them is a way to overcommit a host:
-
-- **What does a worker COST?** Answered by any measurement there is. A number
-  taken from this pool's own workers beats a profile's guess whatever the
-  confidence, because the bytes were real.
-- **May the pool be SHRUNK?** A different question. Sizing a pool *down* on a
-  baseline that has not been watched through a real traffic pattern is how a tool
-  like this causes the outage it was installed to prevent. Until a pool has been
-  observed working, long enough and often enough, its floor holds at whatever it
-  is configured for and the first run can only ever help.
-
-So a pool can be measured (its cost is known) without being reducible (there is
-not yet enough evidence to cut it). Keeping those apart is why a first run is
-safe: it will grow a queueing pool on real numbers, but it will not shrink a
-quiet one on thirty seconds of evidence.
+- A pool that never runs two workers at once, such as a quiet ondemand site.
+  One mature worker is accepted as its cost, but not as evidence it may be
+  shrunk.
+- A pool whose `pm.max_requests` recycles workers before they mature. After 20
+  consecutive rounds of serving requests with no mature worker, its young
+  workers are read anyway, and such a reading may only raise the estimate,
+  never lower it.
 
 ## Fast up, slow down
 
-The estimate is asymmetric on purpose. A worker that costs more than expected
-puts the whole budget at risk, so a single expensive reading raises the estimate
-to the full reading on the same scrape. A worker that costs *less* is only an
-opportunity, so the estimate falls gradually, on a half-life measured in time,
-following the day rather than being pinned to its busiest hour.
+The estimate is asymmetric. A reading above it moves the estimate halfway to
+the reading in one scrape (a weight of 0.5), and the most recent scrape's peak
+floors the sizing regardless, so a deploy that makes workers heavier is caught
+in one scrape. A reading below it pulls the estimate down on a 30-minute
+half-life. Under-sizing ends in the OOM killer; over-sizing costs unused memory
+on one pool.
 
-Under-sizing is the failure that ends in an OOM kill. Over-sizing costs unused
-headroom on one pool. The asymmetry spends caution where the cost of being wrong
-is highest.
+A smaller reading counts only while the pool is working: at least one request
+per second since the last scrape, from the pool's own request counter. PHP
+returns large allocations to the OS, so an idle survivor shrinks, and believing
+that leaves the morning sized for workers that do not exist. Cron, uptime
+checks and crawlers stay under the threshold.
 
-## It never learns from an idle pool
+Elapsed time is only evidence while it was watched. A gap longer than 12 hours
+refuses the reading as evidence of decay, and any gap may move the estimate no
+further than one ordinary scrape would, so a daemon restarted after a package
+upgrade does not collapse the estimate on its first reading back.
 
-A worker that has served three requests is far smaller than one that has served
-five hundred. PHP returns large allocations to the operating system, so an idle
-survivor genuinely shrinks. That smaller reading is a lull, not a cheaper
-application, and believing it is how a quiet night leaves the morning sized for
-workers that do not exist.
+## Cost and permission
 
-So a smaller reading only moves the estimate down when the pool was actually
-*working*, measured as a request rate, not a raw count, because a count per
-scrape makes the scrape interval an input. The threshold is deliberately a
-cliff, placed where the wrong answer wastes memory rather than losing the host: a
-pool below roughly a request a second is treated as idle, and its estimate held.
+Cost and permission to shrink are different questions. A pool's cost is taken
+from any reading there is, because the bytes were real whatever the confidence.
+Shrinking a pool needs a baseline watched through a real traffic pattern: 20
+busy scrapes spread over at least 30 minutes between the first and the last.
+Until then the pool's floor is its configured ceiling, the plan's WHY says
+`not yet watched under load; held at its configured N`, and the first run can
+only ever help. `--confidence-samples` and `--confidence-span` set the two
+numbers.
 
-## Time only counts if it was watched
+## Peak concurrency
 
-The estimate falls on a half-life, so elapsed time is the weight it falls by,
-which is right while the looking is regular and wrong the moment it stops.
-Restart the daemon for a package upgrade while php-fpm keeps serving, and the
-first reading back is hours old; counting those hours in full would collapse the
-estimate on a single sample. Each pool remembers how often it is actually looked
-at, and a gap can never move the estimate further than one ordinary scrape would.
+The demand side is the most workers seen busy at once. PHP-FPM's own counter
+resets on every reload, and fpm-tune reloads, so the peak is remembered in the
+state file. A higher reading replaces it at once; a lower one is ignored for 24
+hours, after which the peak halves the distance to what is being seen each
+scrape, so a pool that has quietened gives its slack back over a few rounds.
 
-## Small pools are measured too
+## The distribution
 
-Two shapes of pool would otherwise be invisible and get a profile guess for ever:
+The sizing number is one number, because the allocator needs one cost per
+worker, but it cannot say how bad a pool gets. Each pool also keeps a
+log-spaced histogram of every worker reading, cold ones included, and reports
+its median, p95, p99 and worst seen in `plan`, in the recommendation file, and
+on `/metrics` as `estimate="p50"`, `"p95"`, `"p99"` and `"high_water"`. Every
+bucket is halved once the histogram passes 4096 readings, so a pool redeployed
+months ago is not described by the application it used to run.
 
-- **A pool that never runs two workers at once**: an ondemand site at low
-  traffic. Its readings count toward what it *costs* (so the host is budgeted for
-  it) but not toward permission to shrink it (a single worker is a measurement,
-  not a traffic pattern).
-- **A pool that recycles its workers before they warm up**: a low
-  `pm.max_requests`, so no worker ever serves enough requests to have loaded the
-  application. After a long stretch of learning nothing, its young workers are
-  read anyway. A young worker is worse evidence than an old one, and much better
-  evidence than a table. But such a reading may only ever *raise* the estimate,
-  never lower it, because a cold worker's small footprint is not evidence the
-  application got cheaper.
+## The sizing basis
 
-## The distribution, alongside the estimate
+The default, `--sizing p95`, sizes on the 95th percentile of that histogram
+plus a 10% margin, floored by the most recent scrape's peak. A single heavy
+request is the top of the distribution and does not move p95, so the pool is
+not sized on its worst minute; the floor still catches a deploy in one scrape.
 
-The sizing number is one number, because the allocator needs one cost per worker.
-But one number cannot answer the question you ask when deciding by hand: how bad
-does this pool get? A pool whose median worker is 60MiB with a p99 of 400MiB is a
-different pool from one that sits flat at 90MiB, and the estimate hides the first
-while the high-water mark is only the second.
-
-So each pool also keeps a log-spaced histogram of every worker reading, and
-reports its median, p95, p99 and worst-seen, in `plan`, in the recommendation
-file, and on `/metrics` as `estimate="p50"/"p95"/"p99"`. It is a description of
-what has been seen, kept deliberately apart from what the tool decides to
-reserve, and it forgets: an all-time histogram of a pool redeployed six months
-ago describes an application that no longer exists, so it fades as new readings
-arrive.
-
-## Choosing the sizing basis
-
-The default is **`p95`**: the pool is sized on the 95th percentile of what its
-workers cost, plus a small margin. A single monster request (a big export, an
-image resize) is the very top of the distribution, so it does not move p95, and the
-pool is not sized forever on its worst minute. That is the number most operators
-expect, and the one that stops a rare spike from inflating a whole pool.
-
-On its own a percentile has a real weakness, and it is the reason a naive p95 is
-dangerous: a percentile of a decaying histogram reacts *slowly* to a genuine
-increase, so a deploy that makes every worker heavier would under-size the pool
-until the distribution catches up, and under-sizing is the failure that ends in an
-OOM. So the p95 number is **floored by the most recent scrape's peak**: a deploy
-lifts that in one scrape, exactly like the peak-follower, while a rare spike is gone
-from it again the next scrape. You get the deploy-safety without the monster-hold.
-
-`--sizing peak` is the opt-in for the pure peak-follower: the most conservative
-basis, it follows the top of the sawtooth and never lets go of the worst worker it
-has ever seen. Reach for it only where you want that maximum caution. `--sizing p99`
-(or any percentile) moves the steady basis up or down. In the service config it is
-the `sizing` key.
+`--sizing peak` sizes on the typical peak instead: the estimate described
+above, which rises in one scrape and decays on the 30-minute half-life, floored
+by the most recent peak. It is the more conservative basis. The all-time high
+is reported as WORST SEEN and never sizes anything. `--sizing p99`, or any
+percentile from 50 to 100, moves the steady basis. In the service config the
+key is `sizing`.

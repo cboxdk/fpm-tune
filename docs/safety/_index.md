@@ -1,17 +1,12 @@
 ---
 title: Safety
-weight: 40
-description: How it fails safe when it writes production configuration, and what it trusts on a shared host.
+weight: 50
+description: What happens between a plan and a reloaded master, and what the tool trusts on a shared host.
 ---
 
 # Safety
 
-It writes production configuration and reloads a live master, so correctness and
-fail-safety matter more than anything else it does. Two things to read:
+fpm-tune writes production configuration and reloads a live master, so this section is about what it does when a step fails and what it refuses to do at all. Read it before switching a host to apply mode.
 
-- **[How it fails safe](how-it-fails-safe.md)**: the guarantees around every
-  write: sandbox validation, atomic replacement, graceful reload, rollback, and
-  crash recovery.
-- **[The trust boundary](the-trust-boundary.md)**: what it trusts, what one
-  tenant on a shared host can and cannot make it do to another, and what bounds
-  it.
+- **[How it fails safe](how-it-fails-safe.md)**: the chain from plan to reload, the rollback, the transaction record, and the two files it writes.
+- **[The trust boundary](the-trust-boundary.md)**: what it trusts, what one tenant can do to another, and what only root can reach.
