@@ -9,11 +9,10 @@ import (
 //
 // php-fpm's per-request figure (cpu.go) says what a request costs inside its
 // worker. It says nothing about the MySQL query the request waited on, the
-// nginx that proxied it, or the kernel that carried both — and on cbox-web,
-// measured under load, those were as much CPU again as PHP itself: a box that
-// "should" fill at five busy workers by PHP's own figure was full at two and a
-// half. Dividing cores by PHP's share alone tells a plan the box has twice the
-// CPU it has.
+// nginx that proxied it, or the kernel work outside the worker. How much that
+// is depends on the host — a tenth again on one four-core Laravel box, more
+// where the pages lean on the database — and guessing it in either direction
+// mis-sizes the pool, so it is measured.
 //
 // So each scrape also reads the box's total CPU time, and each pool's workers'
 // own CPU time, and regresses the one on the other over the natural spread of

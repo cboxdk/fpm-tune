@@ -76,10 +76,10 @@ Three filters decide which readings count:
 
 php-fpm's figure is what a request costs inside its worker. It says nothing
 about the MySQL query the request waited on, the nginx that proxied it, or the
-kernel that carried both. Measured under load on a real four-core host, those
-were as much CPU again as PHP itself: a pool that "should" fill the box at five
-busy workers by PHP's own figure had it full at two and a half, and adding
-workers past that point bought nothing but load average.
+kernel work outside the worker. How much that is depends on the host: on a
+four-core box serving a Laravel site with MySQL alongside it measured a tenth
+again; a host whose pages lean on the database will measure more. The plan
+should not guess at it, so it measures it.
 
 So each scrape also reads the box's total CPU time (`/proc/stat`, or php-fpm's
 cgroup where a CPU quota bounds it) and each pool's workers' own CPU time, and
@@ -95,8 +95,8 @@ by a fifth of a core across them. A week of ordinary traffic has peaks and
 troughs; no load test is needed. Until then the report prices a worker at PHP's
 own figure and says the rest of the box is not measured yet.
 
-A busy worker's cost to the box is its PHP share times that overhead: 700m in
-PHP at 2.1× is 1470m on the box, and four cores fill at three such workers.
+A busy worker's cost to the box is its PHP share times that overhead: 850m in
+PHP at 1.1× is 935m on the box, and four cores fill at five such workers.
 
 ## What it reports
 
