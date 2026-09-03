@@ -22,9 +22,13 @@ func TestSparkKeepsSpikesAndHoles(t *testing.T) {
 	if got != "▁█·█" {
 		t.Errorf("spark = %q, want ▁█·█", got)
 	}
-	// Fewer values than columns: left-padded with blanks, newest at the right.
-	if got := string(spark([]float64{8}, 3, 8)); got != "  █" {
+	// Fewer values than columns: stretched to fill, so the chart is never a
+	// stub at the right of an empty axis.
+	if got := string(spark([]float64{8}, 3, 8)); got != "███" {
 		t.Errorf("spark of one value = %q", got)
+	}
+	if got := string(spark([]float64{0, 8}, 4, 8)); got != "▁▁██" {
+		t.Errorf("spark of two values over four columns = %q", got)
 	}
 	// Above scale clips at the top rather than indexing past the runes.
 	if got := string(spark([]float64{40}, 1, 8)); got != "█" {

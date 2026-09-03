@@ -231,20 +231,24 @@ func (m model) View() string {
 		return sDim.Render("  connecting to " + m.opts.Addr + " …")
 	}
 
-	inner := m.width - 4 // panel border and padding
+	// The panel's box is the terminal less its border; the text inside it is
+	// that less the padding. Every panel is given the text width, so nothing
+	// it draws can wrap.
+	inner := m.width - 4
 	if inner < 40 {
 		inner = 40
 	}
+	content := inner - 2
 
 	parts := []string{
 		m.titleBar(),
-		sPanel.Width(inner).Render(m.hostPanel(inner)),
-		sPanel.Width(inner).Render(m.poolsPanel(inner)),
+		sPanel.Width(inner).Render(m.hostPanel(content)),
+		sPanel.Width(inner).Render(m.poolsPanel(content)),
 	}
 	if len(m.pools) > 0 {
-		parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(inner)))
+		parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(content)))
 	}
-	parts = append(parts, sPanel.Width(inner).Render(m.eventsPanel(inner)), m.keys())
+	parts = append(parts, sPanel.Width(inner).Render(m.eventsPanel(content)), m.keys())
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
@@ -311,7 +315,9 @@ func (m model) hostPanel(width int) string {
 	line1 := sHeader.Render("HOST  ") +
 		fmt.Sprintf("%s memory · %s", budget.HumanBytes(h.MemoryBytes), budget.HumanMillicores(h.CPUMillicores)) +
 		sDim.Render("  ("+h.Source+")")
-	sparkWidth := width - 22
+	// Label, spark, a space, the value, two spaces, the span: the spark takes
+	// what is left so the line never wraps.
+	sparkWidth := width - 6 - 1 - len(now) - 2 - len(span)
 	if sparkWidth < 10 {
 		sparkWidth = 10
 	}
@@ -342,12 +348,26 @@ func (m model) poolsPanel(width int) string {
 		byName[p.Pool] = p
 	}
 
-	sparkWidth := 16
-	if width < 96 {
-		sparkWidth = 8
+	// The fixed columns take 67 characters; the sparkline gets what is left,
+	// up to a reasonable length, and goes entirely when there is no room for
+	// one worth reading.
+	sparkWidth := width - 67
+	if sparkWidth > 24 {
+		sparkWidth = 24
 	}
-	header := fmt.Sprintf("%-14s %6s %5s %5s %5s  %-*s  %6s  %8s  %-6s",
-		"POOL", "BUSY", "QUEUE", "NOW", "PLAN", sparkWidth, "BUSY OVER TIME", "CPU", "FILL/CAP", "LIMIT")
+	if sparkWidth < 6 {
+		sparkWidth = 0
+	}
+	sparkHeader := ""
+	if sparkWidth > 0 {
+		label := "BUSY OVER TIME"
+		if sparkWidth < len(label) {
+			label = "TREND"
+		}
+		sparkHeader = fmt.Sprintf("%-*s  ", sparkWidth, trunc(label, sparkWidth))
+	}
+	header := fmt.Sprintf("%-14s %6s %5s %5s %5s  %s%6s  %8s  %-6s",
+		"POOL", "BUSY", "QUEUE", "NOW", "PLAN", sparkHeader, "CPU", "FILL/CAP", "LIMIT")
 	lines := []string{sHeader.Render(header)}
 	for i, name := range m.pools {
 		p := byName[name]
@@ -386,9 +406,13 @@ func (m model) poolsPanel(width int) string {
 		} else if p.Recommended != p.Configured {
 			plan = sAccent.Render(plan)
 		}
-		row := fmt.Sprintf("%-14s %6d %s %5d %s  %s  %6s  %8s  %s",
+		sparkCell := ""
+		if sparkWidth > 0 {
+			sparkCell = colorSpark(series, sparkWidth, ceiling) + "  "
+		}
+		row := fmt.Sprintf("%-14s %6d %s %5d %s  %s%6s  %8s  %s",
 			trunc(name, 14), p.Active, queue, p.Configured, plan,
-			colorSpark(series, sparkWidth, ceiling), cpu, fill, limit)
+			sparkCell, cpu, fill, limit)
 		if i == m.selected {
 			row = sRowSel.Render(row)
 		} else {
@@ -419,10 +443,6 @@ func (m model) detailPanel(width int) string {
 			last = p
 		}
 	}
-	sparkWidth := width - 24
-	if sparkWidth < 10 {
-		sparkWidth = 10
-	}
 	series := func(f func(serve.PoolSample) float64) []float64 {
 		out := make([]float64, 0, len(rounds))
 		for _, r := range rounds {
@@ -448,30 +468,64 @@ func (m model) detailPanel(width int) string {
 	if ceiling <= 0 {
 		ceiling = maxOf(active)
 	}
+	values := []string{
+		fmt.Sprintf("%d of %d", last.Active, last.Configured),
+		fmt.Sprintf("%d", last.Recommended),
+		fmt.Sprintf("%d", last.Queue),
+		cpuLabel(last, width < 100),
+	}
+	// The spark takes what the longest value leaves, so no row wraps.
+	longest := 0
+	for _, v := range values {
+		if n := lipgloss.Width(v); n > longest {
+			longest = n
+		}
+	}
+	sparkWidth := width - 6 - 1 - longest
+	if sparkWidth < 10 {
+		sparkWidth = 10
+	}
 	row := func(label string, s []float64, scale float64, val string) string {
 		return sHeader.Render(fmt.Sprintf("%-6s", label)) + colorSpark(s, sparkWidth, scale) + " " + val
 	}
+	// Busy and plan share a scale, so the two rows read against each other:
+	// a plan row that is all bars beside a busy row that never reaches them
+	// is a pool with room.
+	shared := ceiling
+	if r := maxOf(recommended); r > shared {
+		shared = r
+	}
 	lines := []string{
 		head,
-		row("busy", active, ceiling, fmt.Sprintf("%d of %d", last.Active, last.Configured)),
-		row("plan", recommended, maxOf(recommended), fmt.Sprintf("%d", last.Recommended)),
-		row("queue", queue, maxOf(queue), fmt.Sprintf("%d", last.Queue)),
-		row("cpu", cpu, 1, cpuLabel(last)),
+		row("busy", active, shared, values[0]),
+		row("plan", recommended, shared, values[1]),
+		row("queue", queue, maxOf(queue), values[2]),
+		row("cpu", cpu, 1, values[3]),
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-func cpuLabel(p serve.PoolSample) string {
+// cpuLabel is the cpu row's value: the share, the fill count and the ceiling,
+// and whether the pool is held there; shorter words on a narrow terminal.
+func cpuLabel(p serve.PoolSample, short bool) string {
 	if p.CPUReadings < 20 {
 		return sDim.Render("too few readings yet")
 	}
-	s := fmt.Sprintf("%.0f%% of a request on CPU", p.CPURatioP50*100)
+	share := fmt.Sprintf("%.0f%% of a request on CPU", p.CPURatioP50*100)
+	fill := fmt.Sprintf(" · %d fill the box · ceiling %d", p.CPUFill, p.CPUCeiling)
+	held := " · " + sAccent.Render("held there")
+	if short {
+		share = fmt.Sprintf("%.0f%% cpu", p.CPURatioP50*100)
+		fill = fmt.Sprintf(" · %d fill · cap %d", p.CPUFill, p.CPUCeiling)
+		held = " · " + sAccent.Render("held")
+	}
+	s := share
 	if p.CPUCeiling > 0 {
-		s += fmt.Sprintf(" · %d fill the box · ceiling %d", p.CPUFill, p.CPUCeiling)
+		s += fill
 	}
 	if p.CPUBound {
-		s += " · " + sAccent.Render("held there")
+		s += held
 	}
 
 	return s
@@ -549,7 +603,10 @@ var sparkChars = []rune("▁▂▃▄▅▆▇█")
 
 // spark resamples a series to width columns, taking the maximum in each
 // bucket so a spike is never averaged away, and scales it to scale (the value
-// that fills the column). Values above scale clip at the top.
+// that fills the column). Values above scale clip at the top. A series with
+// fewer values than columns is stretched, each value over several columns,
+// so the chart fills its width whatever the history holds; the time axis
+// runs left to right either way.
 func spark(series []float64, width int, scale float64) []rune {
 	out := make([]rune, width)
 	for i := range out {
@@ -561,20 +618,15 @@ func spark(series []float64, width int, scale float64) []rune {
 	if scale <= 0 {
 		scale = 1
 	}
-	// Newest at the right: the last `width` buckets of the series, each bucket
-	// covering len/width values when there are more values than columns.
-	per := float64(len(series)) / float64(width)
-	if per < 1 {
-		per = 1
-	}
-	for col := width - 1; col >= 0; col-- {
-		hi := len(series) - int(float64(width-1-col)*per)
-		lo := hi - int(per)
-		if lo < 0 {
-			lo = 0
+	n := len(series)
+	for col := 0; col < width; col++ {
+		lo := col * n / width
+		hi := (col + 1) * n / width
+		if hi <= lo {
+			hi = lo + 1
 		}
-		if hi <= 0 {
-			break
+		if hi > n {
+			hi = n
 		}
 		v, known := -1.0, false
 		for _, x := range series[lo:hi] {
