@@ -1018,8 +1018,8 @@ func reason(p Pool, granted, want, memoryWant, floor int, exhausted, cpuBound bo
 		// Said before the memory reasons, because for this pool memory was not
 		// the limit: the number is where its busy workers fill the CPU, and
 		// one more would slow every request rather than serve another.
-		return fmt.Sprintf("cpu-bound; %d busy workers fill the CPU, so held there rather than "+
-			"the %d memory allows, %s", granted, memoryWant, cost)
+		return fmt.Sprintf("cpu-bound; held at its CPU ceiling of %d rather than the %d memory "+
+			"allows (the CPU table has the fill count and headroom behind it), %s", granted, memoryWant, cost)
 	case p.HitMaxChildren:
 		return fmt.Sprintf("hit its ceiling; grown to %d, %s",
 			granted, cost)
