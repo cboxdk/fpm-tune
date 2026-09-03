@@ -177,7 +177,7 @@ allows, and its row in the plan table says so:
 
 ```
 POOL  MODE     NOW  PLAN  MEMORY    WHY
-shop  dynamic  40   6     600.0MiB  cpu-bound; 6 busy workers fill the CPU, so held there rather than the 14 memory allows, measured 100.0MiB/worker
+shop  dynamic  40   6     600.0MiB  cpu-bound; held at its CPU ceiling of 6 rather than the 14 memory allows (the CPU table has the fill count and headroom behind it), measured 100.0MiB/worker
 ```
 
 In the CPU table the same pool's WHY ends `; ceiling 6 at 2× headroom; held
