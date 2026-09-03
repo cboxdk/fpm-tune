@@ -29,6 +29,35 @@
   },
   "components": [
     {
+      "bom-ref": "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+      "type": "library",
+      "name": "github.com/aymanbagabas/go-osc52/v2",
+      "version": "v2.0.1",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1f0a511db14c7192c456be360f8a7b5c1aa3caec501f948c884ac34f85a42769"
+        }
+      ],
+      "purl": "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/aymanbagabas/go-osc52",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
       "bom-ref": "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module",
       "type": "library",
       "name": "github.com/beorn7/perks",
@@ -145,6 +174,209 @@
       }
     },
     {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/bubbletea",
+      "version": "v1.3.10",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a2d5031d630ccd0481d0f91cf3bae6ebdd4a6774966b829496f17d9d1bc2202c"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/bubbletea",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/colorprofile@devel?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/colorprofile",
+      "version": "devel",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e29648df9db6ee29a6ef22b66c63dc7e91449ae63581cd984934a1af888905fb"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/colorprofile@devel?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/colorprofile",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/lipgloss",
+      "version": "v1.1.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bd85ec88b1d590aedfa7be11915edbda4abdfb30cba04538319a05a91fe7a026"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/lipgloss",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/x/ansi",
+      "version": "v0.10.1",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "acbdcaa1aaf95ef5f4a4719fa2f374ddfe5cc4b6c217662f2decb3ec3da35434"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/x/ansi",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/x/cellbuf@devel?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/x/cellbuf",
+      "version": "devel",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bf2d0654be237871301b960e5c39a2f3aa18c36cae6141aacfa6bcb0bc20d17f"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/x/cellbuf@devel?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/x/cellbuf",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+      "type": "library",
+      "name": "github.com/charmbracelet/x/term",
+      "version": "v0.2.1",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "01078778b6753aa49786b016a5852d6725f54f7cd5c5fa59b8440c2106862004"
+        }
+      ],
+      "purl": "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/charmbracelet/x/term",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+      "type": "library",
+      "name": "github.com/erikgeiser/coninput",
+      "version": "devel",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "63f097cad140e26e9b6944d718b3a859ee0f4211b1697d0aa676b202a0b8f29e"
+        }
+      ],
+      "purl": "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/erikgeiser/coninput",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
       "bom-ref": "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
       "type": "library",
       "name": "github.com/go-ole/go-ole",
@@ -160,6 +392,35 @@
       "externalReferences": [
         {
           "url": "https://github.com/go-ole/go-ole",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+      "type": "library",
+      "name": "github.com/lucasb-eyer/go-colorful",
+      "version": "v1.2.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d679e918eae1c9966e3727eed508ca89420243be3edc534237af408fa2bb9e46"
+        }
+      ],
+      "purl": "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/lucasb-eyer/go-colorful",
           "type": "vcs"
         }
       ],
@@ -197,6 +458,180 @@
           {
             "license": {
               "id": "BSD-3-Clause"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+      "type": "library",
+      "name": "github.com/mattn/go-isatty",
+      "version": "v0.0.20",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c5f0f4883b842a70e4974deae258a607ebc7f86c4b12d2ff8dbe315494965846"
+        }
+      ],
+      "purl": "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/mattn/go-isatty",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module",
+      "type": "library",
+      "name": "github.com/mattn/go-localereader",
+      "version": "v0.0.1",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ca04803a5ed95d3c7845d3d88a752983a5bdf54f235af5a2f587b6242fe8222e"
+        }
+      ],
+      "purl": "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/mattn/go-localereader",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+      "type": "library",
+      "name": "github.com/mattn/go-runewidth",
+      "version": "v0.0.16",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "13949c34cb62c2f96f079a5a305770f69e24490cdb5c58a42794903ba4d42d07"
+        }
+      ],
+      "purl": "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/mattn/go-runewidth",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/muesli/ansi@devel?type=module",
+      "type": "library",
+      "name": "github.com/muesli/ansi",
+      "version": "devel",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "64af331ed4473a46c7cba326af90f6eb88b2a774e25f93a635c2397080118902"
+        }
+      ],
+      "purl": "pkg:golang/github.com/muesli/ansi@devel?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/muesli/ansi",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+      "type": "library",
+      "name": "github.com/muesli/cancelreader",
+      "version": "v0.2.2",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "dc8e0ab780508ce479e0d6afaa70e8831fcc22858115ad12b4f03c10b5171e60"
+        }
+      ],
+      "purl": "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/muesli/cancelreader",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+      "type": "library",
+      "name": "github.com/muesli/termenv",
+      "version": "v0.16.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4b902550df5d10d079eebb1b9e43f27dd1ae5889649b32636c57f44dfe455947"
+        }
+      ],
+      "purl": "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/muesli/termenv",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
             }
           }
         ]
@@ -377,6 +812,35 @@
       }
     },
     {
+      "bom-ref": "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+      "type": "library",
+      "name": "github.com/rivo/uniseg",
+      "version": "v0.4.7",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "59476f916f2e121ad87cb0b8673769236cedc4fd48e7cdbee3d39ce4cabae154"
+        }
+      ],
+      "purl": "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/rivo/uniseg",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
       "bom-ref": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
       "type": "library",
       "name": "github.com/shirou/gopsutil/v3",
@@ -493,6 +957,35 @@
       }
     },
     {
+      "bom-ref": "pkg:golang/github.com/xo/terminfo@devel?type=module",
+      "type": "library",
+      "name": "github.com/xo/terminfo",
+      "version": "devel",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2551b8e11b32681f53d8a2076af305fe9a4964d1bd669ca286f09dd30d74d67a"
+        }
+      ],
+      "purl": "pkg:golang/github.com/xo/terminfo@devel?type=module",
+      "externalReferences": [
+        {
+          "url": "https://github.com/xo/terminfo",
+          "type": "vcs"
+        }
+      ],
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "MIT"
+            }
+          }
+        ]
+      }
+    },
+    {
       "bom-ref": "pkg:golang/github.com/yusufpapurcu/wmi@v1.2.4?type=module",
       "type": "library",
       "name": "github.com/yusufpapurcu/wmi",
@@ -545,6 +1038,29 @@
       }
     },
     {
+      "bom-ref": "pkg:golang/golang.org/x/text@v0.40.0?type=module",
+      "type": "library",
+      "name": "golang.org/x/text",
+      "version": "v0.40.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "51bd99ebfc63805d56ad8433da7b884ce11e80a16d888cbeae279127994764ab"
+        }
+      ],
+      "purl": "pkg:golang/golang.org/x/text@v0.40.0?type=module",
+      "evidence": {
+        "licenses": [
+          {
+            "license": {
+              "id": "BSD-3-Clause"
+            }
+          }
+        ]
+      }
+    },
+    {
       "bom-ref": "pkg:golang/google.golang.org/protobuf@v1.36.11?type=module",
       "type": "library",
       "name": "google.golang.org/protobuf",
@@ -574,8 +1090,13 @@
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/cboxdk/phpfpm@v1.2.0?type=module",
+        "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+        "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
         "pkg:golang/github.com/prometheus/client_golang@v1.24.1?type=module"
       ]
+    },
+    {
+      "ref": "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module"
     },
     {
       "ref": "pkg:golang/github.com/beorn7/perks@v1.0.1?type=module"
@@ -602,13 +1123,139 @@
       "ref": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0?type=module"
     },
     {
+      "ref": "pkg:golang/github.com/charmbracelet/bubbletea@v1.3.10?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+        "pkg:golang/github.com/charmbracelet/colorprofile@devel?type=module",
+        "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/cellbuf@devel?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+        "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/muesli/ansi@devel?type=module",
+        "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+        "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/github.com/xo/terminfo@devel?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
+        "pkg:golang/golang.org/x/text@v0.40.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/charmbracelet/colorprofile@devel?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/github.com/xo/terminfo@devel?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/charmbracelet/lipgloss@v1.1.0?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+        "pkg:golang/github.com/charmbracelet/colorprofile@devel?type=module",
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/cellbuf@devel?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/github.com/xo/terminfo@devel?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/charmbracelet/x/cellbuf@devel?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/charmbracelet/colorprofile@devel?type=module",
+        "pkg:golang/github.com/charmbracelet/x/ansi@v0.10.1?type=module",
+        "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/github.com/xo/terminfo@devel?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/charmbracelet/x/term@v0.2.1?type=module",
+      "dependsOn": [
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/erikgeiser/coninput@devel?type=module",
+      "dependsOn": [
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
       "ref": "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
       "dependsOn": [
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
       ]
     },
     {
+      "ref": "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module"
+    },
+    {
       "ref": "pkg:golang/github.com/lufia/plan9stats@devel?type=module"
+    },
+    {
+      "ref": "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+      "dependsOn": [
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/mattn/go-localereader@v0.0.1?type=module"
+    },
+    {
+      "ref": "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/muesli/ansi@devel?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/mattn/go-runewidth@v0.0.16?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/muesli/cancelreader@v0.2.2?type=module",
+      "dependsOn": [
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/muesli/termenv@v0.16.0?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/aymanbagabas/go-osc52/v2@v2.0.1?type=module",
+        "pkg:golang/github.com/lucasb-eyer/go-colorful@v1.2.0?type=module",
+        "pkg:golang/github.com/mattn/go-isatty@v0.0.20?type=module",
+        "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module",
+        "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+      ]
     },
     {
       "ref": "pkg:golang/github.com/munnerz/goautoneg@devel?type=module"
@@ -629,6 +1276,7 @@
         "pkg:golang/github.com/prometheus/common@v0.70.1?type=module",
         "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
+        "pkg:golang/golang.org/x/text@v0.40.0?type=module",
         "pkg:golang/google.golang.org/protobuf@v1.36.11?type=module"
       ]
     },
@@ -648,6 +1296,7 @@
         "pkg:golang/github.com/prometheus/client_model@v0.6.2?type=module",
         "pkg:golang/github.com/prometheus/procfs@v0.21.1?type=module",
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module",
+        "pkg:golang/golang.org/x/text@v0.40.0?type=module",
         "pkg:golang/google.golang.org/protobuf@v1.36.11?type=module"
       ]
     },
@@ -656,6 +1305,9 @@
       "dependsOn": [
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
       ]
+    },
+    {
+      "ref": "pkg:golang/github.com/rivo/uniseg@v0.4.7?type=module"
     },
     {
       "ref": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
@@ -687,6 +1339,9 @@
       ]
     },
     {
+      "ref": "pkg:golang/github.com/xo/terminfo@devel?type=module"
+    },
+    {
       "ref": "pkg:golang/github.com/yusufpapurcu/wmi@v1.2.4?type=module",
       "dependsOn": [
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module"
@@ -694,6 +1349,9 @@
     },
     {
       "ref": "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
+    },
+    {
+      "ref": "pkg:golang/golang.org/x/text@v0.40.0?type=module"
     },
     {
       "ref": "pkg:golang/google.golang.org/protobuf@v1.36.11?type=module"

@@ -69,6 +69,7 @@ systemd:
 ```sh
 sudo fpm-tune install-service   # advisory by default
 sudo fpm-tune mode apply        # let it act, when you trust it
+fpm-tune top                    # watch it: workers, queues, CPU, every resize
 ```
 
 ## Why this beats a fixed number

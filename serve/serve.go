@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -118,6 +119,9 @@ type Config struct {
 	// History is how far back /history.json reaches: the ring holds
 	// History / Interval rounds. Zero means a day. It lives in memory only.
 	History time.Duration
+
+	// Version is the binary's version, for /history.json to report.
+	Version string
 
 	// ScrapeTimeout bounds one round of scraping.
 	ScrapeTimeout time.Duration
@@ -430,6 +434,11 @@ func (l *Loop) round(ctx context.Context) {
 		plan.LearnCPULoad(l.state, views, hostCPU, hostOK, limits.Millicores(), now)
 	}
 	hostBusy, hostBusyKnown := l.hostBusyRatio(hostCPU, hostOK, limits.Millicores())
+	hostname, _ := os.Hostname()
+	l.history.setHost(HostInfo{
+		Hostname: hostname, Version: l.cfg.Version, Apply: l.cfg.Apply, CPUCeiling: l.cfg.CPUCeiling,
+		MemoryBytes: limits.MemoryBytes, CPUMillicores: limits.Millicores(), Source: string(limits.Source),
+	})
 
 	usage, hasCgroup := budget.CgroupUsageOf(masterPID)
 	if hasCgroup {

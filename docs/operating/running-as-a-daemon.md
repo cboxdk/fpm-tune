@@ -91,6 +91,20 @@ daemon start and is never written to disk: it is for a dashboard or a terminal
 UI to draw a line from, not a store. Prometheus is the place for anything that
 must outlive a restart.
 
+## Watching it: `fpm-tune top`
+
+```bash
+fpm-tune top                       # the installed service
+fpm-tune top --addr 10.0.0.5:9110  # another host's daemon
+```
+
+A terminal view of that history: the box's CPU over time, every pool with its
+busy workers, queue, ceiling now and planned, CPU share, fill count and which
+resource limits it, the selected pool's charts, and every resize and failed
+apply since the daemon started. Arrow keys pick a pool, `1`/`2`/`3` set the
+span (an hour, six, everything), `q` quits. It reads and changes nothing;
+`fpm-tune mode` and `fpm-tune apply` are for acting.
+
 ## The self-repair is part of applying
 
 A daemon without `--apply` will not fix a host whose master this tool's own file

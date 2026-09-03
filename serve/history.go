@@ -94,6 +94,7 @@ const historyEvents = 1000
 type history struct {
 	mu       sync.Mutex
 	interval time.Duration
+	host     HostInfo
 
 	samples []HistorySample
 	head    int // where the next sample goes
@@ -165,6 +166,19 @@ func (h *history) snapshot(last int) ([]HistorySample, []HistoryEvent) {
 	return samples, events
 }
 
+// HostInfo is what a client needs to label the history: which box, how big,
+// and what the daemon is allowed to do to it.
+type HostInfo struct {
+	Hostname   string `json:"hostname"`
+	Version    string `json:"version"`
+	Apply      bool   `json:"apply"`
+	CPUCeiling bool   `json:"cpu_ceiling"`
+
+	MemoryBytes   int64  `json:"memory_bytes"`
+	CPUMillicores int    `json:"cpu_millicores"`
+	Source        string `json:"memory_source"`
+}
+
 // HistoryResponse is the body of /history.json.
 type HistoryResponse struct {
 	// IntervalSeconds is how far apart the rounds are, and Capacity how many
@@ -172,8 +186,18 @@ type HistoryResponse struct {
 	IntervalSeconds float64 `json:"interval_seconds"`
 	Capacity        int     `json:"capacity"`
 
+	Host HostInfo `json:"host"`
+
 	Rounds []HistorySample `json:"rounds"`
 	Events []HistoryEvent  `json:"events"`
+}
+
+// setHost records what the daemon knows about the box, refreshed each round
+// because the budget can change under a running daemon.
+func (h *history) setHost(info HostInfo) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.host = info
 }
 
 // ServeHTTP answers GET /history.json. ?last=N limits the rounds to the newest
@@ -197,9 +221,13 @@ func (h *history) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rounds, events := h.snapshot(last)
+	h.mu.Lock()
+	host := h.host
+	h.mu.Unlock()
 	body := HistoryResponse{
 		IntervalSeconds: h.interval.Seconds(),
 		Capacity:        len(h.samples),
+		Host:            host,
 		Rounds:          rounds,
 		Events:          events,
 	}

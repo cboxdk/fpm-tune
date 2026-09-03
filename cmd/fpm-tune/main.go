@@ -67,6 +67,8 @@ func run(args []string) error {
 		return runInstallService(args[1:])
 	case "mode":
 		return runMode(args[1:])
+	case "top":
+		return runTop(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 
@@ -97,6 +99,8 @@ func usage() {
   fpm-tune install-service
                     run it in the background under systemd (advisory by default).
   fpm-tune mode     switch the running service between advisory and apply.
+  fpm-tune top      watch the running service: busy workers, queues, the CPU
+                    side and every resize, drawn from a day of rounds.
   fpm-tune version
 
 `, version)
@@ -1131,6 +1135,7 @@ func runServe(args []string) error {
 		CPUCeiling:      *c.cpu,
 		CPUHeadroom:     *c.cpuHeadroom,
 		History:         *history,
+		Version:         version,
 		ScrapeTimeout:   *c.timeout,
 		HeartbeatEvery:  *heartbeat,
 		ApplyOptions: apply.Options{

@@ -266,3 +266,24 @@ func TestSetConfigKeyUpdatesInPlace(t *testing.T) {
 		t.Error("the commented-out default was dropped")
 	}
 }
+
+// TestTopDialsLoopbackForAWildcard: the service listens on 0.0.0.0:9110, and
+// a client that dialled that literally would be dialling nowhere in
+// particular. The flag wins over the file; the default stands in for both.
+func TestTopDialsLoopbackForAWildcard(t *testing.T) {
+	for in, want := range map[string]string{
+		"0.0.0.0:9110":   "127.0.0.1:9110",
+		":9110":          "127.0.0.1:9110",
+		"[::]:9110":      "127.0.0.1:9110",
+		"10.0.0.5:9110":  "10.0.0.5:9110",
+		"127.0.0.1:9111": "127.0.0.1:9111",
+		"garbage":        "garbage",
+	} {
+		if got := loopbackFor(in); got != want {
+			t.Errorf("loopbackFor(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := topAddr("1.2.3.4:9"); got != "1.2.3.4:9" {
+		t.Errorf("the flag did not win: %q", got)
+	}
+}
