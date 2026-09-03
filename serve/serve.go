@@ -175,15 +175,11 @@ type Loop struct {
 	metrics *metrics.Collectors
 	state   *state.State
 
-	lastSaved   time.Time
-	release     lock.Release
-	resource    lock.Release
-	resourceDir string
-	reconciled  bool
-	// reconciledDir is the pool directory the last reconcile looked at, so
-	// taking the lock on the same directory again (after a release) does not
-	// send the next round back through recovery for nothing.
-	reconciledDir    string
+	lastSaved        time.Time
+	release          lock.Release
+	resource         lock.Release
+	resourceDir      string
+	reconciled       bool
 	exhausted        bool
 	boundAddr        string
 	recommendBlocked bool
@@ -202,7 +198,10 @@ type Loop struct {
 	// what that round did, for the answer. See control.go.
 	applyNow   chan applyRequest
 	forceApply bool
-	outcome    ApplyOutcome
+	// applyBlocked shadows the apply_blocked metric's reason, so a forced
+	// round can clear its own refusal without clearing an older one.
+	applyBlocked string
+	outcome      ApplyOutcome
 
 	// lastHostCPU is the box's CPU reading from the previous round, so this
 	// round's busy ratio can be recorded in the history.
@@ -388,11 +387,22 @@ func (l *Loop) Run(ctx context.Context) error {
 				l.releaseResource()
 				// A refusal this round (lock, budget) is this round's; a
 				// watching daemon is not blocked from applying, it does not.
-				l.metrics.SetApplyBlocked("")
+				// A state file that could not be saved is not this round's
+				// and stays up until a save succeeds.
+				if l.applyBlocked != "state_unsaved" {
+					l.setApplyBlocked("")
+				}
 			}
 			req.reply <- l.outcome
 		}
 	}
+}
+
+// setApplyBlocked publishes why a round could not apply, or clears it, and
+// remembers the reason.
+func (l *Loop) setApplyBlocked(reason string) {
+	l.applyBlocked = reason
+	l.metrics.SetApplyBlocked(reason)
 }
 
 // applying reports whether this round may write: the daemon is in apply
@@ -751,7 +761,7 @@ func sameStringSet(a, b map[string]bool) bool {
 func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time) {
 	master, err := MasterOnHost(l.cfg.DropInDir, l.log)
 	if err != nil {
-		l.metrics.SetApplyBlocked("no_master")
+		l.setApplyBlocked("no_master")
 		l.log.Warn("Cannot apply", "error", err)
 		l.outcome = ApplyOutcome{Error: err.Error()}
 
@@ -783,7 +793,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 	// to write from. Published rather than only logged, because a daemon that
 	// has quietly stopped applying looks exactly like one that has nothing to do.
 	if result.Budget.LookupErr != nil {
-		l.metrics.SetApplyBlocked("budget_unconfirmed")
+		l.setApplyBlocked("budget_unconfirmed")
 
 		// The lock goes back, because this process is holding it for work it
 		// has just decided not to do — and the way out of this state is a
@@ -802,7 +812,7 @@ func (l *Loop) applyPlan(ctx context.Context, result plan.Result, now time.Time)
 		return
 	}
 
-	l.metrics.SetApplyBlocked("")
+	l.setApplyBlocked("")
 	l.state.RememberMaster(master.Binary, master.ConfigPath, master.DropInDir)
 
 	opts := l.cfg.ApplyOptions
@@ -967,7 +977,7 @@ func (l *Loop) reconcile(ctx context.Context) {
 			l.resource()
 			l.resource, l.resourceDir = nil, ""
 		}
-		l.metrics.SetApplyBlocked("unrepaired")
+		l.setApplyBlocked("unrepaired")
 		l.log.Error("A previous run left configuration this could not repair; not applying",
 			"error", err)
 		l.outcome = ApplyOutcome{Error: "a previous run left configuration this daemon could not repair; not applying: " + err.Error()}
@@ -995,7 +1005,6 @@ func (l *Loop) reconcile(ctx context.Context) {
 	}
 
 	l.reconciled = true
-	l.reconciledDir = master.DropInDir
 }
 
 // save writes state, either because enough time has passed or because something
@@ -1017,7 +1026,7 @@ func (l *Loop) save(now time.Time, force bool) {
 		// save has lost its brake, and a log line once every five minutes is not
 		// how anyone finds that out.
 		if force {
-			l.metrics.SetApplyBlocked("state_unsaved")
+			l.setApplyBlocked("state_unsaved")
 		}
 		l.log.Error("Could not save state; the record of what was applied is not on disk, "+
 			"so a restart returns to bootstrap and the reload damping has nothing to "+
@@ -1096,12 +1105,21 @@ func (l *Loop) sample(ctx context.Context, targets []phpfpm.Target) []observe.Po
 // never looked at may be carrying a record from a run that did not finish.
 // releaseResource gives the pool-directory lock back, so an operator's one-shot
 // run is not refused by a daemon that has stopped writing.
+//
+// Giving the lock back also gives up what this process knows about the
+// directory: while the lock is free, another writer may leave an unfinished
+// transaction there, and only a reconcile reads that record. So the next
+// round that may write starts with a reconcile, which takes the lock and
+// holds it through the apply in the same round. Without this the round after
+// a release skipped the reconcile, then refused to write because taking the
+// lock afresh cleared the flag: every second apply-now was refused.
 func (l *Loop) releaseResource() {
 	if l.resource == nil {
 		return
 	}
 	l.resource()
 	l.resource, l.resourceDir = nil, ""
+	l.reconciled = false
 }
 
 func (l *Loop) holdResource(dropInDir string) bool {
@@ -1113,16 +1131,11 @@ func (l *Loop) holdResource(dropInDir string) bool {
 		l.resource()
 		l.resource = nil
 	}
-	// A directory this process has reconciled is not new to it, however the
-	// lock came to be released: a watching daemon gives it back after every
-	// apply-now, and re-taking it must not cost a round of recovery.
-	if dropInDir != l.reconciledDir {
-		l.reconciled = false
-	}
+	l.reconciled = false
 
 	release, err := lock.Acquire(lock.ResourcePath(dropInDir))
 	if err != nil {
-		l.metrics.SetApplyBlocked("lock")
+		l.setApplyBlocked("lock")
 		l.log.Error("Cannot take the pool-directory lock; not applying",
 			"dir", dropInDir, "error", err)
 		// The answer to an apply-now that ran into this, whether here on the

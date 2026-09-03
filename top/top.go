@@ -10,9 +10,12 @@
 package top
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -84,6 +87,10 @@ var (
 	sAxis   = lipgloss.NewStyle().Foreground(cFaint)
 	sLabel  = lipgloss.NewStyle().Foreground(cDim)
 )
+
+// waiting is what the pool panels say while the daemon has not finished a
+// round yet: a daemon in its first interval publishes a host and no rounds.
+const waiting = "waiting for the daemon's first round"
 
 type tickMsg time.Time
 
@@ -216,8 +223,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, nil
 		}
+		// Esc is not here on purpose: it cancels the apply panel and nothing
+		// else, so a stray Esc from a habit does not close the view.
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "r":
 			return m, m.fetch()
@@ -226,8 +235,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.notice = ""
-			if other := m.otherHost(); other != "" {
-				m.notice = sWarn.Render("this is " + other + "'s history; apply-now reaches only the daemon on this box, so run top there")
+			if !localAddr(m.opts.Addr) {
+				m.notice = sWarn.Render("this view reads " + m.opts.Addr +
+					"; apply-now reaches only the daemon on this box, so run top there")
 
 				return m, nil
 			}
@@ -287,38 +297,86 @@ func applyArgs(self string, root bool) []string {
 }
 
 // self is this binary, for running its own apply-now: by path when the path
-// still exists (an upgrade under a running top leaves "(deleted)" on it), by
-// name from PATH otherwise.
+// still exists, by name from PATH otherwise.
 func self() string {
 	path, err := os.Executable()
 	if err != nil {
 		return "fpm-tune"
 	}
-	if _, err := os.Stat(path); err != nil {
+
+	return executablePath(path, os.Stat)
+}
+
+// executablePath is the path apply-now runs by. On Linux an upgrade under a
+// running top leaves os.Executable answering "/path/fpm-tune (deleted)": the
+// suffix is the kernel's, not part of any name, so it is stripped and the
+// path tried as the new binary is normally installed over the old one. When
+// nothing is there any more, the name alone, and PATH finds it.
+func executablePath(path string, stat func(string) (os.FileInfo, error)) string {
+	path = strings.TrimSuffix(path, " (deleted)")
+	if _, err := stat(path); err != nil {
 		return "fpm-tune"
 	}
 
 	return path
 }
 
-// otherHost names the daemon's host when it is not this one, and is empty
-// when it is (or when either side is unknown). The history can come from any
-// address; apply-now can only reach the daemon on the box it runs on.
-func (m model) otherHost() string {
-	here, err := os.Hostname()
-	if err != nil || m.resp == nil || m.resp.Host.Hostname == "" || m.resp.Host.Hostname == here {
-		return ""
+// localAddr is whether the address the view reads from is this box. apply-now
+// talks to the control socket on the box it runs on, so it can only be
+// offered when the history on the screen is that daemon's; anything but a
+// loopback address is read as another box. The daemon's own hostname is kept
+// out of the decision on purpose: containers and cloned VMs make a hostname
+// comparison wrong in both directions.
+func localAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
 	}
+	host = strings.Trim(host, "[]")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
 
-	return m.resp.Host.Hostname
+	return ip != nil && ip.IsLoopback()
 }
 
-// apply runs fpm-tune apply-now in the terminal and comes back with the outcome.
+// apply runs fpm-tune apply-now in the terminal and comes back with the
+// outcome. Stdin and stdout are left to tea.ExecProcess, which wires the
+// terminal to them (sudo prompts on /dev/tty either way). Stderr is caught
+// instead, because the terminal is redrawn the moment the command ends and
+// whatever it printed is gone with it; the first line is what the notice
+// then shows.
 func (m model) apply() tea.Cmd {
 	args := applyArgs(self(), os.Geteuid() == 0)
 	cmd := exec.Command(args[0], args[1:]...) //nolint:gosec // the operator asked for exactly this
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
-	return tea.ExecProcess(cmd, func(err error) tea.Msg { return appliedMsg{err: err} })
+	return tea.ExecProcess(cmd, func(err error) tea.Msg { return appliedMsg{err: applyOutcome(err, stderr.String())} })
+}
+
+// applyOutcome is the error the notice reports: the command's own first line
+// of stderr when it wrote one (the reason, in its words), else the exec
+// error ("exit status 1" says nothing, but it is all there is).
+func applyOutcome(err error, stderr string) error {
+	if err == nil {
+		return nil
+	}
+	if line := firstLine(stderr); line != "" {
+		return errors.New(line)
+	}
+
+	return err
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+
+	return strings.TrimSpace(s)
 }
 
 // poolNames is the display order: the newest round's pools, by name.
@@ -363,6 +421,122 @@ func (m model) window() (from, to time.Time, rounds []serve.HistorySample) {
 	return from, to, all[i:]
 }
 
+// showsAll is whether the chosen span holds every round the daemon has, in
+// which case the span is not what bounds the charts and the title says how
+// much there is instead.
+func (m model) showsAll() bool {
+	r := m.resp.Rounds
+	d := spans[m.span].d
+
+	return d == 0 || len(r) < 2 || r[len(r)-1].At.Sub(r[0].At) <= d
+}
+
+// layout is how many rows each panel gets. The pools and the events keep
+// their rows and the charts share what is left, until the terminal is too
+// short for even that; then the cuts come in a fixed order, so the title is
+// never what goes (Bubble Tea drops the top of a view taller than the
+// screen, and the title is the one line that says which daemon this is).
+type layout struct {
+	hostChart int  // rows of the host chart; 0 keeps only its head line
+	poolChart int  // rows of the selected pool's chart
+	detail    bool // whether the selected pool's panel is drawn at all
+	events    int  // the most events listed
+	poolRows  int  // the most pools in the table, the rest behind a "… more" line
+}
+
+// detailFrame is the detail panel's rows around its chart: the border, the
+// head, the legend, and the queue and cpu rows.
+const detailFrame = 6
+
+func (m model) layout() layout {
+	n := len(m.pools)
+	l := layout{hostChart: 5, poolChart: 8, detail: n > 0, events: 6, poolRows: n}
+	switch {
+	case m.height >= 50:
+		l.hostChart, l.poolChart, l.events = 7, 12, 12
+	case m.height < 36:
+		l.hostChart, l.poolChart = 4, 6
+	}
+	if m.rows(l) <= m.height {
+		return l
+	}
+	full := l
+
+	// Short. The host chart goes first (its number is still in the head
+	// line), the events shrink to the latest two, the table to a window
+	// around the cursor, and the selected pool's panel gets whatever is
+	// left, or goes when that is not enough for a chart worth reading.
+	l.hostChart, l.events = 0, 2
+	if l.poolRows > 8 {
+		l.poolRows = 8
+	}
+	if l.detail {
+		without := l
+		without.detail = false
+		if rest := m.height - m.rows(without) - detailFrame; rest >= 4 {
+			l.poolChart = min(rest, l.poolChart)
+		} else {
+			l.detail = false
+		}
+	}
+	for m.rows(l) > m.height && l.poolRows > 1 {
+		l.poolRows--
+	}
+	// Whatever is spare after the cuts goes back to the host chart, then to
+	// the events, up to what the full layout had. A chart under three rows
+	// has no row left for the line once the x axis has its two, and
+	// ntcharts labels the nothing "NaN", so fewer stay with the events.
+	if spare := m.height - m.rows(l); spare > 0 {
+		if spare >= 3 {
+			l.hostChart = min(spare, full.hostChart)
+			spare -= l.hostChart
+		}
+		if spare > 0 {
+			l.events = min(l.events+spare, full.events)
+		}
+	}
+
+	return l
+}
+
+// rows is how many lines a layout draws, counting each panel's border.
+func (m model) rows(l layout) int {
+	rows := 2 // the title and the keys
+	if m.notice != "" {
+		rows++
+	}
+	if m.confirm {
+		rows += m.confirmRows()
+	}
+	rows += 3 + l.hostChart
+	if len(m.resp.Rounds) == 0 {
+		rows += 3 // the waiting panel
+	} else {
+		rows += 3 + l.poolRows
+		if l.poolRows < len(m.pools) {
+			rows++
+		}
+		if l.detail {
+			rows += detailFrame + l.poolChart
+		}
+	}
+	rows += 3 + max(1, min(len(m.resp.Events), l.events))
+
+	return rows
+}
+
+// confirmRows is the apply panel's height: the border, the question, the
+// apply-mode note when there is one, a line per change (or the one saying
+// there is none), and the command.
+func (m model) confirmRows() int {
+	rows := 2 + 1 + max(1, len(m.pending())) + 1
+	if m.resp.Host.Apply {
+		rows++
+	}
+
+	return rows
+}
+
 // View lays the panels out: a title bar, the host, the pools, the selected
 // pool's charts, the events, and the keys.
 func (m model) View() string {
@@ -370,7 +544,7 @@ func (m model) View() string {
 		if m.err != nil {
 			return sPanel.Render(sBad.Render("Cannot reach the daemon") + "\n" + sDim.Render(m.err.Error()) +
 				"\n\n" + sDim.Render("fpm-tune top reads /history.json on the metrics address; pass --addr host:port.") +
-				"\n" + m.keys())
+				"\n" + m.keys(m.width))
 		}
 
 		return sDim.Render("  connecting to " + m.opts.Addr + " …")
@@ -384,34 +558,34 @@ func (m model) View() string {
 		inner = 60
 	}
 	content := inner - 2
+	l := m.layout()
 
-	// Chart heights by what the terminal has: the pools and the events keep
-	// their rows, the two charts share what is left.
-	hostH, poolH := 5, 8
-	if m.height < 36 {
-		hostH, poolH = 4, 6
-	}
-	if m.height >= 50 {
-		hostH, poolH = 7, 12
-	}
-
-	parts := []string{m.titleBar(content + 4)}
+	parts := []string{m.titleBar(inner + 2)}
 	if m.notice != "" {
-		parts = append(parts, "  "+m.notice)
+		parts = append(parts, fit("  "+m.notice, inner+2))
 	}
 	if m.confirm {
 		parts = append(parts, sPanel.Width(inner).BorderForeground(cAccent).Render(m.confirmPanel(content)))
 	}
-	parts = append(parts,
-		sPanel.Width(inner).Render(m.hostPanel(content, hostH)),
-		sPanel.Width(inner).Render(m.poolsPanel(content)),
-	)
-	if len(m.pools) > 0 {
-		parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(content, poolH)))
+	parts = append(parts, sPanel.Width(inner).Render(m.hostPanel(content, l.hostChart)))
+	if len(m.resp.Rounds) == 0 {
+		parts = append(parts, sPanel.Width(inner).Render(sDim.Render(waiting)))
+	} else {
+		parts = append(parts, sPanel.Width(inner).Render(m.poolsPanel(content, l.poolRows)))
+		if l.detail {
+			parts = append(parts, sPanel.Width(inner).Render(m.detailPanel(content, l.poolChart)))
+		}
 	}
-	parts = append(parts, sPanel.Width(inner).Render(m.eventsPanel(content)), m.keys())
+	parts = append(parts, sPanel.Width(inner).Render(m.eventsPanel(content, l.events)), m.keys(inner+2))
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// fit cuts a styled line to a width. JoinVertical pads every line to the
+// widest, so one line past the terminal wraps them all; this is the last
+// guard on the lines that carry text of unknown length.
+func fit(s string, width int) string {
+	return lipgloss.NewStyle().MaxWidth(width).Render(s)
 }
 
 func (m model) titleBar(width int) string {
@@ -428,26 +602,77 @@ func (m model) titleBar(width int) string {
 	if name == "" {
 		name = m.opts.Addr
 	}
-	left := sTitle.Render(" fpm-tune top ") + sAccent.Render(name) + "  " + mode + "  " + cpu
+	// A hostname is normally short; a fully qualified one on a narrow
+	// terminal would push the mode off the screen, and the mode matters more.
+	left := sTitle.Render(" fpm-tune top ") + sAccent.Render(trunc(name, max(width/3, 8))) + "  " + mode + "  " + cpu
+	version := ""
 	if h.Version != "" {
-		left += "  " + sDim.Render("v"+h.Version)
+		version = "  " + sDim.Render("v"+h.Version)
 	}
 
-	stamp := "never"
-	if !m.fetched.IsZero() {
-		stamp = m.fetched.Format("15:04:05")
-	}
-	right := sDim.Render(fmt.Sprintf("span %s · %s of data · updated %s · every %s",
-		sKey.Render(spans[m.span].name), m.dataExtent(), stamp, m.opts.Refresh))
+	// The right side gives way before the left: a narrow terminal drops the
+	// refresh rate, then how much history there is, then the version, then
+	// the time of the last fetch (a failed fetch replaces all of it with a
+	// stale message, cut to what is left beside the name and mode), so what
+	// survives at 80 columns is the daemon, its mode and what the charts
+	// show, in whole words.
+	var right string
 	if m.err != nil {
-		right = sBad.Render("stale: " + m.err.Error())
+		stale := "stale: " + m.err.Error()
+		if width-lipgloss.Width(left)-lipgloss.Width(version)-2 < lipgloss.Width(stale) {
+			version = ""
+		}
+		right = sBad.Render(trunc(stale, max(width-lipgloss.Width(left)-2, 4)))
+	} else {
+		parts := m.status()
+		for done := false; !done; {
+			right = sDim.Render(strings.Join(parts, " · "))
+			if width-lipgloss.Width(left)-lipgloss.Width(version)-lipgloss.Width(right) >= 2 {
+				break
+			}
+			switch {
+			case len(parts) > 2:
+				parts = parts[:len(parts)-1]
+			case version != "":
+				version = ""
+			case len(parts) > 1:
+				parts = parts[:len(parts)-1]
+			default:
+				done = true
+			}
+		}
 	}
+	left += version
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 2 {
 		gap = 2
 	}
 
-	return left + strings.Repeat(" ", gap) + right
+	return fit(left+strings.Repeat(" ", gap)+right, width)
+}
+
+// status is the right side of the title bar, in the order a narrow terminal
+// keeps it: first what the charts show, then when it was fetched, then how
+// much history the daemon holds (when the span is what bounds the charts),
+// then how often the view fetches.
+func (m model) status() []string {
+	stamp := "updated never"
+	if !m.fetched.IsZero() {
+		stamp = "updated " + m.fetched.Format("15:04:05")
+	}
+	var parts []string
+	switch {
+	case len(m.resp.Rounds) == 0:
+		parts = []string{"no rounds yet", stamp}
+	case m.showsAll():
+		// Every round fits the span, so the span is not what the operator
+		// sees: the extent of the data is.
+		parts = []string{"showing " + m.dataExtent() + " (all)", stamp}
+	default:
+		parts = []string{"span " + sKey.Render(spans[m.span].name), stamp, m.dataExtent() + " of data"}
+	}
+
+	return append(parts, "every "+m.opts.Refresh.String())
 }
 
 // dataExtent is how much history the daemon holds, as a word.
@@ -460,15 +685,22 @@ func (m model) dataExtent() string {
 	return humanDuration(r[len(r)-1].At.Sub(r[0].At))
 }
 
+// humanDuration is a duration the way an operator says it: seconds while
+// the daemon is new, minutes up to an hour and a half, then hours and
+// minutes ("1h59m"), because "1.9h" is a sum nobody wants to do.
 func humanDuration(d time.Duration) string {
 	switch {
 	case d < 2*time.Minute:
 		return fmt.Sprintf("%.0fs", d.Seconds())
-	case d < 2*time.Hour:
+	case d < 90*time.Minute:
 		return fmt.Sprintf("%.0fm", d.Minutes())
-	default:
-		return fmt.Sprintf("%.1fh", d.Hours())
 	}
+	hours, mins := int(d.Hours()), int(d.Minutes())%60
+	if mins == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+
+	return fmt.Sprintf("%dh%dm", hours, mins)
 }
 
 // chart is a time-series line chart with the view's axes and the chosen
@@ -483,7 +715,7 @@ func (m model) chart(width, height int, yMax float64, yLabel func(float64) strin
 			return time.Unix(int64(v), 0).Local().Format("15:04")
 		}),
 		timeserieslinechart.WithYLabelFormatter(func(_ int, v float64) string { return yLabel(v) }),
-		timeserieslinechart.WithXYSteps(xSteps(width), 3),
+		timeserieslinechart.WithXYSteps(xSteps(width), ySteps(height)),
 		timeserieslinechart.WithYRange(0, yMax),
 		timeserieslinechart.WithTimeRange(from, to),
 	)
@@ -502,6 +734,28 @@ func xSteps(width int) int {
 	}
 }
 
+// ySteps is how many rows apart the y labels are. ntcharts labels every
+// step rows up from the origin, over the rows the chart has once the x axis
+// has taken two, so the top of the range is labelled only when the step
+// divides those rows; a step that does not leaves a short chart reading
+// "0%" alone, with no scale at all. The smallest reasonable step that
+// divides, else the rows themselves, which labels the two ends.
+func ySteps(height int) int {
+	rows := height - 2
+	if rows <= 1 {
+		return 1
+	}
+	for _, step := range []int{3, 2, 4, 5} {
+		if rows%step == 0 {
+			return step
+		}
+	}
+
+	return rows
+}
+
+// hostPanel is the box: its budget, how busy its CPU is now, and the chart
+// of that over the window; a short terminal keeps the head line alone.
 func (m model) hostPanel(width, height int) string {
 	h := m.resp.Host
 	_, _, rounds := m.window()
@@ -526,6 +780,9 @@ func (m model) hostPanel(width, height int) string {
 		fmt.Sprintf("%s memory · %s", budget.HumanBytes(h.MemoryBytes), budget.HumanMillicores(h.CPUMillicores)) +
 		sDim.Render("  ("+h.Source+")") +
 		"      " + sHeader.Render("CPU busy ") + nowStyle.Render(now)
+	if height <= 0 {
+		return fit(head, width)
+	}
 
 	c := m.chart(width, height, 1, func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) })
 	c.SetDataSetStyle("busy", sBusy)
@@ -536,13 +793,35 @@ func (m model) hostPanel(width, height int) string {
 	}
 	c.DrawBrailleAll()
 
-	return head + "\n" + c.View()
+	return fit(head, width) + "\n" + c.View()
 }
 
-func (m model) poolsPanel(width int) string {
+// poolWidth is the POOL column: 14 unless the terminal is wide enough to
+// spend more on long names, and then the longest name up to 24. Below that
+// a long name is cut in the middle, so two that differ only at the end (a
+// site's "-prod" and "-stage" pools) stay apart.
+func poolWidth(names []string, wide bool) int {
+	w := 14
+	if !wide {
+		return w
+	}
+	for _, n := range names {
+		w = max(w, min(len([]rune(n)), 24))
+	}
+
+	return w
+}
+
+// poolsPanel is the table: one pool per row, the newest round's numbers,
+// with a window of maxRows around the cursor when the terminal has not the
+// rows for every pool.
+func (m model) poolsPanel(width, maxRows int) string {
 	_, _, rounds := m.window()
 	if len(rounds) == 0 {
 		rounds = m.resp.Rounds
+	}
+	if len(rounds) == 0 {
+		return sDim.Render(waiting)
 	}
 	last := rounds[len(rounds)-1]
 	byName := make(map[string]serve.PoolSample, len(last.Pools))
@@ -550,10 +829,12 @@ func (m model) poolsPanel(width int) string {
 		byName[p.Pool] = p
 	}
 
-	// The fixed columns take 67 characters; the sparkline gets what is left,
-	// up to a reasonable length, and goes entirely when there is no room for
-	// one worth reading.
-	sparkWidth := width - 67
+	// The fixed columns take the pool column plus 52 characters, and the
+	// sparkline's own gap two more; the sparkline gets what is left, up to
+	// a reasonable length, and goes entirely when there is no room for one
+	// worth reading. At 80 columns that is six, which is a trend.
+	poolW := poolWidth(m.pools, m.width >= 100)
+	sparkWidth := width - poolW - 54
 	if sparkWidth > 24 {
 		sparkWidth = 24
 	}
@@ -568,32 +849,20 @@ func (m model) poolsPanel(width int) string {
 		}
 		sparkHeader = fmt.Sprintf("%-*s  ", sparkWidth, label)
 	}
-	header := fmt.Sprintf("%-14s %6s %5s %5s %5s  %s%6s  %8s  %-6s",
-		"POOL", "BUSY", "QUEUE", "NOW", "PLAN", sparkHeader, "CPU", "FILL/CAP", "LIMIT")
+	header := fmt.Sprintf("%-*s %5s %5s %5s %5s  %s%7s %7s %s",
+		poolW, "POOL", "BUSY", "QUEUE", "MAX", "PLAN", sparkHeader, "CPU/REQ", "CPU MAX", "BOUND BY")
 	lines := []string{sHeader.Render(header)}
-	for i, name := range m.pools {
+	start, end := rowWindow(len(m.pools), m.selected, maxRows)
+	for i := start; i < end; i++ {
+		name := m.pools[i]
 		p := byName[name]
-		series := seriesOf(rounds, name, func(s serve.PoolSample) float64 { return float64(s.Active) })
-		ceiling := float64(p.Configured)
-		if ceiling <= 0 {
-			ceiling = 1
-		}
 		cpu := "-"
 		if p.CPUReadings >= 20 {
-			cpu = fmt.Sprintf("%3.0f%%", p.CPURatioP50*100)
+			cpu = fmt.Sprintf("%.0f%%", p.CPURatioP50*100)
 		}
-		fill := "-"
+		cpuMax := "-"
 		if p.CPUCeiling > 0 {
-			fill = fmt.Sprintf("%d/%d", p.CPUFill, p.CPUCeiling)
-		}
-		limit := sDim.Render("-")
-		switch {
-		case p.CPUBound:
-			limit = sAccent.Render("held")
-		case p.CPULimited:
-			limit = sWarn.Render("cpu")
-		case p.CPUReadings >= 20:
-			limit = sOK.Render("memory")
+			cpuMax = fmt.Sprintf("%d", p.CPUCeiling)
 		}
 		queue := sDim.Render(fmt.Sprintf("%5d", p.Queue))
 		if p.Queue > 0 {
@@ -607,18 +876,78 @@ func (m model) poolsPanel(width int) string {
 		}
 		sparkCell := ""
 		if sparkWidth > 0 {
-			sparkCell = colorSpark(series, sparkWidth, ceiling) + "  "
+			sparkCell = colorSpark(busySeries(rounds, name), sparkWidth, 1) + "  "
 		}
-		row := fmt.Sprintf("%-14s %6d %s %5d %s  %s%6s  %8s  %s",
-			trunc(name, 14), p.Active, queue, p.Configured, plan,
-			sparkCell, cpu, fill, limit)
+		row := fmt.Sprintf("%-*s %5d %s %5d %s  %s%7s %7s %s",
+			poolW, truncMiddle(name, poolW), p.Active, queue, p.Configured, plan,
+			sparkCell, cpu, cpuMax, boundBy(p))
 		if i == m.selected {
 			row = sRowSel.Render(row)
 		}
-		lines = append(lines, row)
+		lines = append(lines, fit(row, width))
+	}
+	if above, below := start, len(m.pools)-end; above > 0 || below > 0 {
+		var more string
+		switch {
+		case above > 0 && below > 0:
+			more = fmt.Sprintf("… %d above · %d below", above, below)
+		case above > 0:
+			more = fmt.Sprintf("… %d more above", above)
+		default:
+			more = fmt.Sprintf("… %d more", below)
+		}
+		lines = append(lines, sDim.Render(more))
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// rowWindow is the slice of n rows that a table of maxRows shows: the whole
+// table when it fits, else the rows around the selected one.
+func rowWindow(n, selected, maxRows int) (start, end int) {
+	if maxRows <= 0 || maxRows >= n {
+		return 0, n
+	}
+	start = selected - maxRows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+maxRows > n {
+		start = n - maxRows
+	}
+
+	return start, start + maxRows
+}
+
+// boundBy is the BOUND BY column: which side of the budget set the plan.
+// "cpu (held)" is a pool the CPU side is holding at its ceiling, "cpu" one
+// it lowered, "memory" one it looked at and left to memory, and a dash a
+// pool the CPU side has too few readings on to say.
+func boundBy(p serve.PoolSample) string {
+	switch {
+	case p.CPUBound:
+		return sAccent.Render("cpu (held)")
+	case p.CPULimited:
+		return sWarn.Render("cpu")
+	case p.CPUReadings >= 20:
+		return sOK.Render("memory")
+	default:
+		return sDim.Render("-")
+	}
+}
+
+// busySeries is a pool's busy workers as a share of its ceiling, round by
+// round, for the table's sparkline. Each round is scaled by its own ceiling,
+// so the history of a pool that was resized since is drawn as how full it
+// was then, not clipped red against a ceiling it did not have.
+func busySeries(rounds []serve.HistorySample, name string) []float64 {
+	return seriesOf(rounds, name, func(s serve.PoolSample) float64 {
+		if s.Configured <= 0 {
+			return -1
+		}
+
+		return float64(s.Active) / float64(s.Configured)
+	})
 }
 
 func poolValue(r serve.HistorySample, name string, f func(serve.PoolSample) float64) float64 {
@@ -639,6 +968,9 @@ func (m model) detailPanel(width, height int) string {
 	_, _, rounds := m.window()
 	if len(rounds) == 0 {
 		rounds = m.resp.Rounds
+	}
+	if len(rounds) == 0 {
+		return sDim.Render(waiting)
 	}
 	var last serve.PoolSample
 	for _, p := range rounds[len(rounds)-1].Pools {
@@ -669,17 +1001,17 @@ func (m model) detailPanel(width, height int) string {
 
 	legend := []string{
 		sBusy.Render("●") + " busy " + sTitle.Render(fmt.Sprintf("%d", last.Active)),
-		sNow.Render("●") + " now " + fmt.Sprintf("%d", last.Configured),
+		sNow.Render("●") + " max " + fmt.Sprintf("%d", last.Configured),
 		sPlan.Render("●") + " plan " + fmt.Sprintf("%d", last.Recommended),
 	}
 	if last.MemoryCeiling > 0 {
 		legend = append(legend, sMemory.Render("●")+" memory ceiling "+fmt.Sprintf("%d", last.MemoryCeiling))
 	}
 	if last.CPUCeiling > 0 {
-		legend = append(legend, sWarn.Render("●")+" cpu ceiling "+fmt.Sprintf("%d", last.CPUCeiling))
+		legend = append(legend, sWarn.Render("●")+" CPU max "+fmt.Sprintf("%d", last.CPUCeiling))
 	}
 	if last.CPUBound {
-		legend = append(legend, sAccent.Render("held at the ceiling"))
+		legend = append(legend, sAccent.Render("held at the CPU max"))
 	}
 
 	c := m.chart(width, height, yMax, func(v float64) string { return fmt.Sprintf("%.0f", v) })
@@ -729,10 +1061,12 @@ func (m model) detailPanel(width, height int) string {
 	// The queue against the pool's ceiling, like the busy workers: a queue
 	// as long as the pool is the pool a second time over, which is where
 	// red belongs. Scaled to its own peak, one waiting request would be red.
-	tail := sHeader.Render("queue   ") + pad(queueVal, labelW) + "  " + colorSpark(queue, sparkW, float64(max(last.Configured, 1))) + "\n" +
-		sHeader.Render("cpu     ") + pad(cpuVal, labelW) + "  " + colorSpark(cpu, sparkW, 1)
+	// The CPU share is in one colour: a request that is mostly CPU is a
+	// fact about the code, not a problem, and amber would say otherwise.
+	tail := fit(sHeader.Render("queue   ")+pad(queueVal, labelW)+"  "+colorSpark(queue, sparkW, float64(max(last.Configured, 1))), width) + "\n" +
+		fit(sHeader.Render("cpu     ")+pad(cpuVal, labelW)+"  "+plainSpark(cpu, sparkW, 1, sMemory), width)
 
-	return head + "\n" + strings.Join(legend, "   ") + "\n" + c.View() + "\n" + tail
+	return fit(head, width) + "\n" + fit(strings.Join(legend, "   "), width) + "\n" + c.View() + "\n" + tail
 }
 
 func seriesOf(rounds []serve.HistorySample, name string, f func(serve.PoolSample) float64) []float64 {
@@ -753,17 +1087,18 @@ func pad(s string, width int) string {
 	return s
 }
 
-// cpuLabel is the cpu row's value: the share, the fill count and the ceiling;
+// cpuLabel is the cpu row's value: the share of a request that is CPU, how
+// many workers at that share fill the cores, and the ceiling that gives;
 // shorter words on a narrow terminal.
 func cpuLabel(p serve.PoolSample, short bool) string {
 	if p.CPUReadings < 20 {
 		return sDim.Render("too few readings yet")
 	}
-	share := fmt.Sprintf("%.0f%% of a request on CPU", p.CPURatioP50*100)
-	fill := fmt.Sprintf(" · %d fill the box · ceiling %d", p.CPUFill, p.CPUCeiling)
+	share := fmt.Sprintf("%.0f%% of each request is CPU", p.CPURatioP50*100)
+	fill := fmt.Sprintf(" · %d workers fill the cores · CPU max %d", p.CPUFill, p.CPUCeiling)
 	if short {
-		share = fmt.Sprintf("%.0f%% cpu", p.CPURatioP50*100)
-		fill = fmt.Sprintf(" · %d fill · cap %d", p.CPUFill, p.CPUCeiling)
+		share = fmt.Sprintf("%.0f%% cpu/req", p.CPURatioP50*100)
+		fill = fmt.Sprintf(" · CPU max %d", p.CPUCeiling)
 	}
 	s := share
 	if p.CPUCeiling > 0 {
@@ -773,52 +1108,71 @@ func cpuLabel(p serve.PoolSample, short bool) string {
 	return s
 }
 
-func (m model) eventsPanel(width int) string {
+func (m model) eventsPanel(width, maxEvents int) string {
 	events := m.resp.Events
 	lines := []string{sHeader.Render("EVENTS")}
 	if len(events) == 0 {
 		lines = append(lines, sDim.Render("no events since the daemon started"))
 	}
-	max := 6
-	if m.height > 44 {
-		max = 12
-	}
-	if len(events) > max {
-		events = events[len(events)-max:]
+	if len(events) > maxEvents {
+		events = events[len(events)-maxEvents:]
 	}
 	for i := len(events) - 1; i >= 0; i-- {
-		e := events[i]
-		var what string
-		switch e.Kind {
-		case serve.EventResized:
-			arrow := sOK.Render("↑")
-			if e.To < e.From {
-				arrow = sWarn.Render("↓")
-			}
-			what = fmt.Sprintf("%s %s %d → %d", arrow, sAccent.Render(e.Pool), e.From, e.To)
-		case serve.EventChanged:
-			what = fmt.Sprintf("%s %s %d → %d", sDim.Render("⇄"), sAccent.Render(e.Pool), e.From, e.To)
-		case serve.EventRepaired:
-			what = sOK.Render("repaired the host")
-		case serve.EventRolledBack:
-			what = sWarn.Render("rolled back")
-		default:
-			what = sBad.Render(strings.ReplaceAll(e.Kind, "_", " "))
-		}
-		detail := ""
-		if e.Detail != "" {
-			detail = sDim.Render("  " + trunc(e.Detail, width-40))
-		}
-		lines = append(lines, sDim.Render(e.At.Local().Format("15:04:05"))+"  "+what+detail)
+		lines = append(lines, eventLine(events[i], width))
 	}
 
 	return strings.Join(lines, "\n")
 }
 
+// eventLine is one event, every kind in one shape: the time, a glyph and a
+// verb, then the pool and the change when the event has them, then the
+// daemon's own words in whatever room is left.
+func eventLine(e serve.HistoryEvent, width int) string {
+	var glyph, verb string
+	switch e.Kind {
+	case serve.EventResized:
+		glyph, verb = sOK.Render("↑"), "resized"
+		if e.To < e.From {
+			glyph = sWarn.Render("↓")
+		}
+	case serve.EventChanged:
+		glyph, verb = sDim.Render("⇄"), "changed outside"
+	case serve.EventApplyFailed:
+		glyph, verb = sBad.Render("✗"), sBad.Render("apply failed")
+	case serve.EventRolledBack:
+		glyph, verb = sWarn.Render("↩"), sWarn.Render("rolled back")
+	case serve.EventRollbackFailed:
+		glyph, verb = sBad.Render("✗"), sBad.Render("rollback failed")
+	case serve.EventRepaired:
+		glyph, verb = sOK.Render("✓"), sOK.Render("repaired")
+	default:
+		glyph, verb = sBad.Render("•"), sBad.Render(strings.ReplaceAll(e.Kind, "_", " "))
+	}
+	line := sDim.Render(e.At.Local().Format("15:04:05")) + "  " + glyph + " " + verb
+	if e.Pool != "" {
+		line += " " + sAccent.Render(e.Pool)
+	}
+	if e.From != 0 || e.To != 0 {
+		line += fmt.Sprintf(" %d → %d", e.From, e.To)
+	}
+	// The daemon's detail on a resize is "22 to 10", which the arrow has
+	// just said.
+	detail := e.Detail
+	if detail == fmt.Sprintf("%d to %d", e.From, e.To) {
+		detail = ""
+	}
+	if room := width - lipgloss.Width(line) - 2; detail != "" && room >= 4 {
+		line += sDim.Render("  " + trunc(detail, room))
+	}
+
+	return fit(line, width)
+}
+
 // confirmPanel is what Enter would do: the plan's changes, pool by pool,
 // and the command that makes them.
 func (m model) confirmPanel(width int) string {
-	lines := []string{sAccent.Render("APPLY THE PLAN?") + sDim.Render("  Enter asks the daemon to apply it now, Esc cancels")}
+	lines := []string{sAccent.Render("APPLY THE PLAN?") + "  " + sKey.Render("Enter") +
+		sDim.Render(" asks the daemon to apply it now, ") + sKey.Render("Esc") + sDim.Render(" cancels")}
 	if m.resp.Host.Apply {
 		lines = append(lines, sDim.Render("the daemon is in apply mode and would get to this on its own; Enter skips its reload damping"))
 	}
@@ -833,7 +1187,7 @@ func (m model) confirmPanel(width int) string {
 		}
 		why := ""
 		if p.CPUBound {
-			why = sDim.Render("  held at the cpu ceiling")
+			why = sDim.Render("  held at the CPU max")
 		}
 		lines = append(lines, fmt.Sprintf("  %s %-14s %d → %d%s", arrow, p.Pool, p.Configured, p.Recommended, why))
 	}
@@ -841,15 +1195,23 @@ func (m model) confirmPanel(width int) string {
 	// nothing but length.
 	shown := applyArgs(filepath.Base(self()), os.Geteuid() == 0)
 	lines = append(lines, sDim.Render(trunc("runs: "+strings.Join(shown, " "), width)))
+	for i := range lines {
+		lines[i] = fit(lines[i], width)
+	}
 
 	return strings.Join(lines, "\n")
 }
 
-func (m model) keys() string {
+// keys is the bottom line: the keys that do something right now, which
+// while the apply panel is open are the two that close it.
+func (m model) keys(width int) string {
 	k := func(key, what string) string { return sKey.Render(key) + sDim.Render(" "+what) }
-	items := []string{k("↑↓", "pool"), k("1", "hour"), k("2", "six hours"), k("3", "all"), k("a", "apply"), k("r", "refresh"), k("q", "quit")}
+	if m.confirm {
+		return fit("  "+k("Enter", "apply now")+"   "+k("Esc", "cancel"), width)
+	}
+	items := []string{k("↑↓/tab", "pool"), k("1", "1h"), k("2", "6h"), k("3", "all"), k("a", "apply"), k("r", "refresh"), k("q", "quit")}
 
-	return "  " + strings.Join(items, "   ")
+	return fit("  "+strings.Join(items, "   "), width)
 }
 
 // The sparkline used in the table and for the queue and CPU rows. Eight
@@ -913,7 +1275,8 @@ func spark(series []float64, width int, scale float64) []rune {
 }
 
 // colorSpark renders a sparkline with each column coloured by how full it
-// is: blue when there is room, amber past 70%, red at the top.
+// is: blue when there is room, amber past 70%, red at the top. For series
+// where the top is a problem: workers against their ceiling, a queue.
 func colorSpark(series []float64, width int, scale float64) string {
 	runes := spark(series, width, scale)
 	var b strings.Builder
@@ -939,10 +1302,45 @@ func colorSpark(series []float64, width int, scale float64) string {
 	return b.String()
 }
 
+// plainSpark renders a sparkline in one style, for a series where a high
+// value is not a warning and the traffic-light colours would lie.
+func plainSpark(series []float64, width int, scale float64, style lipgloss.Style) string {
+	var b strings.Builder
+	for _, r := range spark(series, width, scale) {
+		switch r {
+		case ' ':
+			b.WriteRune(' ')
+		case '·':
+			b.WriteString(sFaint.Render("·"))
+		default:
+			b.WriteString(style.Render(string(r)))
+		}
+	}
+
+	return b.String()
+}
+
+// trunc cuts a string to n characters, the last of them an ellipsis. By
+// rune, so a multibyte character at the cut is dropped whole rather than
+// left as half a sequence the terminal draws as garbage.
 func trunc(s string, n int) string {
-	if n < 4 || len(s) <= n {
+	r := []rune(s)
+	if n < 4 || len(r) <= n {
 		return s
 	}
 
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
+}
+
+// truncMiddle cuts a name to n characters by taking the middle out, keeping
+// the start and the end, which is where pool names differ.
+func truncMiddle(s string, n int) string {
+	r := []rune(s)
+	if n < 4 || len(r) <= n {
+		return s
+	}
+	head := n / 2
+	tail := n - 1 - head
+
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }

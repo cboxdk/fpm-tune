@@ -75,6 +75,14 @@ func TestHistoryJSONIsServed(t *testing.T) {
 		t.Errorf("events = %+v", body.Events)
 	}
 
+	// HEAD is how a dashboard checks the daemon is there without pulling a
+	// day of rounds: the headers as GET would send them, and no body.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/history.json", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" || rec.Body.Len() != 0 {
+		t.Errorf("HEAD gave %d, content-type %q, %d body bytes; want 200, JSON, none", rec.Code, rec.Header().Get("Content-Type"), rec.Body.Len())
+	}
+
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/history.json", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -106,6 +114,29 @@ func TestASampleCarriesTheRound(t *testing.T) {
 		WorkerBytes: 35 << 20, MemoryCeiling: 27, CPURatioP50: 0.85, CPUReadings: 40, CPUFill: 5, CPUCeiling: 10, CPULimited: true, CPUBound: true}
 	if p != want {
 		t.Errorf("pool sample = %+v, want %+v", p, want)
+	}
+}
+
+// TestASampleOfAPoolTheScrapeDidNotSeeIsZeroes: the plan can name a pool the
+// views do not carry (a pool whose scrape failed, planned from what the state
+// remembers of it). The sample joins by name and takes zero for what was not
+// observed rather than panicking or dropping the pool.
+func TestASampleOfAPoolTheScrapeDidNotSeeIsZeroes(t *testing.T) {
+	result := plan.Result{
+		Plan: allocate.Plan{Pools: []allocate.PoolPlan{{Name: "ghost", MaxChildren: 5, WorkerBytes: 30 << 20}}},
+	}
+	s := historySampleOf(result, time.Unix(1, 0), 0, false)
+	if len(s.Pools) != 1 {
+		t.Fatalf("sample = %+v, want the planned pool", s)
+	}
+	p := s.Pools[0]
+	if p.Pool != "ghost" || p.Active != 0 || p.Queue != 0 || p.Configured != 0 || p.Recommended != 5 || p.WorkerBytes != 30<<20 {
+		t.Errorf("pool sample = %+v, want zero observation and the plan's numbers", p)
+	}
+
+	// An error with no newline is kept whole.
+	if got := firstLine(errors.New("one line, no newline")); got != "one line, no newline" {
+		t.Errorf("firstLine = %q", got)
 	}
 }
 
@@ -184,26 +215,73 @@ func TestAChangeTheDaemonDidNotMakeIsAnEvent(t *testing.T) {
 	}
 }
 
-// TestTheLockComesBackWithoutARoundOfRecovery: a watching daemon releases
-// the pool-directory lock after every apply-now, and taking it again on the
-// directory it has already reconciled must not clear the reconciled flag,
-// or every second apply-now is refused. A different directory still does.
-func TestTheLockComesBackWithoutARoundOfRecovery(t *testing.T) {
-	dir, other := t.TempDir(), t.TempDir()
-	l := &Loop{reconciled: true, reconciledDir: dir, log: discardLogger()}
-	defer l.releaseResource()
-	for i := 0; i < 2; i++ {
-		if !l.holdResource(dir) || !l.reconciled {
-			t.Fatalf("take %d: held=%v reconciled=%v", i, l.resource != nil, l.reconciled)
-		}
-		l.releaseResource()
+// TestAnUnreadablePoolIsNeitherAChangeNorAConsumedExpectation: a scrape that
+// failed says nothing about the pool's ceiling, whatever number came with
+// it. It records no event, does not move what the daemon last saw
+// configured, and does not spend the expectation of the daemon's own
+// resize — which is spent on the round the pool is readable again, so that
+// the move to the expected value is still not an event.
+func TestAnUnreadablePoolIsNeitherAChangeNorAConsumedExpectation(t *testing.T) {
+	l := &Loop{history: newHistory(10, 30*time.Second), lastConfigured: map[string]int{}, expected: map[string]int{}}
+	t0 := time.Unix(1_700_000_000, 0)
+	view := func(max int, err error) []observe.PoolView {
+		return []observe.PoolView{{Name: "www", CurrentMaxChildren: max, MaxChildrenKnown: true, Err: err}}
 	}
-	if !l.holdResource(other) || l.reconciled {
-		t.Errorf("a directory never reconciled: held=%v reconciled=%v", l.resource != nil, l.reconciled)
+	l.noteExternalChanges(view(10, nil), t0)
+
+	// The daemon wrote 12; the next scrape failed, and its stale number is
+	// the new ceiling anyway.
+	l.expected = map[string]int{"www": 12}
+	l.noteExternalChanges(view(12, errors.New("status page: connection refused")), t0.Add(30*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 0 {
+		t.Errorf("an unreadable pool became an event: %+v", events)
+	}
+	if l.lastConfigured["www"] != 10 {
+		t.Errorf("lastConfigured = %d after an unreadable round, want the last readable 10", l.lastConfigured["www"])
+	}
+	if want, ok := l.expected["www"]; !ok || want != 12 {
+		t.Errorf("expected = %v after an unreadable round, want www: 12 kept", l.expected)
+	}
+
+	// Readable again at the expected value: the daemon's own resize, not
+	// an outside change, and the expectation is spent now.
+	l.noteExternalChanges(view(12, nil), t0.Add(60*time.Second))
+	if _, events := l.history.snapshot(0); len(events) != 0 {
+		t.Errorf("the daemon's own resize, seen late, became an event: %+v", events)
+	}
+	if l.lastConfigured["www"] != 12 || len(l.expected) != 0 {
+		t.Errorf("after the readable round: lastConfigured = %v, expected = %v", l.lastConfigured, l.expected)
+	}
+}
+
+// TestReleasingTheLockSendsTheNextWriteThroughRecovery: a watching daemon
+// gives the pool-directory lock back after every apply-now, and while it is
+// not held anyone may have written the directory — so releasing it also
+// forgets that the directory was reconciled, and the next forced round
+// reconciles before writing. Taking the lock afresh clears the flag the
+// same way. A lock another process holds is refused with the outcome an
+// apply-now should see.
+func TestReleasingTheLockSendsTheNextWriteThroughRecovery(t *testing.T) {
+	dir, other := t.TempDir(), t.TempDir()
+	l := &Loop{log: discardLogger(), metrics: metrics.New()}
+	defer l.releaseResource()
+	if !l.holdResource(dir) {
+		t.Fatalf("the lock on a free directory was refused: %+v", l.outcome)
+	}
+	l.reconciled = true
+	l.releaseResource()
+	if l.reconciled || l.resource != nil {
+		t.Errorf("after release: reconciled=%v held=%v, want neither", l.reconciled, l.resource != nil)
+	}
+	if !l.holdResource(dir) || l.reconciled {
+		t.Errorf("taking the lock again: held=%v reconciled=%v, want held and not reconciled", l.resource != nil, l.reconciled)
 	}
 
 	// Held by another process (an apply-mode daemon, usually): the refusal
 	// is the outcome an apply-now gets, not a generic 'not reconciled'.
+	if !l.holdResource(other) {
+		t.Fatalf("the lock on a second free directory was refused: %+v", l.outcome)
+	}
 	second := &Loop{log: discardLogger(), metrics: metrics.New()}
 	if second.holdResource(other) || !strings.Contains(second.outcome.Error, "pool-directory lock") {
 		t.Errorf("a held lock: held=%v outcome=%+v", second.resource != nil, second.outcome)

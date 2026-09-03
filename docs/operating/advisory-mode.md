@@ -7,7 +7,9 @@ description: Run it permanently as an adviser that writes its conclusion to a fi
 # Advisory mode
 
 Watching without acting is a first-class way to run this tool, not just a step on
-the way to `--apply`. A daemon without `--apply` changes nothing and never will.
+the way to `--apply`. A daemon without `--apply` changes nothing on its own. The one exception is
+an `apply-now` you send it, which applies the plan it showed once and leaves
+it advisory.
 But until now it could not leave its conclusion anywhere you could act on: the
 numbers were in a log line and on a metrics endpoint, and neither is something
 you can put into a pool file.

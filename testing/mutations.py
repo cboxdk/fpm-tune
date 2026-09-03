@@ -184,10 +184,10 @@ MUTATIONS = [
     # in the apply-once path, and a bare match hit that one first.
     ("serve: the daemon keeps the lock it has stopped writing with",
      "serve/serve.go", '\t\t// remedy it recommends is worse than one that simply stops.\n\t\tl.releaseResource()\n', '\t\t// remedy it recommends is worse than one that simply stops.\n'),
-    ("serve: re-taking the lock on a reconciled directory costs a round of recovery",
+    ("serve: a released lock leaves the directory trusted, so every second apply-now is refused",
      "serve/serve.go",
-     "	if dropInDir != l.reconciledDir {\n		l.reconciled = false\n	}\n",
-     "	l.reconciled = false\n"),
+     "	l.resource, l.resourceDir = nil, \"\"\n	l.reconciled = false\n}\n",
+     "	l.resource, l.resourceDir = nil, \"\"\n}\n"),
     ("serve: an expected resize excuses outside changes forever",
      "serve/history.go",
      "		want, ours := l.expected[v.Name]\n		delete(l.expected, v.Name)\n",

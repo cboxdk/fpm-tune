@@ -111,9 +111,9 @@ what it recommends, add `--apply`.
 
 - **Safe to run once out of curiosity:** `plan`, `serve` (without `--apply`),
   `serve --recommend`. None of them touch the host.
-- **Acts on the host:** `apply` and `serve --apply`. On a stable host already at
-  the right size these are a no-op (nothing is written, nothing is reloaded), but
-  they *are* live.
+- **Acts on the host:** `apply`, `serve --apply`, and `apply-now`, which makes a
+  watching daemon write once. On a stable host already at the right size these
+  are a no-op (nothing is written, nothing is reloaded), but they *are* live.
 - **On a host running more than one php-fpm master**, name which one with
   `--drop-in-dir`; unscoped, the numbers are a mixture and `apply` refuses. See
   [The trust boundary](../safety/the-trust-boundary.md).

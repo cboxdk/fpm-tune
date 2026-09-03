@@ -233,6 +233,7 @@ func runInstallService(args []string) error {
 	fmt.Print("\nSwitch mode any time (no unit edit needed):\n" +
 		"  fpm-tune mode apply       # let it act on what it finds\n" +
 		"  fpm-tune mode advisory    # back to watch-only\n\n" +
+		"Watch it:   fpm-tune top\n" +
 		"Follow it:  journalctl -u fpm-tune -f\n")
 
 	return nil

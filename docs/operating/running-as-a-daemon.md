@@ -63,7 +63,8 @@ Each interval, in order:
 4. **Learn**: fold the readings into the baselines.
 5. **Plan**: read the budget from the master's cgroup, divide it.
 6. **Record** the ceiling counters, for the next round to compare against.
-7. **Apply** (with `--apply`), if a change is worth a reload.
+7. **Apply** (with `--apply`, or for the one round an `apply-now` asks for),
+   if a change is worth a reload.
 8. **Publish** the plan as metrics, and (with `--recommend`) write it as
    configuration.
 
@@ -86,9 +87,10 @@ count, ceiling, whether the pool is CPU-limited and whether it was held at the
 CPU ceiling), plus how busy the box's CPU was over the interval. A `host`
 object carries the hostname, the version, the mode, whether the CPU ceiling is
 on and where the budget came from; that is what `top`'s title bar reads.
-Events are resizes (pool, from, to, reason), failed applies, rollbacks,
-repairs, and `changed`: a ceiling that moved without the daemon moving it, a
-hand edit, a deploy, or an `fpm-tune apply` run beside it.
+Events carry a `kind`: `resized` (pool, from, to, reason), `apply_failed`,
+`rolled_back`, `rollback_failed`, `repaired`, and `changed`: a ceiling that
+moved without the daemon moving it, a hand edit, a deploy, or an `fpm-tune
+apply` run beside it.
 
 `--history` sets how far back it reaches (a day by default; the ring holds
 history ÷ interval rounds and a thousand events). It starts empty at every

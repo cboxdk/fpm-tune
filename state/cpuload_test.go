@@ -190,3 +190,45 @@ func TestBoxCostSurvivesTheStateFile(t *testing.T) {
 		t.Errorf("fit or counters did not survive: N=%d seen=%v", points(ps.BoxCost), ps.CPUTicksSeen)
 	}
 }
+
+// TestHostBusyIsADifferenceWithGates: the box's busy time between two
+// readings, as cores and as a share of the cores it has. Unknown across a
+// gap too short to divide by or too long to have watched, when the counter
+// went backwards, and when the box's capacity is unknown; the share is
+// clamped at one, because a box cannot be busier than it is, while the cores
+// are reported as measured.
+func TestHostBusyIsADifferenceWithGates(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	cases := []struct {
+		name       string
+		gap        time.Duration
+		busyMicros int64
+		millicores int
+		ok         bool
+		cores      float64
+		ratio      float64
+	}{
+		{name: "a second apart", gap: time.Second, busyMicros: 500_000, millicores: 4000},
+		{name: "a six-minute hole", gap: 6 * time.Minute, busyMicros: 60_000_000, millicores: 4000},
+		{name: "a counter that went backwards", gap: 30 * time.Second, busyMicros: -1, millicores: 4000},
+		{name: "a box of unknown size", gap: 30 * time.Second, busyMicros: 60_000_000, millicores: 0},
+		{name: "half of four cores", gap: 30 * time.Second, busyMicros: 60_000_000, millicores: 4000, ok: true, cores: 2, ratio: 0.5},
+		{name: "busier than the box", gap: 30 * time.Second, busyMicros: 500_000_000, millicores: 4000, ok: true, cores: 500.0 / 30, ratio: 1},
+	}
+	for _, c := range cases {
+		prev := HostCPUSeen{BusyMicros: 1_000_000, At: t0}
+		now := HostCPUSeen{BusyMicros: 1_000_000 + c.busyMicros, At: t0.Add(c.gap)}
+		cores, ratio, ok := HostBusy(prev, now, c.millicores)
+		if ok != c.ok {
+			t.Errorf("%s: ok = %v, want %v", c.name, ok, c.ok)
+
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if math.Abs(cores-c.cores) > 0.01 || math.Abs(ratio-c.ratio) > 0.001 {
+			t.Errorf("%s: cores = %.2f ratio = %.3f, want %.2f and %.3f", c.name, cores, ratio, c.cores, c.ratio)
+		}
+	}
+}

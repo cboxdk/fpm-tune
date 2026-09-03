@@ -92,8 +92,8 @@ sudo fpm-tune apply-now     # or press a in fpm-tune top
 
 It stays advisory afterwards. (Without a daemon running, `fpm-tune apply` does
 the same from the command line; beside one it is refused, because two writers
-of one state file discard each other's learning.) Either way this writes one file (`zz-fpm-tune.conf`, in the directory your master already
-includes), validates it against a sandboxed copy of the configuration, and
+of one state file discard each other's learning.) Either way this writes one
+file (`zz-fpm-tune.conf`, in the directory your master already includes), validates it against a sandboxed copy of the configuration, and
 reloads the master with SIGUSR2. If php-fpm would reject the file, it never
 reaches the live directory. If the master does not survive the reload, the
 change is rolled back. Deleting the file returns everything to what you

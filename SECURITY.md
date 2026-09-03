@@ -36,6 +36,11 @@ particular:
   writes anyway, from a limit it did not actually establish, is in scope.
 - **Reload that restarts.** It signals `SIGUSR2` and must never restart the
   master. A path that kills workers or the master is in scope.
+- **Reaching the control socket without root.** `control.sock` beside the state
+  file is created mode 0600 in a 0700 directory and accepts one instruction:
+  apply the plan now. A way for a non-root user to send it is in scope.
+  (`/history.json` on the metrics address is unauthenticated by design, like
+  `/metrics`; the installed service binds both to loopback.)
 
 ## What is not
 
