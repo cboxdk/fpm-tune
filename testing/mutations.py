@@ -180,8 +180,10 @@ MUTATIONS = [
      "cmd/fpm-tune/main.go",
      "	if limits.LookupErr == nil {\n		return nil\n	}",
      "	if true {\n		return nil\n	}"),
+    # Anchored on the line before it: the same call also sits, deeper indented,
+    # in the apply-once path, and a bare match hit that one first.
     ("serve: the daemon keeps the lock it has stopped writing with",
-     "serve/serve.go", "		l.releaseResource()\n", ""),
+     "serve/serve.go", '\t\t// remedy it recommends is worse than one that simply stops.\n\t\tl.releaseResource()\n', '\t\t// remedy it recommends is worse than one that simply stops.\n'),
     ("serve: the daemon applies from a budget nobody confirmed",
      "serve/serve.go",
      "	if result.Budget.LookupErr != nil {\n		l.metrics.SetApplyBlocked(\"budget_unconfirmed\")",
