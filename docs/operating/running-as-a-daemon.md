@@ -95,6 +95,7 @@ The other lines, by their `msg`:
 - `Forgot pools that are no longer configured`, with `pools`: their baselines were dropped.
 - `Capacity exhausted`, a warning, once when the host becomes [out of capacity](../how-it-decides/dividing-the-budget.md), and `No longer at capacity` when it stops being.
 - `Pools have no status page`, a warning, when the set of unsized pools changes.
+- `Pool queued while the host's CPU was full`, a warning with `pool`, `queue`, `busy`, `configured`, `cpu_ceiling` and `host_busy`, the first round that finds requests waiting while the host is at 95% CPU or more, and `No longer queued while the host's CPU was full` when it stops. Another worker would find no core to run on, so this queue is the CPU's; see [CPU per request](../how-it-decides/cpu.md).
 - `The recommendation changed`, with `path`: the recommendation file was rewritten.
 
 `--verbose` adds the per-scrape detail. Persistent conditions are logged on the transition, not every round; `/metrics` is the continuous view. See [Metrics and alerting](metrics-and-alerting.md).

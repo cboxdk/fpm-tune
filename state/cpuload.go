@@ -106,9 +106,9 @@ const (
 	// idle of PHP, and its busy time is the base the fit's intercept describes.
 	idleCores = 0.02
 
-	// starvedBusyRatio is the box busy fraction at or above which a queue is a
+	// StarvedBusyRatio is the host busy fraction at or above which a queue is a
 	// queue the CPU caused.
-	starvedBusyRatio = 0.95
+	StarvedBusyRatio = 0.95
 )
 
 // LearnCPULoad folds one scrape's CPU readings into the box-cost fits.
@@ -165,7 +165,7 @@ func (s *State) LearnCPULoad(obs []Observation, sample CPULoadSample) {
 		case cores[i] >= dominantShare*total:
 			ps.BoxCost.Add(cores[i], hostCores)
 		}
-		if o.QueueDepth > 0 && busyRatio >= starvedBusyRatio {
+		if o.QueueDepth > 0 && busyRatio >= StarvedBusyRatio {
 			ps.CPUStarvedRounds++
 		}
 	}
