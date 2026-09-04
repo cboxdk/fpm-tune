@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -607,10 +608,6 @@ func TestBusySeriesIsScaledPerRound(t *testing.T) {
 	if len(got) != 4 || got[0] != 1 || got[1] != 0.5 || got[2] != -1 || got[3] != -1 {
 		t.Errorf("busySeries = %v", got)
 	}
-	// The cpu share is one colour, whatever its level.
-	if s := plainSpark([]float64{0.1, 1, -1}, 3, 1, sMemory); !strings.Contains(s, "▁") || !strings.Contains(s, "█") || !strings.Contains(s, "·") {
-		t.Errorf("plainSpark = %q", s)
-	}
 }
 
 // TestCPULabelSaysWhatTheNumbersMean: the cpu row explains the share, the
@@ -630,5 +627,62 @@ func TestCPULabelSaysWhatTheNumbersMean(t *testing.T) {
 	p.CPUReadings = 3
 	if got := cpuLabel(p, false); !strings.Contains(got, "too few") {
 		t.Errorf("label with few readings = %q", got)
+	}
+}
+
+// TestTheQueueHasNumbersAndAHistory: the queue is a line on the pool chart
+// and its row says what is waiting now, the span's peak and when, and how
+// many rounds found a queue; a span with no queue says so.
+func TestTheQueueHasNumbersAndAHistory(t *testing.T) {
+	resp := fixture()
+	rounds := resp.Rounds
+	for i := range rounds {
+		for j := range rounds[i].Pools {
+			if rounds[i].Pools[j].Pool == "www-forge" {
+				rounds[i].Pools[j].Queue = 0
+			}
+		}
+	}
+	peakAt := rounds[len(rounds)/2].At
+	for j := range rounds[len(rounds)/2].Pools {
+		if rounds[len(rounds)/2].Pools[j].Pool == "www-forge" {
+			rounds[len(rounds)/2].Pools[j].Queue = 12
+		}
+	}
+	qs := queueSummary(rounds, "www-forge")
+	if qs.peak != 12 || !qs.at.Equal(peakAt) || qs.rounds != 1 || qs.total != len(rounds) {
+		t.Fatalf("queueSummary = %+v", qs)
+	}
+	want := "0 waiting · peak 12 at " + peakAt.Local().Format("15:04") + " · queued in 1 of " + fmt.Sprint(len(rounds)) + " rounds"
+	if got := qs.label(0); got != want {
+		t.Errorf("label = %q, want %q", got, want)
+	}
+	if got := queueSummary(rounds, "www").label(0); got != "0 waiting · none in this span" {
+		t.Errorf("a pool that never queued: %q", got)
+	}
+
+	m := newModel(Options{Addr: "127.0.0.1:9110", Refresh: time.Second})
+	next, _ := m.Update(fetchedMsg{resp: resp, at: time.Now()})
+	m = next.(model)
+	next, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 45})
+	m = next.(model)
+	m.selected = 1
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "● queue 0") || !strings.Contains(out, "peak 12 at") {
+		t.Errorf("the queue is not in the legend and the row:\n%s", out)
+	}
+}
+
+func stripANSI(s string) string { return regexp.MustCompile("\x1b\\[[0-9;]*m").ReplaceAllString(s, "") }
+
+// TestTheLegendWrapsRatherThanClips: on a narrow terminal the legend's last
+// entries (the ceilings) go to a second line instead of being cut off.
+func TestTheLegendWrapsRatherThanClips(t *testing.T) {
+	items := []string{"aaaa", "bbbb", "cccc", "dddddddddddd"}
+	if got := wrapItems(items, "   ", 14); len(got) != 3 || got[0] != "aaaa   bbbb" || got[1] != "cccc" || got[2] != "dddddddddddd" {
+		t.Errorf("wrapItems = %q", got)
+	}
+	if got := wrapItems(items, " ", 80); len(got) != 1 {
+		t.Errorf("everything fits on one line: %q", got)
 	}
 }

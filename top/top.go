@@ -990,7 +990,7 @@ func (m model) detailPanel(width, height int) string {
 			if p.Pool != name {
 				continue
 			}
-			for _, v := range []int{p.Active, p.Configured, p.Recommended, p.CPUCeiling, p.MemoryCeiling} {
+			for _, v := range []int{p.Active, p.Configured, p.Recommended, p.CPUCeiling, p.MemoryCeiling, int(p.Queue)} {
 				if float64(v) > yMax {
 					yMax = float64(v)
 				}
@@ -999,8 +999,10 @@ func (m model) detailPanel(width, height int) string {
 	}
 	yMax = yMax * 1.1
 
+	qs := queueSummary(rounds, name)
 	legend := []string{
 		sBusy.Render("●") + " busy " + sTitle.Render(fmt.Sprintf("%d", last.Active)),
+		sBad.Render("●") + " queue " + sTitle.Render(fmt.Sprintf("%d", last.Queue)),
 		sNow.Render("●") + " max " + fmt.Sprintf("%d", last.Configured),
 		sPlan.Render("●") + " plan " + fmt.Sprintf("%d", last.Recommended),
 	}
@@ -1013,6 +1015,19 @@ func (m model) detailPanel(width, height int) string {
 	if last.CPUBound {
 		legend = append(legend, sAccent.Render("held at the CPU max"))
 	}
+	// The queue is drawn on the same axis as the workers, because a queue is
+	// counted in requests and a request is what a worker serves: a queue as
+	// tall as the busy line is the pool a second time over. It is red for
+	// the same reason: it is the one series that means someone is waiting.
+
+	// The legend wraps rather than truncates: on a narrow terminal the last
+	// entries are the ceilings, which is the point of the chart. A second
+	// legend line is paid for with one chart row, so the panel keeps its
+	// height and the row budget above it stays right.
+	legendLines := wrapItems(legend, "   ", width)
+	if len(legendLines) > 1 {
+		height = max(height-1, 3)
+	}
 
 	c := m.chart(width, height, yMax, func(v float64) string { return fmt.Sprintf("%.0f", v) })
 	c.SetDataSetStyle("busy", sBusy)
@@ -1020,6 +1035,7 @@ func (m model) detailPanel(width, height int) string {
 	c.SetDataSetStyle("plan", sPlan)
 	c.SetDataSetStyle("memory", sMemory)
 	c.SetDataSetStyle("cap", sWarn)
+	c.SetDataSetStyle("queue", sBad)
 	for _, r := range rounds {
 		for _, p := range r.Pools {
 			if p.Pool != name {
@@ -1028,6 +1044,9 @@ func (m model) detailPanel(width, height int) string {
 			c.PushDataSet("busy", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Active)})
 			c.PushDataSet("now", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Configured)})
 			c.PushDataSet("plan", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Recommended)})
+			if p.Queue > 0 || qs.peak > 0 {
+				c.PushDataSet("queue", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.Queue)})
+			}
 			if p.MemoryCeiling > 0 {
 				c.PushDataSet("memory", timeserieslinechart.TimePoint{Time: r.At, Value: float64(p.MemoryCeiling)})
 			}
@@ -1038,35 +1057,77 @@ func (m model) detailPanel(width, height int) string {
 	}
 	c.DrawBrailleAll()
 
-	// Queue and CPU share: a value, then a sparkline, so the number is
-	// beside its name and the line is beside the number.
-	queue := seriesOf(rounds, name, func(s serve.PoolSample) float64 { return float64(s.Queue) })
-	cpu := seriesOf(rounds, name, func(s serve.PoolSample) float64 {
-		if s.CPUReadings < 20 {
-			return -1
+	// Two lines of numbers under the chart, in a fixed shape so nothing
+	// moves between refreshes or pools. The queue's history is the red line
+	// on the chart; its row says what the span found. The CPU share is a
+	// property of the code and all but constant, so it is stated, not drawn.
+	tail := fit(sHeader.Render("queue   ")+qs.label(last.Queue), width) + "\n" +
+		fit(sHeader.Render("cpu     ")+cpuLabel(last, width < 100), width)
+
+	return fit(head, width) + "\n" + strings.Join(legendLines, "\n") + "\n" + c.View() + "\n" + tail
+}
+
+// wrapItems joins items with sep into as few lines as fit the width, never
+// splitting an item; an item wider than the width stands alone, clipped.
+func wrapItems(items []string, sep string, width int) []string {
+	var lines []string
+	line := ""
+	for _, it := range items {
+		switch {
+		case line == "":
+			line = it
+		case lipgloss.Width(line)+lipgloss.Width(sep)+lipgloss.Width(it) <= width:
+			line += sep + it
+		default:
+			lines = append(lines, fit(line, width))
+			line = it
 		}
-
-		return s.CPURatioP50
-	})
-	queueVal := fmt.Sprintf("%d waiting", last.Queue)
-	cpuVal := cpuLabel(last, width < 100)
-	labelW := lipgloss.Width(queueVal)
-	if w := lipgloss.Width(cpuVal); w > labelW {
-		labelW = w
 	}
-	sparkW := width - 8 - labelW - 2
-	if sparkW < 10 {
-		sparkW = 10
+	if line != "" {
+		lines = append(lines, fit(line, width))
 	}
-	// The queue against the pool's ceiling, like the busy workers: a queue
-	// as long as the pool is the pool a second time over, which is where
-	// red belongs. Scaled to its own peak, one waiting request would be red.
-	// The CPU share is in one colour: a request that is mostly CPU is a
-	// fact about the code, not a problem, and amber would say otherwise.
-	tail := fit(sHeader.Render("queue   ")+pad(queueVal, labelW)+"  "+colorSpark(queue, sparkW, float64(max(last.Configured, 1))), width) + "\n" +
-		fit(sHeader.Render("cpu     ")+pad(cpuVal, labelW)+"  "+plainSpark(cpu, sparkW, 1, sMemory), width)
 
-	return fit(head, width) + "\n" + fit(strings.Join(legend, "   "), width) + "\n" + c.View() + "\n" + tail
+	return lines
+}
+
+// queueStats is what a span says about a pool's listen queue: the largest
+// queue seen and when, and how many rounds found anyone waiting at all.
+type queueStats struct {
+	peak   int64
+	at     time.Time
+	rounds int
+	total  int
+}
+
+func queueSummary(rounds []serve.HistorySample, name string) queueStats {
+	var qs queueStats
+	for _, r := range rounds {
+		for _, p := range r.Pools {
+			if p.Pool != name {
+				continue
+			}
+			qs.total++
+			if p.Queue > 0 {
+				qs.rounds++
+			}
+			if p.Queue > qs.peak {
+				qs.peak, qs.at = p.Queue, r.At
+			}
+		}
+	}
+
+	return qs
+}
+
+// label is the queue row's text: what is waiting now, the span's peak and
+// when, and how often the span found a queue at all.
+func (qs queueStats) label(now int64) string {
+	s := fmt.Sprintf("%d waiting", now)
+	if qs.peak == 0 {
+		return s + " · none in this span"
+	}
+
+	return s + fmt.Sprintf(" · peak %d at %s · queued in %d of %d rounds", qs.peak, qs.at.Local().Format("15:04"), qs.rounds, qs.total)
 }
 
 func seriesOf(rounds []serve.HistorySample, name string, f func(serve.PoolSample) float64) []float64 {
@@ -1078,21 +1139,12 @@ func seriesOf(rounds []serve.HistorySample, name string, f func(serve.PoolSample
 	return out
 }
 
-// pad right-pads a styled string to a visible width.
-func pad(s string, width int) string {
-	if n := width - lipgloss.Width(s); n > 0 {
-		return s + strings.Repeat(" ", n)
-	}
-
-	return s
-}
-
 // cpuLabel is the cpu row's value: the share of a request that is CPU, how
 // many workers at that share fill the cores, and the ceiling that gives;
 // shorter words on a narrow terminal.
 func cpuLabel(p serve.PoolSample, short bool) string {
 	if p.CPUReadings < 20 {
-		return sDim.Render("too few readings yet")
+		return sDim.Render(fmt.Sprintf("too few readings yet (%d of 20)", p.CPUReadings))
 	}
 	share := fmt.Sprintf("%.0f%% of each request is CPU", p.CPURatioP50*100)
 	fill := fmt.Sprintf(" · %d workers fill the cores · CPU max %d", p.CPUFill, p.CPUCeiling)
@@ -1296,24 +1348,6 @@ func colorSpark(series []float64, width int, scale float64) string {
 			default:
 				b.WriteString(sBusy.Render(string(r)))
 			}
-		}
-	}
-
-	return b.String()
-}
-
-// plainSpark renders a sparkline in one style, for a series where a high
-// value is not a warning and the traffic-light colours would lie.
-func plainSpark(series []float64, width int, scale float64, style lipgloss.Style) string {
-	var b strings.Builder
-	for _, r := range spark(series, width, scale) {
-		switch r {
-		case ' ':
-			b.WriteRune(' ')
-		case '·':
-			b.WriteString(sFaint.Render("·"))
-		default:
-			b.WriteString(style.Render(string(r)))
 		}
 	}
 
