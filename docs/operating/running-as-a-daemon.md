@@ -15,6 +15,7 @@ sudo fpm-tune install-service            # advisory: watch, learn, recommend
 sudo fpm-tune install-service --apply    # apply: also act on the plan
 sudo fpm-tune install-service --cpu      # let the CPU measurement hold a pool at its CPU ceiling
 sudo fpm-tune install-service --print    # show the config and unit; install nothing
+sudo fpm-tune install-service --log-file /var/log/fpm-tune.log   # log to a file instead of the journal
 ```
 
 It writes `/etc/fpm-tune/config` and `/etc/systemd/system/fpm-tune.service`, runs `daemon-reload`, enables the unit and starts it. The unit runs `fpm-tune serve --config /etc/fpm-tune/config`, so every setting lives in the config file and the unit never needs editing. The relevant lines of `--print`:
@@ -37,6 +38,10 @@ StateDirectoryMode=0700
 The installed service binds `/metrics` to loopback (`127.0.0.1:9110`); a hand-run `fpm-tune serve` binds `:9110`, every interface. `--metrics` changes the address, and the install warns when it is reachable off the host, because the endpoint has no authentication. The unit says `Wants=php-fpm.service`; on Debian and Ubuntu the unit is `php8.4-fpm.service`, so that ordering does nothing there. It does not matter: the daemon looks for the master every round.
 
 Re-running `install-service` keeps the config and changes only the keys you name. `--apply` sets `mode`, `--metrics` sets `metrics`, `--cpu` or `--cpu=false` sets `cpu`; everything else, including a mode set with `fpm-tune mode` and any hand edit, is left as it was. The unit is rewritten and the service restarted, which is also how an [upgrade](lifecycle.md) takes effect.
+
+### Logging to a file
+
+The log goes to the journal unless the unit says otherwise. `--log-file /var/log/fpm-tune.log` makes systemd append the daemon's output to that file instead (`StandardOutput=append:`, systemd 240 or later), and writes `/etc/logrotate.d/fpm-tune` beside it: weekly, eight kept, compressed, `copytruncate` because systemd opens the file once at start. Nothing in the daemon changes; it writes the same lines to stdout. A re-run keeps the file the unit has; `--log-file journal` goes back to the journal and removes the logrotate snippet.
 
 ## The mode
 
@@ -75,7 +80,7 @@ Every 30 seconds (`interval`), in this order:
 
 ## What it logs
 
-The log is the daemon's output, at info level. Follow it with `sudo journalctl -u fpm-tune -f`. The line to watch is the recommendation:
+The log is the daemon's output, at info level. Follow it with `sudo journalctl -u fpm-tune -f`, or `tail -f` the file when the service was installed with `--log-file`. The line to watch is the recommendation:
 
 ```
 time=2026-09-03T17:11:01.747Z level=INFO msg="Pool recommendation" pool=www now=20 recommend=20 why="peak 2 workers busy, but not yet watched under load; held at its configured 20, estimated 48.0MiB/worker"

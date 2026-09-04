@@ -287,3 +287,44 @@ func TestTopDialsLoopbackForAWildcard(t *testing.T) {
 		t.Errorf("the flag did not win: %q", got)
 	}
 }
+
+// TestTheUnitCanLogToAFile: --log-file puts systemd's own append: on the
+// unit and a copytruncate logrotate snippet beside it; the unit's current
+// choice is read back so a re-run keeps it; `journal` clears it.
+func TestTheUnitCanLogToAFile(t *testing.T) {
+	plain := renderUnit("/usr/local/bin/fpm-tune", "")
+	if strings.Contains(plain, "StandardOutput") {
+		t.Errorf("a unit without a log file names StandardOutput:\n%s", plain)
+	}
+	withFile := renderUnit("/usr/local/bin/fpm-tune", "/var/log/fpm-tune.log")
+	if !strings.Contains(withFile, "StandardOutput=append:/var/log/fpm-tune.log\nStandardError=inherit\n") {
+		t.Errorf("the log file is not on the unit:\n%s", withFile)
+	}
+
+	path := filepath.Join(t.TempDir(), "fpm-tune.service")
+	if got := unitLogFile(path); got != "" {
+		t.Errorf("no unit yet, got %q", got)
+	}
+	if err := os.WriteFile(path, []byte(withFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := unitLogFile(path); got != "/var/log/fpm-tune.log" {
+		t.Errorf("unitLogFile = %q", got)
+	}
+
+	rot := renderLogrotate("/var/log/fpm-tune.log")
+	for _, want := range []string{"/var/log/fpm-tune.log {", "copytruncate", "weekly", "rotate 8"} {
+		if !strings.Contains(rot, want) {
+			t.Errorf("logrotate snippet lacks %q:\n%s", want, rot)
+		}
+	}
+
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	lf := fs.String("log-file", "", "")
+	if err := fs.Parse([]string{"--log-file", "journal"}); err != nil {
+		t.Fatal(err)
+	}
+	if !explicitFlag(fs, "log-file") || *lf != "journal" || explicitFlag(fs, "metrics") {
+		t.Errorf("explicitFlag: log-file=%v metrics=%v", explicitFlag(fs, "log-file"), explicitFlag(fs, "metrics"))
+	}
+}
