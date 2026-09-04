@@ -23,7 +23,7 @@ The screen, top to bottom:
 - The title bar: the hostname, a mode badge (`advisory` or `apply`), whether the CPU ceiling is on, and the daemon's version.
 - The host line: memory, cores, where the memory figure came from, and the host's CPU busy ratio now and over time.
 - The pool table: `POOL`, `BUSY` (workers busy now), `QUEUE` (requests waiting), `MAX` (the configured ceiling), `PLAN` (the ceiling the daemon would set), a sparkline of busy workers over time, `CPU/REQ` (the median CPU share of a request), `CPU MAX` (the CPU ceiling) and `BOUND BY` (`memory`, `cpu`, or `cpu (held)` when `--cpu` holds the pool there).
-- The selected pool's panel: busy workers, `MAX`, `PLAN`, the memory ceiling and the CPU ceiling as lines over time, with the queue and the CPU share as sparklines beneath.
+- The selected pool's panel: busy workers, the queue, `MAX`, `PLAN`, the memory ceiling and the CPU ceiling as lines over time. The queue row beneath says what is waiting now, the span's peak and when, and how many rounds found a queue at all; the CPU row is the share of a request on CPU over time.
 - The events since the daemon started: resized, changed outside the daemon, apply failed, rolled back, rollback failed, repaired.
 
 The keys:
