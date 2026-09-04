@@ -25,4 +25,4 @@ fpm-tune writes production PHP-FPM configuration and reloads a live master, so t
 
 ## Supported versions
 
-During the beta, only the latest tagged release is supported. Please reproduce against it before reporting.
+The latest release is supported. Please reproduce against it before reporting.

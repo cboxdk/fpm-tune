@@ -21,7 +21,7 @@ It never runs `sudo`. On a server, run it as root so the binary lands in `/usr/l
 The script reads two environment variables:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | FPM_TUNE_VERSION=v0.1.0-beta.22 sh
+curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | FPM_TUNE_VERSION=v1.0.0 sh
 curl -fsSL https://raw.githubusercontent.com/cboxdk/fpm-tune/main/install.sh | FPM_TUNE_INSTALL_DIR=/opt/bin sh
 ```
 
@@ -46,12 +46,12 @@ Download the archive, `SHA256SUMS` and `SHA256SUMS.cosign.bundle` from the [rele
 ```bash
 cosign verify-blob \
   --bundle SHA256SUMS.cosign.bundle \
-  --certificate-identity "https://github.com/cboxdk/fpm-tune/.github/workflows/release.yml@refs/tags/v0.1.0-beta.22" \
+  --certificate-identity "https://github.com/cboxdk/fpm-tune/.github/workflows/release.yml@refs/tags/v1.0.0" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf fpm-tune-0.1.0-beta.22-linux-amd64.tar.gz
-sudo install -m 0755 fpm-tune-0.1.0-beta.22-linux-amd64/fpm-tune /usr/local/bin/fpm-tune
+tar -xzf fpm-tune-1.0.0-linux-amd64.tar.gz
+sudo install -m 0755 fpm-tune-1.0.0-linux-amd64/fpm-tune /usr/local/bin/fpm-tune
 ```
 
 Substitute the tag you downloaded. Keep `--certificate-identity`: without it cosign accepts any valid Sigstore signature, including one made by someone else. `python -m sigstore verify identity` with the same bundle, identity and issuer verifies it without cosign.
@@ -89,7 +89,7 @@ fpm-tune version
 fpm-tune plan
 ```
 
-`version` prints `0.1.0-beta.22`. `plan` reads the host and writes nothing. If it reports no pools, the cause is one of three:
+`version` prints `1.0.0`. `plan` reads the host and writes nothing. If it reports no pools, the cause is one of three:
 
 1. A master is running but its pools have no status page. This is the usual case on a fresh host; the error names the pools and the fix, `sudo fpm-tune enable-status`.
 2. No php-fpm master is running. `systemctl status php8.4-fpm` or `pgrep -a php-fpm` says so. The unit is `php8.4-fpm` on Debian and Ubuntu, which is what Forge and Ploi run, and `php-fpm` elsewhere.

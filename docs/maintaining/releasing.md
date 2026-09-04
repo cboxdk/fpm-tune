@@ -13,7 +13,7 @@ This page is for a maintainer cutting a release. A release is one tag push; the 
 Changes reach `main` by squash-merged pull requests. The version is stamped into the binary from the tag and the Homebrew formula's version is rewritten from the tag when it is published, so nothing else needs bumping. Push the tag:
 
 ```bash
-git tag -a v0.1.0-beta.22 -m "v0.1.0-beta.22" && git push origin v0.1.0-beta.22
+git tag -a v1.0.0 -m "v1.0.0" && git push origin v1.0.0
 ```
 
 Do not run `gh release create` yourself. The Release workflow creates the release, and if one already exists for the tag the workflow fails with "already exists" and publishes nothing.
@@ -26,13 +26,13 @@ On a `v*` tag, [`release.yml`](https://github.com/cboxdk/fpm-tune/blob/main/.git
 
 1. Builds the four archives (linux and darwin, amd64 and arm64) with `scripts/build-release.sh`, the same script `make dist` runs, so a local build and this one produce the same archives. The Linux binaries are fully static, and the script refuses to ship one that is not. Each archive carries the binary, `README.md`, `LICENSE`, `SECURITY.md` and `docs/`.
 2. Signs `SHA256SUMS` with a keyless [Sigstore](https://www.sigstore.dev/) signature via `cosign`. The signer is the workflow's own OIDC identity, so there is no private key to store or rotate, and one signature over the checksum file covers every archive.
-3. Runs `gh release create` with the archives, `SHA256SUMS` and the signature bundle, with generated notes. A tag with a suffix (`-beta.22`, `-rc.1`) is created as a pre-release.
+3. Runs `gh release create` with the archives, `SHA256SUMS` and the signature bundle, with generated notes. A tag with a suffix (`-rc.1`, `-beta.1`) is created as a pre-release.
 
 It does not touch the Homebrew tap.
 
-## What "latest" means during the beta
+## Versions and what "latest" means
 
-A pre-release is not what GitHub's `releases/latest` returns. While no stable release exists, `install.sh` falls back to the highest version among all releases, pre-releases included, so `latest` resolves to the newest beta. Once a stable release exists, `latest` is that release and betas are only reachable with `FPM_TUNE_VERSION`.
+The version is semantic. Within a major, the commands, flags, config keys, drop-in names, metric names and `/history.json` fields are stable; a release that breaks one of them bumps the major, and anything added is a minor. A tag with a suffix (`v1.1.0-rc.1`) is published as a pre-release, which GitHub's `releases/latest` does not return; `install.sh` then keeps resolving `latest` to the newest stable release, and the pre-release is reachable only with `FPM_TUNE_VERSION`. (Before 1.0 there was no stable release, and `latest` fell back to the newest beta.)
 
 ## The Homebrew formula
 
@@ -55,7 +55,7 @@ That is the only secret involved. The client id identifies the App rather than a
 Without the secret the release still succeeds. `formula.yml` warns and prints the command to run by hand:
 
 ```bash
-python3 scripts/publish-formula.py v0.1.0-beta.22
+python3 scripts/publish-formula.py v1.0.0
 ```
 
 A missing tap update should not fail a release that is otherwise good, and it must not pass silently either, because a tap that has stopped updating looks like one that is current.
@@ -69,7 +69,7 @@ A missing tap update should not fail a release that is otherwise good, and it mu
 `workflow_dispatch` on `formula.yml` checks out the tag you give it and runs that tag's copy of `publish-formula.py`. For a recent tag that is right; for an old tag it runs the publisher as it was then. To republish an older release with the current publisher, run it from a current checkout:
 
 ```bash
-python3 scripts/publish-formula.py v0.1.0-beta.22
+python3 scripts/publish-formula.py v1.0.0
 ```
 
 It reads the release's own `SHA256SUMS`, so it works for any tag with a published release.

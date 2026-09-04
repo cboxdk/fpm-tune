@@ -20,7 +20,7 @@ sudo fpm-tune install-service    # keep measuring under systemd, in advisory mod
 sudo fpm-tune mode apply         # let it act, once the plan has looked right for a day
 ```
 
-It is beta. Run it advisory first and read what it recommends. When it does act, a change is validated against a copy of the configuration, written atomically, reloaded with SIGUSR2, and rolled back if the master does not come back ([how it fails safe](docs/safety/how-it-fails-safe.md)).
+Run it advisory first and read what it recommends. When it does act, a change is validated against a copy of the configuration, written atomically, reloaded with SIGUSR2, and rolled back if the master does not come back ([how it fails safe](docs/safety/how-it-fails-safe.md)).
 
 ## Docs
 
@@ -29,5 +29,7 @@ It is beta. Run it advisory first and read what it recommends. When it does act,
 - [Reading a plan](docs/getting-started/reading-a-plan.md): every line of the output
 - [Forge and Ploi](docs/cookbook/forge-and-ploi.md): the recipe for those hosts
 - [How it decides](docs/how-it-decides/_index.md), [Operating](docs/operating/_index.md), [Safety](docs/safety/_index.md)
+
+1.x is stable: commands, flags, config keys, the two drop-in names, the metric names and the `/history.json` fields do not change within it, and a change that would break any of them bumps the major.
 
 Built on [phpfpm](https://github.com/cboxdk/phpfpm). MIT.
