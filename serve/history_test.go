@@ -391,3 +391,47 @@ func TestAQueueWhileTheCPUIsFullIsLoggedOnTheTransition(t *testing.T) {
 		t.Errorf("a queue with CPU to spare was logged as starved:\n%s", out)
 	}
 }
+
+// TestTheBudgetAndTheBindingResourceAreLoggedOnChange: the budget line is
+// logged once at start and again only when it moves; a pool that runs out
+// of CPU before memory is logged on that transition and on the way back,
+// and not while it persists.
+func TestTheBudgetAndTheBindingResourceAreLoggedOnChange(t *testing.T) {
+	var buf bytes.Buffer
+	l := &Loop{bound: map[string]string{}, log: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	host := budget.Limits{MemoryBytes: 8 << 30, CPUs: 4, Source: budget.SourceMemInfo}
+	l.noteBudget(host)
+	l.noteBudget(host)
+	capped := budget.Limits{MemoryBytes: 4 << 30, CPUs: 4, Source: budget.SourceCgroupProcess}
+	l.noteBudget(capped)
+	out := buf.String()
+	if strings.Count(out, `msg=Budget `) != 1 || strings.Count(out, "Budget changed") != 1 {
+		t.Errorf("budget lines:\n%s", out)
+	}
+	if !strings.Contains(out, `to="php-fpm's memory 4.0GiB`) {
+		t.Errorf("the change does not say where the budget went:\n%s", out)
+	}
+
+	buf.Reset()
+	pools := []allocate.PoolPlan{{Name: "www", MemoryWant: 41}}
+	cpu := func(limit string, held bool) []plan.PoolCPU {
+		return []plan.PoolCPU{{Name: "www", Limit: limit, Ceiling: 10, FillWorkers: 5, P50: 0.9, CPUBound: held}}
+	}
+	l.noteBound(cpu("memory", false), pools) // first sight, bound by memory: nothing to say
+	l.noteBound(cpu("cpu", false), pools)    // the transition, without --cpu
+	l.noteBound(cpu("cpu", false), pools)    // persists: silent
+	l.noteBound(cpu("memory", false), pools) // back
+	l.noteBound(cpu("cpu", true), pools)     // again, this time held
+	out = buf.String()
+	if n := strings.Count(out, "Pool bound by CPU"); n != 2 {
+		t.Errorf("bound by CPU logged %d times:\n%s", n, out)
+	}
+	if n := strings.Count(out, "Pool bound by memory again"); n != 1 {
+		t.Errorf("bound by memory logged %d times:\n%s", n, out)
+	}
+	if !strings.Contains(out, `ceiling="would be held there with --cpu"`) || !strings.Contains(out, `ceiling="held there"`) ||
+		!strings.Contains(out, "memory_ceiling=41") || !strings.Contains(out, "cpu_share=90%") {
+		t.Errorf("the lines lack their numbers:\n%s", out)
+	}
+}

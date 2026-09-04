@@ -95,6 +95,8 @@ The other lines, by their `msg`:
 - `Forgot pools that are no longer configured`, with `pools`: their baselines were dropped.
 - `Capacity exhausted`, a warning, once when the host becomes [out of capacity](../how-it-decides/dividing-the-budget.md), and `No longer at capacity` when it stops being.
 - `Pools have no status page`, a warning, when the set of unsized pools changes.
+- `Budget`, once at start with the budget line the plan is made against, and `Budget changed` with `from` and `to` when the source or the size moves: a `MemoryMax=` set on the unit, a container resized, or a cgroup that became unreadable. Every plan number moves with it, and this is the line that says why.
+- `Pool bound by CPU rather than memory`, with `pool`, `cpu_ceiling`, `memory_ceiling`, `fill_workers`, `cpu_share` and whether the pool is held there or only would be with `--cpu`, the first round the pool runs out of CPU before memory; `Pool bound by memory again` when it stops. See [CPU per request](../how-it-decides/cpu.md).
 - `Pool queued while the host's CPU was full`, a warning with `pool`, `queue`, `busy`, `configured`, `cpu_ceiling` and `host_busy`, the first round that finds requests waiting while the host is at 95% CPU or more, and `No longer queued while the host's CPU was full` when it stops. Another worker would find no core to run on, so this queue is the CPU's; see [CPU per request](../how-it-decides/cpu.md).
 - `The recommendation changed`, with `path`: the recommendation file was rewritten.
 

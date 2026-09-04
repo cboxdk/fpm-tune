@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cboxdk/fpm-tune/allocate"
 	"github.com/cboxdk/fpm-tune/apply"
 	"github.com/cboxdk/fpm-tune/budget"
 	"github.com/cboxdk/fpm-tune/lock"
@@ -216,8 +217,13 @@ type Loop struct {
 	// starved is, per pool, whether the previous round found requests queued
 	// while the host's CPU was full, so the log carries the change and not
 	// the condition. See noteStarved.
-	starved  map[string]bool
-	expected map[string]int
+	starved map[string]bool
+	// bound is, per pool, which resource it last ran out of first (\"cpu\" or
+	// \"memory\"), and lastBudget the budget line last seen, so the log carries
+	// the change in each. See noteBound and noteBudget.
+	bound      map[string]string
+	lastBudget string
+	expected   map[string]int
 
 	// lastRec is the recommendation last LOGGED for each pool — the value and when —
 	// so it is reported the first time it is seen, whenever it moves, and, as a sign
@@ -297,6 +303,7 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 		lastConfigured: map[string]int{},
 		expected:       map[string]int{},
 		starved:        map[string]bool{},
+		bound:          map[string]string{},
 		cfg:            cfg,
 		log:            log,
 		metrics:        metrics.New(),
@@ -496,6 +503,7 @@ func (l *Loop) round(ctx context.Context) {
 	if l.cfg.MemoryOverride > 0 {
 		limits = limits.WithOverride(l.cfg.MemoryOverride)
 	}
+	l.noteBudget(limits)
 	// Good neighbour: on a bare VM, leave the memory other services are using to
 	// them rather than sizing php-fpm against the whole machine. A no-op under a
 	// cgroup limit or an explicit --memory.
@@ -590,6 +598,7 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.noteStarved(views, result.CPU, hostBusy, hostBusyKnown)
+	l.noteBound(result.CPU, result.Plan.Pools)
 
 	if l.applying() && l.reconciled {
 		l.applyPlan(roundCtx, result, now)
@@ -600,6 +609,60 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.save(now, false)
+}
+
+// noteBudget logs the budget line the first time it is read and whenever it
+// changes: the source (the host, php-fpm's cgroup, a container) or the size.
+// A MemoryMax= set on the unit, a container resized, or a cgroup that became
+// unreadable each send every plan number somewhere else, and this is the
+// line that says why.
+func (l *Loop) noteBudget(limits budget.Limits) {
+	line, _, _ := strings.Cut(limits.Describe(), "\n")
+	if limits.LookupErr != nil {
+		line += " (php-fpm's own limit could not be read; this is the machine's)"
+	}
+	if line == l.lastBudget {
+		return
+	}
+	if l.lastBudget == "" {
+		l.log.Info("Budget", "budget", line)
+	} else {
+		l.log.Info("Budget changed", "from", l.lastBudget, "to", line)
+	}
+	l.lastBudget = line
+}
+
+// noteBound logs, on the transition only, a pool that runs out of CPU before
+// memory, and one that goes back to being bound by memory. With --cpu the
+// recommendation line says the same in its why, but only when the number
+// moves; without --cpu the number never moves for this, and the transition
+// is the only sign that more memory would buy the pool nothing.
+func (l *Loop) noteBound(cpu []plan.PoolCPU, pools []allocate.PoolPlan) {
+	memoryWant := make(map[string]int, len(pools))
+	for _, p := range pools {
+		memoryWant[p.Name] = p.MemoryWant
+	}
+	for _, c := range cpu {
+		if c.Limit == "" || c.Limit == l.bound[c.Name] {
+			continue
+		}
+		first := l.bound[c.Name] == ""
+		l.bound[c.Name] = c.Limit
+		switch {
+		case c.Limit == "cpu":
+			held := "would be held there with --cpu"
+			if c.CPUBound {
+				held = "held there"
+			}
+			l.log.Info("Pool bound by CPU rather than memory: past the workers that fill the cores it only "+
+				"gets slower, so the CPU ceiling is the one that matters",
+				"pool", c.Name, "cpu_ceiling", c.Ceiling, "memory_ceiling", memoryWant[c.Name],
+				"fill_workers", c.FillWorkers, "cpu_share", fmt.Sprintf("%.0f%%", c.P50*100), "ceiling", held)
+		case !first:
+			l.log.Info("Pool bound by memory again: its memory ceiling is below the workers that fill the cores",
+				"pool", c.Name, "cpu_ceiling", c.Ceiling, "memory_ceiling", memoryWant[c.Name])
+		}
+	}
 }
 
 // noteStarved logs, on the transition only, a pool that has requests queued
