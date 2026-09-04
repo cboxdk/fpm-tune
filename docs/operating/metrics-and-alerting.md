@@ -102,7 +102,7 @@ The shape, with one round from a real host:
     "capacity": 2880,
     "host": {
         "hostname": "cbox-web",
-        "version": "0.1.0-beta.22",
+        "version": "1.0.0",
         "apply": true,
         "cpu_ceiling": true,
         "cpu_headroom": 2,

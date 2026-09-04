@@ -28,9 +28,13 @@ In advisory mode it does all of that and changes nothing: the plan is printed, p
 
 Follow the [Quickstart](quickstart.md): install, read a plan, run it advisory for a day, then let it apply. On Laravel Forge or Ploi, the [Forge and Ploi](cookbook/forge-and-ploi.md) recipe is the same path with those hosts' details filled in.
 
-fpm-tune is beta. Run it in advisory mode on a real host and read what it recommends before you let it write.
+Run it in advisory mode on a real host and read what it recommends before you let it write.
 
 When it does write, the change is validated against a copy of the configuration, written atomically, reloaded with SIGUSR2 rather than a restart, and rolled back if the master does not come back; see [How it fails safe](safety/how-it-fails-safe.md).
+
+## What 1.0 promises
+
+Within 1.x the commands, their flags, the config keys, the names of the two drop-ins, the metric names and labels, and the `/history.json` fields stay as they are. A release that would break any of them bumps the major; a new command, flag, key or series is a minor. The numbers a plan reaches can change with a minor, because the measurement improves; the shape of what you read and script against does not.
 
 ## Going deeper
 
