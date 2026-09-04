@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -358,3 +359,35 @@ func TestApplyNowGoesThroughTheDaemon(t *testing.T) {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// TestAQueueWhileTheCPUIsFullIsLoggedOnTheTransition: the warning is
+// logged the first round a pool queues with the host's CPU full, not again
+// while it persists, and the end is logged once; a queue while the CPU has
+// room is not this condition.
+func TestAQueueWhileTheCPUIsFullIsLoggedOnTheTransition(t *testing.T) {
+	var buf bytes.Buffer
+	l := &Loop{starved: map[string]bool{}, log: slog.New(slog.NewTextHandler(&buf, nil))}
+	views := func(queue int64) []observe.PoolView {
+		return []observe.PoolView{{Name: "www", QueueDepth: queue, ActiveNow: 10, CurrentMaxChildren: 10}}
+	}
+	cpu := []plan.PoolCPU{{Name: "www", Ceiling: 10}}
+
+	l.noteStarved(views(8), cpu, 0.5, true)  // queued, but the CPU has room
+	l.noteStarved(views(8), cpu, 0.99, true) // the transition
+	l.noteStarved(views(7), cpu, 0.99, true) // still starved: silent
+	l.noteStarved(views(0), cpu, 0.2, true)  // over
+	l.noteStarved(views(0), cpu, 0.2, true)  // still over: silent
+	out := buf.String()
+	if n := strings.Count(out, "Pool queued while the host's CPU was full"); n != 1 {
+		t.Errorf("the start was logged %d times:\n%s", n, out)
+	}
+	if n := strings.Count(out, "No longer queued"); n != 1 {
+		t.Errorf("the end was logged %d times:\n%s", n, out)
+	}
+	if !strings.Contains(out, "queue=8") || !strings.Contains(out, "cpu_ceiling=10") || !strings.Contains(out, "host_busy=99%") {
+		t.Errorf("the warning lacks its numbers:\n%s", out)
+	}
+	if strings.Contains(out, "host_busy=50%") {
+		t.Errorf("a queue with CPU to spare was logged as starved:\n%s", out)
+	}
+}

@@ -213,7 +213,11 @@ type Loop struct {
 	// next round, so a change it did not make is an event and one it did is
 	// not counted twice. See noteExternalChanges.
 	lastConfigured map[string]int
-	expected       map[string]int
+	// starved is, per pool, whether the previous round found requests queued
+	// while the host's CPU was full, so the log carries the change and not
+	// the condition. See noteStarved.
+	starved  map[string]bool
+	expected map[string]int
 
 	// lastRec is the recommendation last LOGGED for each pool — the value and when —
 	// so it is reported the first time it is seen, whenever it moves, and, as a sign
@@ -292,6 +296,7 @@ func New(cfg Config, log *slog.Logger) (*Loop, error) {
 		applyNow:       make(chan applyRequest),
 		lastConfigured: map[string]int{},
 		expected:       map[string]int{},
+		starved:        map[string]bool{},
 		cfg:            cfg,
 		log:            log,
 		metrics:        metrics.New(),
@@ -584,6 +589,8 @@ func (l *Loop) round(ctx context.Context) {
 		}
 	}
 
+	l.noteStarved(views, result.CPU, hostBusy, hostBusyKnown)
+
 	if l.applying() && l.reconciled {
 		l.applyPlan(roundCtx, result, now)
 	} else if l.forceApply && l.outcome.Error == "" {
@@ -593,6 +600,37 @@ func (l *Loop) round(ctx context.Context) {
 	}
 
 	l.save(now, false)
+}
+
+// noteStarved logs, on the transition only, a pool that has requests queued
+// while the host's CPU is full: the one situation in which a longer queue is
+// not a call for more workers, because another worker would find no core to
+// run on. The condition itself is on /metrics as cpu_starved_rounds and in
+// every round of the history; the log says when it began and when it ended,
+// which is what a load test or an incident wants to read back.
+func (l *Loop) noteStarved(views []observe.PoolView, cpu []plan.PoolCPU, hostBusy float64, known bool) {
+	ceilings := make(map[string]int, len(cpu))
+	for _, c := range cpu {
+		ceilings[c.Name] = c.Ceiling
+	}
+	for _, v := range views {
+		if v.Err != nil {
+			continue
+		}
+		now := known && v.QueueDepth > 0 && hostBusy >= state.StarvedBusyRatio
+		if now == l.starved[v.Name] {
+			continue
+		}
+		l.starved[v.Name] = now
+		if now {
+			l.log.Warn("Pool queued while the host's CPU was full: another worker would find no core to "+
+				"run on, so the queue is the CPU's, not the ceiling's",
+				"pool", v.Name, "queue", v.QueueDepth, "busy", v.ActiveNow, "configured", v.CurrentMaxChildren,
+				"cpu_ceiling", ceilings[v.Name], "host_busy", fmt.Sprintf("%.0f%%", hostBusy*100))
+		} else {
+			l.log.Info("No longer queued while the host's CPU was full", "pool", v.Name)
+		}
+	}
 }
 
 // logPlan reports each pool's recommendation the first time it is seen and whenever
