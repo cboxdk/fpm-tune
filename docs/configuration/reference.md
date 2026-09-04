@@ -103,6 +103,7 @@ It writes `zz-fpm-tune-status.conf`, validates, reloads, and rolls back if the m
 | `--cpu` | off | set `cpu = true` in the config; `--cpu=false` turns it off on a re-run |
 | `--metrics ADDR` | `127.0.0.1:9110` | address for `/metrics` |
 | `--print` | off | print the config and unit instead of installing them |
+| `--log-file PATH` | the journal | append the log to this file through the unit, with a logrotate snippet; `journal` goes back; a re-run keeps what the unit has |
 
 A first run writes the whole config; a re-run keeps it and changes only the keys named. Both rewrite the unit and restart the service. See [Running as a daemon](../operating/running-as-a-daemon.md).
 
@@ -162,6 +163,7 @@ metrics = 127.0.0.1:9110
 | `/usr/local/bin/fpm-tune` | the binary; install.sh falls back to `~/.local/bin`, then `~/bin` |
 | `/etc/fpm-tune/config` | the service settings |
 | `/etc/systemd/system/fpm-tune.service` | the unit `install-service` writes |
+| `/etc/logrotate.d/fpm-tune` | the logrotate snippet, when installed with `--log-file` |
 | `/var/lib/fpm-tune/state.json` | the learned baselines, and where php-fpm was last seen |
 | `/var/lib/fpm-tune/fpm-tune.lock` | the state lock; one process learns at a time |
 | `/var/lib/fpm-tune/control.sock` | the control socket, mode `0600`, root's |

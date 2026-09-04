@@ -23,7 +23,7 @@ A daemon in apply mode writes the file back on its next round, so switch it firs
 
 ```bash
 sudo systemctl disable --now fpm-tune
-sudo rm /etc/systemd/system/fpm-tune.service
+sudo rm /etc/systemd/system/fpm-tune.service /etc/logrotate.d/fpm-tune
 sudo systemctl daemon-reload
 sudo rm -r /etc/fpm-tune /var/lib/fpm-tune /run/fpm-tune
 sudo rm /etc/php/8.4/fpm/pool.d/zz-fpm-tune.conf /etc/php/8.4/fpm/pool.d/zz-fpm-tune-status.conf
@@ -31,7 +31,7 @@ sudo systemctl reload php8.4-fpm
 sudo rm /usr/local/bin/fpm-tune
 ```
 
-`/var/lib/fpm-tune` holds the state, the recommendation, the control socket and the backups; `/run/fpm-tune` holds the pool-directory locks. Deleting both drop-ins and reloading once returns every pool to its own configuration. If the binary went somewhere else (`~/.local/bin`, `~/bin`), remove it from there.
+`/var/lib/fpm-tune` holds the state, the recommendation, the control socket and the backups; `/run/fpm-tune` holds the pool-directory locks. The logrotate snippet exists only when the service was installed with `--log-file`, and the log file it names stays until you remove it. Deleting both drop-ins and reloading once returns every pool to its own configuration. If the binary went somewhere else (`~/.local/bin`, `~/bin`), remove it from there.
 
 ## Upgrading
 

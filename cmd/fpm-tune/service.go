@@ -26,6 +26,7 @@ const (
 	defaultMetricsAddr   = "127.0.0.1:9110"
 	unitPath             = "/etc/systemd/system/fpm-tune.service"
 	unitName             = "fpm-tune"
+	logrotatePath        = "/etc/logrotate.d/fpm-tune"
 )
 
 // loadConfigFile reads a key = value file, ignoring blank lines and # / ; comments.
@@ -108,7 +109,9 @@ func runInstallService(args []string) error {
 		cpu     = fs.Bool("cpu", false, "let what a pool's requests measured cap it: a cpu-limited pool is held at the "+
 			"busy workers that fill the CPU instead of the number memory allows. Off by default; the CPU "+
 			"shape is measured and reported either way. Re-run with -cpu or -cpu=false to switch")
-		print = fs.Bool("print", false, "print the unit and config instead of installing them")
+		print   = fs.Bool("print", false, "print the unit and config instead of installing them")
+		logFile = fs.String("log-file", "", "write the log to this file instead of the journal (systemd 240+), with a "+
+			"logrotate snippet beside it; `journal` goes back to the journal. A re-run keeps what the unit has")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "fpm-tune install-service — run fpm-tune in the background under "+
@@ -134,10 +137,23 @@ func runInstallService(args []string) error {
 		mode = "apply"
 	}
 	config := renderServiceConfig(mode, *metrics, *cpu)
-	unit := renderUnit(binPath)
+
+	// The log file lives in the unit, so a re-run that does not name it keeps
+	// what the unit has, the same way the config's keys are kept.
+	log := unitLogFile(unitPath)
+	if explicitFlag(fs, "log-file") {
+		log = *logFile
+		if log == "journal" {
+			log = ""
+		}
+	}
+	unit := renderUnit(binPath, log)
 
 	if *print {
 		fmt.Printf("# %s\n%s\n# %s\n%s", defaultConfigPath, config, unitPath, unit)
+		if log != "" {
+			fmt.Printf("\n# %s\n%s", logrotatePath, renderLogrotate(log))
+		}
 
 		return nil
 	}
@@ -194,6 +210,9 @@ func runInstallService(args []string) error {
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("cannot write %s: %w", unitPath, err)
 	}
+	if err := writeLogrotate(log); err != nil {
+		return err
+	}
 
 	if err := systemctl("daemon-reload"); err != nil {
 		return fmt.Errorf("wrote the unit, but `systemctl daemon-reload` failed: %w", err)
@@ -230,11 +249,16 @@ func runInstallService(args []string) error {
 		fmt.Printf("  note: /metrics is bound to %s — reachable off-box and unauthenticated, "+
 			"so keep it behind your firewall.\n", metricsAddr)
 	}
+	follow := "journalctl -u fpm-tune -f"
+	if log != "" {
+		follow = "tail -f " + log
+		fmt.Printf("  log:      %s (rotated by %s)\n", log, logrotatePath)
+	}
 	fmt.Print("\nSwitch mode any time (no unit edit needed):\n" +
 		"  fpm-tune mode apply       # let it act on what it finds\n" +
 		"  fpm-tune mode advisory    # back to watch-only\n\n" +
 		"Watch it:   fpm-tune top\n" +
-		"Follow it:  journalctl -u fpm-tune -f\n")
+		"Follow it:  " + follow + "\n")
 
 	return nil
 }
@@ -426,7 +450,86 @@ metrics = %s
 `, defaultConfigPath, mode, metrics, cpuLine, defaultRecommendPath)
 }
 
-func renderUnit(binPath string) string {
+// explicitFlag reports whether the operator named the flag, whatever its value.
+func explicitFlag(fs *flag.FlagSet, name string) bool {
+	named := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			named = true
+		}
+	})
+
+	return named
+}
+
+// unitLogFile is the log file the installed unit writes to, from its
+// StandardOutput line, or empty when it logs to the journal or there is no
+// unit yet.
+func unitLogFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "StandardOutput=append:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+
+	return ""
+}
+
+// renderLogrotate is the logrotate snippet for the log file. copytruncate,
+// because systemd opens the file once at start and would go on writing to a
+// renamed file otherwise; a truncated file is picked up in place.
+func renderLogrotate(logFile string) string {
+	return fmt.Sprintf(`%s {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+`, logFile)
+}
+
+// writeLogrotate writes the snippet for a log file, or removes it when the
+// log goes back to the journal. A host without logrotate (no /etc/logrotate.d)
+// gets a note instead of a file nothing reads.
+func writeLogrotate(logFile string) error {
+	if logFile == "" {
+		if err := os.Remove(logrotatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("cannot remove %s: %w", logrotatePath, err)
+		}
+
+		return nil
+	}
+	if _, err := os.Stat(filepath.Dir(logrotatePath)); err != nil {
+		fmt.Printf("  note: no %s on this host, so %s will not be rotated; arrange that yourself\n",
+			filepath.Dir(logrotatePath), logFile)
+
+		return nil
+	}
+	if err := os.WriteFile(logrotatePath, []byte(renderLogrotate(logFile)), 0o644); err != nil {
+		return fmt.Errorf("cannot write %s: %w", logrotatePath, err)
+	}
+
+	return nil
+}
+
+// renderUnit is the systemd unit. With a log file, stdout is appended to it
+// by systemd itself (no logging code, no file handling in the daemon) and
+// stderr follows; without one, both go to the journal.
+func renderUnit(binPath, logFile string) string {
+	output := ""
+	if logFile != "" {
+		output = fmt.Sprintf("# The log goes to a file rather than the journal. systemd opens it once at\n"+
+			"# start, so logrotate truncates it in place (see %s).\n"+
+			"StandardOutput=append:%s\nStandardError=inherit\n", logrotatePath, logFile)
+	}
+
 	return fmt.Sprintf(`[Unit]
 Description=fpm-tune — size PHP-FPM pools against available memory
 # Wants, not Requires: a supervisor that dies with the thing it supervises cannot
@@ -438,12 +541,12 @@ After=php-fpm.service
 ExecStart=%s serve --config %s
 Restart=on-failure
 RestartSec=5
-# systemd owns the state directory with sensible permissions, rather than the tool
+%s# systemd owns the state directory with sensible permissions, rather than the tool
 # creating it under whatever umask it inherited.
 StateDirectory=fpm-tune
 StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
-`, binPath, defaultConfigPath)
+`, binPath, defaultConfigPath, output)
 }
