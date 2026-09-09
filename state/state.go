@@ -239,6 +239,21 @@ type PoolState struct {
 	CPUSamples   int64         `json:"cpu_samples,omitempty"`
 	CPUSeen      map[int]int64 `json:"cpu_seen,omitempty"`
 
+	// AggCPUCores and AggCPUBusy are EWMAs (alpha 0.2) of, per scrape
+	// interval, the pool's CPU cores in use (worker tick deltas / wall) and
+	// its busy-worker snapshot. Their ratio is the aggregate CPU share per
+	// busy worker - the fallback shape signal for pools whose per-request
+	// histogram stays empty: requests faster than minCPURequestMicros never
+	// inform it, and under saturation no worker is idle at scrape time so
+	// nothing is sampled at all. Tick deltas have neither blind spot, and
+	// while a single ActiveNow snapshot lies for fast requests (the pool
+	// reads idle almost every time it is looked at), the EWMA of many
+	// converges on true utilization - Little's law does the averaging.
+	// AggCPURounds counts contributing intervals; idle rounds do not count.
+	AggCPUCores  float64 `json:"agg_cpu_cores,omitempty"`
+	AggCPUBusy   float64 `json:"agg_cpu_busy,omitempty"`
+	AggCPURounds int64   `json:"agg_cpu_rounds,omitempty"`
+
 	// CPUTicksSeen is each live worker's cumulative CPU counter as of the last
 	// scrape, BoxCost the fit of the box's busy cores on this pool's own, and
 	// CPUStarvedRounds how many scrapes found requests queued while the box
@@ -377,6 +392,10 @@ type Options struct {
 	// MinMatureWorkers is how many such workers a scrape needs before it counts.
 	// One mature worker is an anecdote.
 	MinMatureWorkers int
+
+	// MinAggCPURounds is how many contributing scrape intervals the aggregate
+	// CPU share needs before it is trusted as a shape fallback. Zero means 5.
+	MinAggCPURounds int
 
 	// MinCPUReadings is how many requests a pool's CPU histogram needs before
 	// its shape is called anything, or allowed to cap the pool. See cpu.go.
@@ -521,6 +540,9 @@ func (o Options) Defaults() Options {
 	}
 	if o.PeakWindow <= 0 {
 		o.PeakWindow = 24 * time.Hour
+	}
+	if o.MinAggCPURounds <= 0 {
+		o.MinAggCPURounds = 5
 	}
 	if o.MinCPUReadings <= 0 {
 		o.MinCPUReadings = 20

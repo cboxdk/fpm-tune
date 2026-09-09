@@ -153,6 +153,16 @@ func (ps *PoolState) CPUShare(p float64) float64 {
 // CPUShapeKnown reports whether enough requests have been read to say what
 // shape this pool's requests have. Twenty is a few minutes on a busy pool and
 // an honest "not yet" on a quiet one.
+// AggregateCPUShare is the fallback shape signal: the EWMA CPU share per
+// busy worker, trusted once enough active intervals have contributed and the
+// pool has shown real concurrency. The bool reports whether to trust it.
+func (ps *PoolState) AggregateCPUShare(opts Options) (float64, bool) {
+	if ps.AggCPURounds < int64(opts.MinAggCPURounds) || ps.AggCPUBusy < 0.5 {
+		return 0, false
+	}
+	return ps.AggCPUCores / ps.AggCPUBusy, true
+}
+
 func (ps *PoolState) CPUShapeKnown(opts Options) bool {
 	opts = opts.Defaults()
 

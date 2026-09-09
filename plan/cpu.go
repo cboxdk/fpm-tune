@@ -68,6 +68,12 @@ type PoolCPU struct {
 	Headroom         float64
 	HeadroomFromPool bool
 
+	// AggregateBased reports that Shape and P50 come from the tick-delta
+	// aggregate (share per busy worker over EWMA'd intervals) rather than the
+	// per-request histogram - the fallback for pools whose requests are too
+	// fast, or too saturated, to ever inform the histogram.
+	AggregateBased bool
+
 	// StarvedRounds is how many scrapes found requests queued while the box
 	// was full: the direct observation that another worker would not have
 	// helped.
@@ -377,7 +383,19 @@ func cpuOf(
 			row.P90 = ps.CPUShare(0.90)
 			row.Samples = ps.CPUSamples
 			row.StarvedRounds = ps.CPUStarvedRounds
-			if ps.CPUShapeKnown(opts) {
+			shapeKnown := ps.CPUShapeKnown(opts)
+			if !shapeKnown {
+				// Per-request readings never arrived - requests under the
+				// 50ms floor, or a pool saturated enough that no worker was
+				// idle at scrape time. The tick-delta aggregate has neither
+				// blind spot; use it as the shape signal and say so.
+				if share, ok := ps.AggregateCPUShare(opts); ok {
+					row.P50 = share
+					row.AggregateBased = true
+					shapeKnown = true
+				}
+			}
+			if shapeKnown {
 				row.Shape, row.MillicoresPerWorker = cpuShape(row.P50)
 				row.BoxMillicoresPerWorker, row.Overhead, row.BoxMeasured = boxCost(ps, opts, row.MillicoresPerWorker)
 				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)

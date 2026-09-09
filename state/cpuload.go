@@ -144,6 +144,7 @@ func (s *State) LearnCPULoad(obs []Observation, sample CPULoadSample) {
 		if wall > 0 {
 			cores[i] = float64(ticks) / 100 / wall.Seconds()
 			total += cores[i]
+			ps.learnAggregateCPU(cores[i], o.ActiveNow)
 		}
 	}
 
@@ -245,3 +246,29 @@ func (ps *PoolState) BoxOverhead(opts Options) (float64, bool) {
 // maxBoxOverhead is the slope past which the fit is describing something other
 // than this pool's requests.
 const maxBoxOverhead = 20
+
+// aggEWMAAlpha weights the newest interval at a fifth: heavy enough to track
+// a workload change within a handful of scrapes, light enough that the
+// ActiveNow snapshot noise (a fast pool reads idle most times it is looked
+// at) averages out - the EWMA of many snapshots converges on utilization.
+const aggEWMAAlpha = 0.2
+
+// aggMinCores is the pool activity below which an interval teaches nothing:
+// an idle pool must not drag the aggregate share toward zero.
+const aggMinCores = 0.05
+
+// learnAggregateCPU folds one scrape interval into the aggregate CPU-share
+// EWMAs. See the field comments on PoolState.
+func (ps *PoolState) learnAggregateCPU(cores float64, activeNow int) {
+	if cores < aggMinCores {
+		return
+	}
+	busy := float64(activeNow)
+	if ps.AggCPURounds == 0 {
+		ps.AggCPUCores, ps.AggCPUBusy = cores, busy
+	} else {
+		ps.AggCPUCores += aggEWMAAlpha * (cores - ps.AggCPUCores)
+		ps.AggCPUBusy += aggEWMAAlpha * (busy - ps.AggCPUBusy)
+	}
+	ps.AggCPURounds++
+}
