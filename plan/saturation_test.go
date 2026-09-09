@@ -113,6 +113,48 @@ func TestBuild_StarvedOversizedPoolCutToMeasuredCores(t *testing.T) {
 		}
 	}
 
+	// THE FLAP ROUND - the regression that collapsed throughput live: the
+	// queue drains for one scrape (HitMaxChildren false), the starved gate
+	// does not fire, and the share-based ceiling used to explode (measured:
+	// share 5%, ceiling 80) letting the pool regrow toward memory's 30 -
+	// then the next starved round cut it again, and every flip reloaded the
+	// pool. On a saturated host the ceiling must come from measured cores
+	// in BOTH kinds of round, so the plan cannot flap.
+	flap := mkInput(primed(10))
+	flap.Views[0].QueueDepth = 0
+	flap.Views[0].ObservedPeak = 4
+	flap.Views[0].ActiveNow = 4
+	res, err = Build(flap)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, p := range res.Plan.Pools {
+		if p.Name == "www" && p.MaxChildren > 4 {
+			t.Errorf("MaxChildren = %d on the queue-drained round; the saturated host's ceiling must stay at 4 or the plan flaps (grow, cut, reload, repeat)", p.MaxChildren)
+		}
+	}
+
+	// An io-shaped pool on a host made busy by a NEIGHBOR must not be
+	// CPU-capped: it drives 0.3 of 2 cores, so the cores reading is not its
+	// to claim, and the share-based fill is large and non-binding.
+	ioState := state.New()
+	ioBase := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 30; i++ {
+		ioState.Learn(busy("www", 30*mb, ioBase.Add(time.Duration(i)*2*time.Minute)), state.Options{})
+	}
+	ioPS := ioState.Pools["www"]
+	ioPS.AggCPUCores, ioPS.AggCPUBusy, ioPS.AggCPURounds = 0.3, 14, 10
+	ioIn := mkInput(ioState)
+	res, err = Build(ioIn)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, p := range res.Plan.Pools {
+		if p.Name == "www" && p.MaxChildren <= 4 {
+			t.Errorf("MaxChildren = %d; an io-shaped pool (0.3 cores driven) must not be cut to a CPU ceiling because a neighbor saturates the host", p.MaxChildren)
+		}
+	}
+
 	// The report tells the same story as the allocator.
 	res, err = Build(mkInput(primed(10)))
 	if err != nil {
@@ -148,13 +190,19 @@ func TestCPUCeilingFor_AggregateFallback(t *testing.T) {
 	}
 
 	// No aggregate either: no ceiling, exactly as before.
-	if got := cpuCeilingFor(ps, opts, 2000, 2.0); got != 0 {
+	if got := cpuCeilingFor(ps, opts, 2000, 2.0, 0.3, true); got != 0 {
 		t.Fatalf("without any shape signal the ceiling must stay 0, got %d", got)
 	}
 
-	// Aggregate primed: a CPU-heavy share yields a real ceiling.
+	// Aggregate primed, calm host: the share is honest and yields a ceiling.
 	ps.AggCPUCores, ps.AggCPUBusy, ps.AggCPURounds = 1.9, 2, 10
-	if got := cpuCeilingFor(ps, opts, 2000, 2.0); got <= 0 {
-		t.Fatalf("aggregate share should produce a ceiling, got %d", got)
+	if got := cpuCeilingFor(ps, opts, 2000, 2.0, 0.3, true); got <= 0 {
+		t.Fatalf("aggregate share should produce a ceiling on a calm host, got %d", got)
+	}
+
+	// Saturated host: the poisoned share must NOT decide - measured cores do.
+	ps.AggCPUBusy = 25 // 25 "busy" workers queuing on 2 cores: share reads 7.6%
+	if got := cpuCeilingFor(ps, opts, 2000, 2.0, 0.99, true); got != 4 {
+		t.Fatalf("saturated-host ceiling must be ceil(1.9 cores) x 2.0 = 4, got %d", got)
 	}
 }

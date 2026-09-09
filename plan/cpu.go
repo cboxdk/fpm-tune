@@ -249,30 +249,63 @@ func boxCost(ps *state.PoolState, opts state.Options, phpMillicores int) (millic
 // for a pool that has been watched long enough to be CUT on memory evidence
 // too. Twenty readings say what shape a pool's requests have; they are not
 // permission to take workers away. See cpu.md, "What --cpu does".
-func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, headroom float64) int {
+func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, headroom float64, hostBusy float64, hostBusyKnown bool) int {
 	if ps == nil || !ps.Trusted(opts) {
 		return 0
 	}
-	share := 0.0
-	switch {
-	case ps.CPUShapeKnown(opts):
-		share = ps.CPUShare(0.50)
-	default:
-		// Per-request readings never arrived - requests under the 50ms floor,
-		// or a pool saturated enough that no worker was idle at scrape time
-		// (#14). The tick-delta aggregate has neither blind spot; without this
-		// fallback the allocator's ceiling stayed 0 for exactly the workloads
-		// --cpu exists for, and only the REPORT told the truth.
-		aggShare, ok := ps.AggregateCPUShare(opts)
-		if !ok {
-			return 0
+	if ps.CPUShapeKnown(opts) {
+		_, php := cpuShape(ps.CPUShare(0.50))
+		box, _, _ := boxCost(ps, opts, php)
+
+		return cpuCeiling(fillWorkers(box, hostMillicores), hostMillicores, headroom)
+	}
+	// Per-request readings never arrived - requests under the 50ms floor, or a
+	// pool saturated enough that no worker was idle at scrape time (#14). The
+	// tick-delta aggregate has neither blind spot; without this fallback the
+	// allocator's ceiling stayed 0 for exactly the workloads --cpu exists for,
+	// and only the REPORT told the truth.
+	if fill, _, ok := aggregateFill(ps, opts, hostMillicores, hostBusy, hostBusyKnown); ok {
+		return cpuCeiling(fill, hostMillicores, headroom)
+	}
+
+	return 0
+}
+
+// aggregateFill is the fill count derived from the tick-delta aggregate, and
+// the ONE place that chooses between its two readings:
+//
+// On a calm host the share (cores per busy worker) is honest - the busy EWMA
+// counts workers that are actually working - and fill follows from the
+// per-worker cost like the per-request path.
+//
+// On a CPU-saturated host the share is poisoned: every queued worker reads
+// "busy", the denominator absorbs the oversubscription factor, and the
+// share-based fill explodes with the pool size (measured live: 25 workers on
+// 2 cores read share 5%, fill 40, ceiling 80 - which then FLAPPED against the
+// starved rounds' honest 4, reloading the pool every plan and collapsing
+// throughput). The kernel's tick deltas cannot be inflated by workers that
+// only wait: under saturation the cores the pool actually drives ARE its
+// fill. Both regimes now produce the same number, so the plan cannot flap.
+//
+// The cores reading is only claimed by a pool that drives a meaningful part
+// of the box (>= half the cores): an io-shaped pool on a host made busy by a
+// NEIGHBOR would otherwise be capped at ceil(0.3 cores) x headroom - a cut
+// no io pool deserves. Such a pool falls through to the share, whose fill is
+// large and non-binding, exactly as an io shape should be.
+func aggregateFill(ps *state.PoolState, opts state.Options, hostMillicores int, hostBusy float64, hostBusyKnown bool) (fill int, saturated, ok bool) {
+	share, shareOK := ps.AggregateCPUShare(opts)
+	if !shareOK {
+		return 0, false, false
+	}
+	if hostBusyKnown && hostBusy >= state.StarvedBusyRatio {
+		if cores, coresOK := ps.AggregateCPUCores(opts); coresOK && cores >= 0.5*float64(hostMillicores)/1000.0 {
+			return int(math.Ceil(cores)), true, true
 		}
-		share = aggShare
 	}
 	_, php := cpuShape(share)
 	box, _, _ := boxCost(ps, opts, php)
 
-	return cpuCeiling(fillWorkers(box, hostMillicores), hostMillicores, headroom)
+	return fillWorkers(box, hostMillicores), false, true
 }
 
 // Percent prints a share as a whole percentage, or a dash until there are
@@ -366,7 +399,8 @@ func cpuOf(
 	headroom float64,
 	allocation allocate.Plan,
 	ambiguous map[string]bool,
-	starved map[string]bool,
+	hostBusy float64,
+	hostBusyKnown bool,
 ) ([]PoolCPU, HostCPU) {
 	plans := make(map[string]allocate.PoolPlan, len(allocation.Pools))
 	for _, pp := range allocation.Pools {
@@ -424,21 +458,18 @@ func cpuOf(
 				row.BoxMillicoresPerWorker, row.Overhead, row.BoxMeasured = boxCost(ps, opts, row.MillicoresPerWorker)
 				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)
 				own, fromPool, _ := headroomFor(v.CPUHeadroom, headroom)
-				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, own)
-				row.Headroom, row.HeadroomFromPool = own, fromPool
-				if starved[v.Name] {
-					// The starved round's honest fill is the pool's measured
-					// parallelism, not the share (see SaturationMeasured).
-					// Mirrors what the plan just did to the allocator ceiling,
-					// so report and allocation tell one story.
-					if cores, ok := ps.AggregateCPUCores(opts); ok {
-						if fill := int(math.Ceil(cores)); fill < row.FillWorkers || row.FillWorkers == 0 {
-							row.FillWorkers = fill
-							row.Ceiling = cpuCeiling(fill, hostMillicores, own)
-							row.SaturationMeasured = true
-						}
+				if row.AggregateBased {
+					// The same regime choice the allocator makes (aggregateFill):
+					// under a saturated host the share is poisoned and the
+					// measured cores are the fill - report and allocation must
+					// tell ONE story, or the numbers flap between rounds.
+					if fill, saturated, ok := aggregateFill(ps, opts, hostMillicores, hostBusy, hostBusyKnown); ok {
+						row.FillWorkers = fill
+						row.SaturationMeasured = saturated
 					}
 				}
+				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, own)
+				row.Headroom, row.HeadroomFromPool = own, fromPool
 			}
 		}
 		if row.Shape != "" {
