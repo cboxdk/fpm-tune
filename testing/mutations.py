@@ -479,8 +479,8 @@ MUTATIONS = [
      "		bound := cpuBound[i]"),
     ("plan: the CPU ceiling ignores the confidence gate",
      "plan/cpu.go",
-     "	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {",
-     "	if ps == nil || !ps.CPUShapeKnown(opts) {"),
+     "	if ps == nil || !ps.Trusted(opts) {",
+     "	if ps == nil {"),
     # The box-cost fit stands on three guards: the box is attributed to the
     # pool that did the work, the slope is believed only with spread, and the
     # ceiling never drops below cores plus one.
@@ -498,8 +498,12 @@ MUTATIONS = [
      "	if floor := 1; ceiling < floor {"),
     ("plan: the CPU ceiling binds without --cpu",
      "plan/plan.go",
-     "	if cpuCeiling {\n		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom)\n	}\n",
-     "	pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom)\n"),
+     "	if cpuCeiling {\n		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom, hostBusy, hostBusyKnown)\n	}\n",
+     "	pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom, hostBusy, hostBusyKnown)\n"),
+    ("plan: the saturated aggregate fill trusts the poisoned share",
+     "plan/cpu.go",
+     "	if hostBusyKnown && hostBusy >= state.StarvedBusyRatio {\n		if cores, coresOK := ps.AggregateCPUCores(opts); coresOK && cores >= 0.35*float64(hostMillicores)/1000.0 {\n			return int(math.Ceil(cores)), true, true\n		}\n	}\n",
+     ""),
 ]
 
 env = dict(os.environ, GOTOOLCHAIN="go1.26.6")

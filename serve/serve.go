@@ -659,7 +659,9 @@ func (l *Loop) noteBound(cpu []plan.PoolCPU, pools []allocate.PoolPlan) {
 			l.log.Info("Pool bound by CPU rather than memory: past the workers that fill the cores it only "+
 				"gets slower, so the CPU ceiling is the one that matters",
 				"pool", c.Name, "cpu_ceiling", c.Ceiling, "memory_ceiling", memoryWant[c.Name],
-				"fill_workers", c.FillWorkers, "cpu_share", fmt.Sprintf("%.0f%%", c.P50*100), "ceiling", held)
+				"fill_workers", c.FillWorkers, "cpu_share", fmt.Sprintf("%.0f%%", c.P50*100),
+				"agg_cores", fmt.Sprintf("%.2f", c.AggCores), "agg_busy", fmt.Sprintf("%.1f", c.AggBusy),
+				"saturation_measured", c.SaturationMeasured, "ceiling", held)
 		case !first:
 			l.log.Info("Pool bound by memory again: its memory ceiling is below the workers that fill the cores",
 				"pool", c.Name, "cpu_ceiling", c.Ceiling, "memory_ceiling", memoryWant[c.Name])

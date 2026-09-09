@@ -68,6 +68,14 @@ type PoolCPU struct {
 	Headroom         float64
 	HeadroomFromPool bool
 
+	// AggCores and AggBusy expose the tick-delta aggregate the fallback read
+	// (cores the pool drives / busy-worker EWMA), zero until AggregateBased.
+	// They exist so a live system can SHOW why the regime rule chose share
+	// or cores - the first live run of this feature was undiagnosable
+	// without them.
+	AggCores float64
+	AggBusy  float64
+
 	// SaturationMeasured reports that FillWorkers and Ceiling come from the
 	// pool's measured parallelism (aggregate cores) rather than from the
 	// per-worker share: the pool was starved this round, where the share's
@@ -288,17 +296,22 @@ func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, 
 // fill. Both regimes now produce the same number, so the plan cannot flap.
 //
 // The cores reading is only claimed by a pool that drives a meaningful part
-// of the box (>= half the cores): an io-shaped pool on a host made busy by a
-// NEIGHBOR would otherwise be capped at ceil(0.3 cores) x headroom - a cut
+// of the box (>= 0.35 x the cores): an io-shaped pool on a host made busy by
+// a NEIGHBOR would otherwise be capped at ceil(0.3 cores) x headroom - a cut
 // no io pool deserves. Such a pool falls through to the share, whose fill is
-// large and non-binding, exactly as an io shape should be.
+// large and non-binding, exactly as an io shape should be. The threshold sits
+// deliberately low: a genuinely CPU-bound pool's measured cores DEFLATE under
+// host contention (the container gets fewer effective cores than its quota -
+// observed live at ~1.15 of 2 during a co-located build, a hair from a 0.5
+// threshold that consequently never fired), while an io pool's cores stay far
+// below either number.
 func aggregateFill(ps *state.PoolState, opts state.Options, hostMillicores int, hostBusy float64, hostBusyKnown bool) (fill int, saturated, ok bool) {
 	share, shareOK := ps.AggregateCPUShare(opts)
 	if !shareOK {
 		return 0, false, false
 	}
 	if hostBusyKnown && hostBusy >= state.StarvedBusyRatio {
-		if cores, coresOK := ps.AggregateCPUCores(opts); coresOK && cores >= 0.5*float64(hostMillicores)/1000.0 {
+		if cores, coresOK := ps.AggregateCPUCores(opts); coresOK && cores >= 0.35*float64(hostMillicores)/1000.0 {
 			return int(math.Ceil(cores)), true, true
 		}
 	}
@@ -459,6 +472,7 @@ func cpuOf(
 				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)
 				own, fromPool, _ := headroomFor(v.CPUHeadroom, headroom)
 				if row.AggregateBased {
+					row.AggCores, row.AggBusy = ps.AggCPUCores, ps.AggCPUBusy
 					// The same regime choice the allocator makes (aggregateFill):
 					// under a saturated host the share is poisoned and the
 					// measured cores are the fill - report and allocation must
