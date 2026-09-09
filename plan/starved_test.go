@@ -75,3 +75,48 @@ func TestBuild_StarvedPoolIsHeldNotGrown(t *testing.T) {
 		t.Fatalf("unknown host busy must not suppress growth, got %v", res.StarvedHeld)
 	}
 }
+
+// The ceiling-hit that arrives through the max_children_reached COUNTER -
+// queue drained between scrapes, QueueDepth back at 0 - must be held on a
+// saturated host exactly like the queued case. Gating on the queue snapshot
+// let these hits keep growing the pool (measured: 8 -> 21 workers under a
+// CPU-saturated microload with the queue reading empty at scrape time).
+func TestBuild_StarvedCounterPathIsHeldToo(t *testing.T) {
+	in := Input{
+		At: time.Now(),
+		Limits: budget.Limits{
+			MemoryBytes:   1 << 30,
+			CPUs:          2,
+			CPUMillicores: 2000,
+			Source:        budget.SourceCgroupV2,
+		},
+		Views: []observe.PoolView{{
+			Name:               "www",
+			CurrentMaxChildren: 8,
+			MaxChildrenKnown:   true,
+			ObservedPeak:       8,
+			QueueDepth:         0,
+			MaxChildrenReached: 12,
+			ActiveNow:          8,
+			Workers: []state.WorkerSample{
+				{PID: 1, PSSBytes: 30 << 20, Requests: 100},
+				{PID: 2, PSSBytes: 30 << 20, Requests: 100},
+			},
+		}},
+		State:         state.New(),
+		HostBusy:      1.0,
+		HostBusyKnown: true,
+	}
+	res, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.StarvedHeld) != 1 {
+		t.Fatalf("counter-path ceiling hit on a saturated host must be held, got StarvedHeld=%v", res.StarvedHeld)
+	}
+	for _, p := range res.Plan.Pools {
+		if p.Name == "www" && p.MaxChildren > 8 {
+			t.Fatalf("counter-path growth not suppressed: grew to %d", p.MaxChildren)
+		}
+	}
+}

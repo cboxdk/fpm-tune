@@ -294,12 +294,20 @@ func Build(in Input) (Result, error) {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
 
-		// A queue while the host's CPU is full is not a call for more workers
-		// (noteStarved's own diagnosis). Growth on that signal only adds
-		// context switching, so the ceiling-hit is ignored for this round -
-		// the pool keeps its size and the queue drains when the CPU does.
-		if pool.HitMaxChildren && in.HostBusyKnown && in.HostBusy >= state.StarvedBusyRatio &&
-			view.QueueDepth > 0 {
+		// A ceiling-hit while the host's CPU is full is not a call for more
+		// workers (noteStarved's own diagnosis). Growth on that signal only
+		// adds context switching, so it is ignored for this round - the pool
+		// keeps its size and the pressure drains when the CPU does.
+		//
+		// Deliberately NOT conditioned on the instantaneous QueueDepth: the
+		// ceiling-hit also arrives via the max_children_reached COUNTER, and
+		// a queue that drained between scrapes left the counter incremented
+		// with QueueDepth back at 0. Gating on the snapshot let exactly those
+		// hits keep growing a pool on a saturated host - measured on a 2-CPU
+		// container under a 0.1ms-request flood: 8 -> 21 workers and a p99
+		// from 111ms to 174ms, with the growth arriving through the counter
+		// path in the rounds where the queue happened to read empty.
+		if pool.HitMaxChildren && in.HostBusyKnown && in.HostBusy >= state.StarvedBusyRatio {
 			pool.HitMaxChildren = false
 			// The CPU is full at the pool's CURRENT size, so that IS its CPU
 			// ceiling for this round: allocate already knows how to hold a
