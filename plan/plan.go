@@ -90,6 +90,17 @@ type Input struct {
 	// DefaultCPUHeadroom.
 	CPUHeadroom float64
 
+	// HostBusy is the box's busy CPU fraction over the last interval, and
+	// HostBusyKnown whether it could be read. With both, a pool that queued
+	// while the host's CPU was full is HELD rather than grown: another worker
+	// would find no core to run on, so growing only adds context switching -
+	// measured on a 2-CPU container, growing 8 -> 21 workers under a
+	// CPU-saturated queue cost 16% throughput. serve already diagnosed and
+	// logged exactly this ("the queue is the CPU's, not the ceiling's") while
+	// the plan grew the pool anyway.
+	HostBusy      float64
+	HostBusyKnown bool
+
 	// ReserveBytes overrides the profile's reserve when non-zero.
 	ReserveBytes int64
 
@@ -152,6 +163,10 @@ type Result struct {
 	// Bootstrapped names the pools sized from a profile rather than from
 	// measurement, so the output can say which numbers are guesses.
 	Bootstrapped []string
+
+	// StarvedHeld lists pools whose ceiling-hit was ignored this round because
+	// the host's CPU was full while they queued - growth would add no service.
+	StarvedHeld []string
 
 	// Unreachable names pools that could not be scraped. Their memory is left
 	// allocated to them: a pool that is merely restarting must not have its
@@ -277,6 +292,23 @@ func Build(in Input) (Result, error) {
 			in.CPUCeiling, hostCPU, poolHeadroom)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
+		}
+
+		// A queue while the host's CPU is full is not a call for more workers
+		// (noteStarved's own diagnosis). Growth on that signal only adds
+		// context switching, so the ceiling-hit is ignored for this round -
+		// the pool keeps its size and the queue drains when the CPU does.
+		if pool.HitMaxChildren && in.HostBusyKnown && in.HostBusy >= state.StarvedBusyRatio &&
+			view.QueueDepth > 0 {
+			pool.HitMaxChildren = false
+			// The CPU is full at the pool's CURRENT size, so that IS its CPU
+			// ceiling for this round: allocate already knows how to hold a
+			// pool there, and headroom-driven demand growth is capped by the
+			// same number instead of asking for workers no core can run.
+			if pool.CPUCeiling == 0 || pool.CPUCeiling > view.CurrentMaxChildren {
+				pool.CPUCeiling = view.CurrentMaxChildren
+			}
+			result.StarvedHeld = append(result.StarvedHeld, view.Name)
 		}
 
 		workload, known := WorkloadByName(view.Workload, in.Workload)

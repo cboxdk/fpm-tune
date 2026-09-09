@@ -554,6 +554,8 @@ func (l *Loop) round(ctx context.Context) {
 		CPUHeadroom:     l.cfg.CPUHeadroom,
 		CgroupUsage:     usage,
 		HasCgroupUsage:  hasCgroup,
+		HostBusy:        hostBusy,
+		HostBusyKnown:   hostBusyKnown,
 	})
 	if err != nil {
 		// A host that cannot fit its pools is exactly where the metrics matter,
