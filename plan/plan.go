@@ -8,6 +8,7 @@ package plan
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -313,8 +314,29 @@ func Build(in Input) (Result, error) {
 			// ceiling for this round: allocate already knows how to hold a
 			// pool there, and headroom-driven demand growth is capped by the
 			// same number instead of asking for workers no core can run.
-			if pool.CPUCeiling == 0 || pool.CPUCeiling > view.CurrentMaxChildren {
-				pool.CPUCeiling = view.CurrentMaxChildren
+			held := view.CurrentMaxChildren
+			// Better than holding: the kernel's tick deltas say how many cores
+			// this pool ACTUALLY drives with its queue full - its measured
+			// parallelism. The share-based fill is circular here (every worker
+			// reads "busy" while queuing for a core, so fill converges to the
+			// current size, whatever it is), but tick deltas cannot be inflated
+			// by workers that only wait. An OVERSIZED pool - 16 workers on the
+			// 2 cores it saturates - gets a ceiling at cores x headroom instead
+			// of being frozen at 16. Gated like every other cut: on the pool's
+			// trusted baseline AND on --cpu, because a cap below the configured
+			// ceiling IS a cut - without the flag the pool is held, phase-1
+			// style, and the report still shows what --cpu would do.
+			if in.CPUCeiling && in.State != nil {
+				if ps := in.State.Lookup(view.Target.ConfigPath, view.Name); ps != nil && ps.Trusted(stateOpts) {
+					if cores, ok := ps.AggregateCPUCores(stateOpts); ok {
+						if measured := cpuCeiling(int(math.Ceil(cores)), hostCPU, poolHeadroom); measured < held {
+							held = measured
+						}
+					}
+				}
+			}
+			if pool.CPUCeiling == 0 || pool.CPUCeiling > held {
+				pool.CPUCeiling = held
 			}
 			result.StarvedHeld = append(result.StarvedHeld, view.Name)
 		}
@@ -376,7 +398,11 @@ func Build(in Input) (Result, error) {
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
 	result.Advice = adviceFor(in.Views, in.State, allocation)
-	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, headroom, allocation, ambiguous)
+	starvedSet := make(map[string]bool, len(result.StarvedHeld))
+	for _, name := range result.StarvedHeld {
+		starvedSet[name] = true
+	}
+	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, headroom, allocation, ambiguous, starvedSet)
 	result.CPUCeiling = in.CPUCeiling
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage

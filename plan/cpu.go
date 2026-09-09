@@ -68,6 +68,13 @@ type PoolCPU struct {
 	Headroom         float64
 	HeadroomFromPool bool
 
+	// SaturationMeasured reports that FillWorkers and Ceiling come from the
+	// pool's measured parallelism (aggregate cores) rather than from the
+	// per-worker share: the pool was starved this round, where the share's
+	// busy-worker denominator absorbs the oversubscription factor and the
+	// share-based fill circles back to the current size.
+	SaturationMeasured bool
+
 	// AggregateBased reports that Shape and P50 come from the tick-delta
 	// aggregate (share per busy worker over EWMA'd intervals) rather than the
 	// per-request histogram - the fallback for pools whose requests are too
@@ -243,10 +250,26 @@ func boxCost(ps *state.PoolState, opts state.Options, phpMillicores int) (millic
 // too. Twenty readings say what shape a pool's requests have; they are not
 // permission to take workers away. See cpu.md, "What --cpu does".
 func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, headroom float64) int {
-	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {
+	if ps == nil || !ps.Trusted(opts) {
 		return 0
 	}
-	_, php := cpuShape(ps.CPUShare(0.50))
+	share := 0.0
+	switch {
+	case ps.CPUShapeKnown(opts):
+		share = ps.CPUShare(0.50)
+	default:
+		// Per-request readings never arrived - requests under the 50ms floor,
+		// or a pool saturated enough that no worker was idle at scrape time
+		// (#14). The tick-delta aggregate has neither blind spot; without this
+		// fallback the allocator's ceiling stayed 0 for exactly the workloads
+		// --cpu exists for, and only the REPORT told the truth.
+		aggShare, ok := ps.AggregateCPUShare(opts)
+		if !ok {
+			return 0
+		}
+		share = aggShare
+	}
+	_, php := cpuShape(share)
 	box, _, _ := boxCost(ps, opts, php)
 
 	return cpuCeiling(fillWorkers(box, hostMillicores), hostMillicores, headroom)
@@ -343,6 +366,7 @@ func cpuOf(
 	headroom float64,
 	allocation allocate.Plan,
 	ambiguous map[string]bool,
+	starved map[string]bool,
 ) ([]PoolCPU, HostCPU) {
 	plans := make(map[string]allocate.PoolPlan, len(allocation.Pools))
 	for _, pp := range allocation.Pools {
@@ -402,6 +426,19 @@ func cpuOf(
 				own, fromPool, _ := headroomFor(v.CPUHeadroom, headroom)
 				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, own)
 				row.Headroom, row.HeadroomFromPool = own, fromPool
+				if starved[v.Name] {
+					// The starved round's honest fill is the pool's measured
+					// parallelism, not the share (see SaturationMeasured).
+					// Mirrors what the plan just did to the allocator ceiling,
+					// so report and allocation tell one story.
+					if cores, ok := ps.AggregateCPUCores(opts); ok {
+						if fill := int(math.Ceil(cores)); fill < row.FillWorkers || row.FillWorkers == 0 {
+							row.FillWorkers = fill
+							row.Ceiling = cpuCeiling(fill, hostMillicores, own)
+							row.SaturationMeasured = true
+						}
+					}
+				}
 			}
 		}
 		if row.Shape != "" {

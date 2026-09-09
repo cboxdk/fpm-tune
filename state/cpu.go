@@ -163,6 +163,19 @@ func (ps *PoolState) AggregateCPUShare(opts Options) (float64, bool) {
 	return ps.AggCPUCores / ps.AggCPUBusy, true
 }
 
+// AggregateCPUCores is the pool's measured parallelism: the EWMA of the cores
+// its workers actually drive, straight from kernel tick deltas. Same trust
+// guards as the share. Under saturation this is the honest fill signal - the
+// share's ActiveNow denominator absorbs the oversubscription factor (8 busy
+// workers on 2 cores read ~24% each), but tick deltas cannot be inflated by
+// workers that only queue.
+func (ps *PoolState) AggregateCPUCores(opts Options) (float64, bool) {
+	if ps.AggCPURounds < int64(opts.MinAggCPURounds) || ps.AggCPUBusy < 0.5 {
+		return 0, false
+	}
+	return ps.AggCPUCores, true
+}
+
 func (ps *PoolState) CPUShapeKnown(opts Options) bool {
 	opts = opts.Defaults()
 
