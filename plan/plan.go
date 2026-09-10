@@ -289,7 +289,7 @@ func Build(in Input) (Result, error) {
 			badHeadrooms = append(badHeadrooms, fmt.Sprintf("%s (%q)", view.Name, view.CPUHeadroom))
 		}
 		pool, bootstrapped := poolFor(view, in.State, profile, stateOpts, at, ambiguous[view.Name],
-			in.CPUCeiling, hostCPU, poolHeadroom)
+			in.CPUCeiling, hostCPU, poolHeadroom, in.HostBusy, in.HostBusyKnown)
 		if bootstrapped {
 			result.Bootstrapped = append(result.Bootstrapped, view.Name)
 		}
@@ -313,6 +313,12 @@ func Build(in Input) (Result, error) {
 			// ceiling for this round: allocate already knows how to hold a
 			// pool there, and headroom-driven demand growth is capped by the
 			// same number instead of asking for workers no core can run.
+			// The cut below the current size does NOT happen here: with --cpu
+			// on, cpuCeilingFor already derives the ceiling from the measured
+			// cores whenever the host is CPU-saturated (the aggregate share is
+			// unusable in that regime - see cpu.go), so both the starved and
+			// the queue-drained rounds agree on the same number and the plan
+			// cannot flap between them. This block only guarantees the hold.
 			if pool.CPUCeiling == 0 || pool.CPUCeiling > view.CurrentMaxChildren {
 				pool.CPUCeiling = view.CurrentMaxChildren
 			}
@@ -376,7 +382,7 @@ func Build(in Input) (Result, error) {
 	result.WorstCaseBytes = worstCase(allocation, in.State, mastersOf(in.Views))
 	result.Distribution = distributionOf(in.Views, in.State)
 	result.Advice = adviceFor(in.Views, in.State, allocation)
-	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, headroom, allocation, ambiguous)
+	result.CPU, result.HostCPU = cpuOf(in.Views, in.State, stateOpts, hostCPU, headroom, allocation, ambiguous, in.HostBusy, in.HostBusyKnown)
 	result.CPUCeiling = in.CPUCeiling
 	result.CgroupUsage = in.CgroupUsage
 	result.HasCgroupUsage = in.HasCgroupUsage
@@ -582,6 +588,8 @@ func poolFor(
 	cpuCeiling bool,
 	hostMillicores int,
 	headroom float64,
+	hostBusy float64,
+	hostBusyKnown bool,
 ) (allocate.Pool, bool) {
 	pool := allocate.Pool{
 		Name:               view.Name,
@@ -681,7 +689,7 @@ func poolFor(
 	// for a pool trusted enough to be cut on memory evidence — the same gate,
 	// because a cap below the configured ceiling IS a cut.
 	if cpuCeiling {
-		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom)
+		pool.CPUCeiling = cpuCeilingFor(ps, opts, hostMillicores, headroom, hostBusy, hostBusyKnown)
 	}
 
 	// A pool whose configured ceiling could not be read is in the same position

@@ -68,6 +68,21 @@ type PoolCPU struct {
 	Headroom         float64
 	HeadroomFromPool bool
 
+	// AggCores and AggBusy expose the tick-delta aggregate the fallback read
+	// (cores the pool drives / busy-worker EWMA), zero until AggregateBased.
+	// They exist so a live system can SHOW why the regime rule chose share
+	// or cores - the first live run of this feature was undiagnosable
+	// without them.
+	AggCores float64
+	AggBusy  float64
+
+	// SaturationMeasured reports that FillWorkers and Ceiling come from the
+	// pool's measured parallelism (aggregate cores) rather than from the
+	// per-worker share: the pool was starved this round, where the share's
+	// busy-worker denominator absorbs the oversubscription factor and the
+	// share-based fill circles back to the current size.
+	SaturationMeasured bool
+
 	// AggregateBased reports that Shape and P50 come from the tick-delta
 	// aggregate (share per busy worker over EWMA'd intervals) rather than the
 	// per-request histogram - the fallback for pools whose requests are too
@@ -242,14 +257,68 @@ func boxCost(ps *state.PoolState, opts state.Options, phpMillicores int) (millic
 // for a pool that has been watched long enough to be CUT on memory evidence
 // too. Twenty readings say what shape a pool's requests have; they are not
 // permission to take workers away. See cpu.md, "What --cpu does".
-func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, headroom float64) int {
-	if ps == nil || !ps.Trusted(opts) || !ps.CPUShapeKnown(opts) {
+func cpuCeilingFor(ps *state.PoolState, opts state.Options, hostMillicores int, headroom float64, hostBusy float64, hostBusyKnown bool) int {
+	if ps == nil || !ps.Trusted(opts) {
 		return 0
 	}
-	_, php := cpuShape(ps.CPUShare(0.50))
+	if ps.CPUShapeKnown(opts) {
+		_, php := cpuShape(ps.CPUShare(0.50))
+		box, _, _ := boxCost(ps, opts, php)
+
+		return cpuCeiling(fillWorkers(box, hostMillicores), hostMillicores, headroom)
+	}
+	// Per-request readings never arrived - requests under the 50ms floor, or a
+	// pool saturated enough that no worker was idle at scrape time (#14). The
+	// tick-delta aggregate has neither blind spot; without this fallback the
+	// allocator's ceiling stayed 0 for exactly the workloads --cpu exists for,
+	// and only the REPORT told the truth.
+	if fill, _, ok := aggregateFill(ps, opts, hostMillicores, hostBusy, hostBusyKnown); ok {
+		return cpuCeiling(fill, hostMillicores, headroom)
+	}
+
+	return 0
+}
+
+// aggregateFill is the fill count derived from the tick-delta aggregate, and
+// the ONE place that chooses between its two readings:
+//
+// On a calm host the share (cores per busy worker) is honest - the busy EWMA
+// counts workers that are actually working - and fill follows from the
+// per-worker cost like the per-request path.
+//
+// On a CPU-saturated host the share is poisoned: every queued worker reads
+// "busy", the denominator absorbs the oversubscription factor, and the
+// share-based fill explodes with the pool size (measured live: 25 workers on
+// 2 cores read share 5%, fill 40, ceiling 80 - which then FLAPPED against the
+// starved rounds' honest 4, reloading the pool every plan and collapsing
+// throughput). The kernel's tick deltas cannot be inflated by workers that
+// only wait: under saturation the cores the pool actually drives ARE its
+// fill. Both regimes now produce the same number, so the plan cannot flap.
+//
+// The cores reading is only claimed by a pool that drives a meaningful part
+// of the box (>= 0.35 x the cores): an io-shaped pool on a host made busy by
+// a NEIGHBOR would otherwise be capped at ceil(0.3 cores) x headroom - a cut
+// no io pool deserves. Such a pool falls through to the share, whose fill is
+// large and non-binding, exactly as an io shape should be. The threshold sits
+// deliberately low: a genuinely CPU-bound pool's measured cores DEFLATE under
+// host contention (the container gets fewer effective cores than its quota -
+// observed live at ~1.15 of 2 during a co-located build, a hair from a 0.5
+// threshold that consequently never fired), while an io pool's cores stay far
+// below either number.
+func aggregateFill(ps *state.PoolState, opts state.Options, hostMillicores int, hostBusy float64, hostBusyKnown bool) (fill int, saturated, ok bool) {
+	share, shareOK := ps.AggregateCPUShare(opts)
+	if !shareOK {
+		return 0, false, false
+	}
+	if hostBusyKnown && hostBusy >= state.StarvedBusyRatio {
+		if cores, coresOK := ps.AggregateCPUCores(opts); coresOK && cores >= 0.35*float64(hostMillicores)/1000.0 {
+			return int(math.Ceil(cores)), true, true
+		}
+	}
+	_, php := cpuShape(share)
 	box, _, _ := boxCost(ps, opts, php)
 
-	return cpuCeiling(fillWorkers(box, hostMillicores), hostMillicores, headroom)
+	return fillWorkers(box, hostMillicores), false, true
 }
 
 // Percent prints a share as a whole percentage, or a dash until there are
@@ -343,6 +412,8 @@ func cpuOf(
 	headroom float64,
 	allocation allocate.Plan,
 	ambiguous map[string]bool,
+	hostBusy float64,
+	hostBusyKnown bool,
 ) ([]PoolCPU, HostCPU) {
 	plans := make(map[string]allocate.PoolPlan, len(allocation.Pools))
 	for _, pp := range allocation.Pools {
@@ -400,6 +471,17 @@ func cpuOf(
 				row.BoxMillicoresPerWorker, row.Overhead, row.BoxMeasured = boxCost(ps, opts, row.MillicoresPerWorker)
 				row.FillWorkers = fillWorkers(row.BoxMillicoresPerWorker, hostMillicores)
 				own, fromPool, _ := headroomFor(v.CPUHeadroom, headroom)
+				if row.AggregateBased {
+					row.AggCores, row.AggBusy = ps.AggCPUCores, ps.AggCPUBusy
+					// The same regime choice the allocator makes (aggregateFill):
+					// under a saturated host the share is poisoned and the
+					// measured cores are the fill - report and allocation must
+					// tell ONE story, or the numbers flap between rounds.
+					if fill, saturated, ok := aggregateFill(ps, opts, hostMillicores, hostBusy, hostBusyKnown); ok {
+						row.FillWorkers = fill
+						row.SaturationMeasured = saturated
+					}
+				}
 				row.Ceiling = cpuCeiling(row.FillWorkers, hostMillicores, own)
 				row.Headroom, row.HeadroomFromPool = own, fromPool
 			}
